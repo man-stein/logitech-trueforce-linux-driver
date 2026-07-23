@@ -201,14 +201,13 @@ struct dd_lg4ff_alternate_mode {
 	const char *name;
 };
 
-/*
- * Device table, trimmed to the G923 (c266) row. set_range is left NULL
- * until the command/engine port task adds dd_lg4ff_set_range_g25(); it
- * is not called before then.
- */
+/* Forward declaration: defined below, needed by the device table row. */
+static void dd_lg4ff_set_range_g25(struct hid_device *hid, u16 range);
+
+/* Device table, trimmed to the G923 (c266) row. */
 static const struct dd_lg4ff_wheel dd_lg4ff_devices[] __maybe_unused = {
 	{USB_DEVICE_ID_LOGITECH_G923_WHEEL,
-		dd_lg4ff_wheel_effects, 40, 900, 0, NULL},
+		dd_lg4ff_wheel_effects, 40, 900, 0, dd_lg4ff_set_range_g25},
 };
 
 /* Multimode wheel table, trimmed to the G923 PS (c267) and G923 (c266) rows. */
@@ -1013,6 +1012,164 @@ static int __maybe_unused dd_lg4ff_play_effect(struct input_dev *dev, int effect
 	spin_unlock_irqrestore(&entry->timer_lock, flags);
 
 	return 0;
+}
+
+/*
+ * Per-device state initializer, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:1255-1283). Fills wdata's product/range/capabilities fields
+ * from the wheel table row (dd_lg4ff_devices[]) and, for a multimode wheel,
+ * layers on the alternate-mode bitmask and the real_tag/real_name pointers
+ * used by mode switching. Not yet called: its caller, dd_lg4ff_init(),
+ * arrives in a later task.
+ */
+static void __maybe_unused dd_lg4ff_init_wheel_data(struct dd_lg4ff_wheel_data * const wdata, const struct dd_lg4ff_wheel *wheel,
+				  const struct dd_lg4ff_multimode_wheel *mmode_wheel,
+				  const u16 real_product_id)
+{
+	u32 alternate_modes = 0;
+	const char *real_tag = NULL;
+	const char *real_name = NULL;
+
+	if (mmode_wheel) {
+		alternate_modes = mmode_wheel->alternate_modes;
+		real_tag = mmode_wheel->real_tag;
+		real_name = mmode_wheel->real_name;
+	}
+
+	{
+		struct dd_lg4ff_wheel_data t_wdata =  { .product_id = wheel->product_id,
+						     .real_product_id = real_product_id,
+						     .combine = 0,
+						     .min_range = wheel->min_range,
+						     .max_range = wheel->max_range,
+						     .set_range = wheel->set_range,
+						     .alternate_modes = alternate_modes,
+						     .real_tag = real_tag,
+						     .real_name = real_name,
+						     .capabilities = wheel->capabilities };
+
+		memcpy(wdata, &t_wdata, sizeof(t_wdata));
+	}
+}
+
+/*
+ * Default autocentering command sender, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:1287-1350). Compatible with every wheel we carry (the G923
+ * family); the Formula Force EX variant (hid-lg4ff.c:1353-1376) is dropped,
+ * matching the trimmed device table. Not yet wired to an input_dev's
+ * ff_device: that assignment lands with dd_lg4ff_init() in a later task.
+ */
+static void __maybe_unused dd_lg4ff_set_autocenter_default(struct input_dev *dev, u16 magnitude)
+{
+	struct hid_device *hid = input_get_drvdata(dev);
+	u8 cmd[7];
+	u32 expand_a, expand_b;
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return;
+	}
+
+	entry->wdata.autocenter = magnitude;
+
+	/* De-activate Auto-Center */
+	if (magnitude == 0) {
+		cmd[0] = 0xf5;
+		cmd[1] = 0x00;
+		cmd[2] = 0x00;
+		cmd[3] = 0x00;
+		cmd[4] = 0x00;
+		cmd[5] = 0x00;
+		cmd[6] = 0x00;
+		dd_lg4ff_send_cmd(entry, cmd);
+		return;
+	}
+
+	if (magnitude <= 0xaaaa) {
+		expand_a = 0x0c * magnitude;
+		expand_b = 0x80 * magnitude;
+	} else {
+		expand_a = (0x0c * 0xaaaa) + 0x06 * (magnitude - 0xaaaa);
+		expand_b = (0x80 * 0xaaaa) + 0xff * (magnitude - 0xaaaa);
+	}
+
+	/* Adjust for non-MOMO wheels */
+	switch (entry->wdata.product_id) {
+	case USB_DEVICE_ID_LOGITECH_MOMO_WHEEL:
+	case USB_DEVICE_ID_LOGITECH_MOMO_WHEEL2:
+		break;
+	default:
+		expand_a = expand_a >> 1;
+		break;
+	}
+
+	cmd[0] = 0xfe;
+	cmd[1] = 0x0d;
+	cmd[2] = expand_a / 0xaaaa;
+	cmd[3] = expand_a / 0xaaaa;
+	cmd[4] = expand_b / 0xaaaa;
+	cmd[5] = 0x00;
+	cmd[6] = 0x00;
+	dd_lg4ff_send_cmd(entry, cmd);
+
+	/* Activate Auto-Center */
+	cmd[0] = 0x14;
+	cmd[1] = 0x00;
+	cmd[2] = 0x00;
+	cmd[3] = 0x00;
+	cmd[4] = 0x00;
+	cmd[5] = 0x00;
+	cmd[6] = 0x00;
+	dd_lg4ff_send_cmd(entry, cmd);
+}
+
+/*
+ * Range-set command sender for the G25/G27/DFGT/G923 family, ported
+ * verbatim from new-lg4ff (hid-lg4ff.c:1379-1398). The Driving Force Pro
+ * variant (hid-lg4ff.c:1401-1455) is dropped: no wheel in the trimmed
+ * device table needs it. Wired into dd_lg4ff_devices[]'s G923 row above.
+ */
+static void dd_lg4ff_set_range_g25(struct hid_device *hid, u16 range)
+{
+	struct dd_lg4ff_device_entry *entry;
+	u8 cmd[7];
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return;
+	}
+
+	DD_LG4FF_DEBUG("G25/G27/DFGT: setting range to %u", range);
+
+	cmd[0] = 0xf8;
+	cmd[1] = 0x81;
+	cmd[2] = range & 0x00ff;
+	cmd[3] = (range & 0xff00) >> 8;
+	cmd[4] = 0x00;
+	cmd[5] = 0x00;
+	cmd[6] = 0x00;
+	dd_lg4ff_send_cmd(entry, cmd);
+}
+
+/*
+ * ff->set_gain callback, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:1457-1468). Just stores the gain; dd_lg4ff_timer() (above)
+ * is what folds it into the force math on the next tick. Not yet wired to
+ * an input_dev's ff_device: that assignment lands with dd_lg4ff_init() in
+ * a later task.
+ */
+static void __maybe_unused dd_lg4ff_set_gain(struct input_dev *dev, u16 gain)
+{
+	struct hid_device *hid = input_get_drvdata(dev);
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return;
+	}
+
+	entry->wdata.gain = gain;
 }
 
 int dd_lg4ff_init(struct hid_device *hdev)
