@@ -14722,6 +14722,37 @@ static int hidpp_dd_minimal_probe(struct hid_device *hdev)
 	return ret;
 }
 
+/*
+ * Probe path for the G923 classic FFB engine (HIDPP_QUIRK_CLASS_LG4FF,
+ * PlayStation c266/c267): these wheels speak the pre-HID++ Logitech wheel
+ * protocol, so hidpp_validate_device never finds HID++ reports on any of
+ * their interfaces and this runs from the same "not HID++" branch as the
+ * RS50/G Pro minimal probe. Unlike that path, FFB itself lives here: clear
+ * HID_CONNECT_FF before hid_hw_start so input_ff_create (inside
+ * dd_lg4ff_init) creates and owns the ff_device, mirroring new-lg4ff's
+ * hid-lg.c:797-800.
+ */
+static int hidpp_dd_lg4ff_probe(struct hid_device *hdev)
+{
+	unsigned int connect_mask = HID_CONNECT_DEFAULT & ~HID_CONNECT_FF;
+	int ret;
+
+	ret = hid_hw_start(hdev, connect_mask);
+	if (ret) {
+		dd_err(hdev, "lg4ff probe: hid_hw_start failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = dd_lg4ff_init(hdev);
+	if (ret) {
+		dd_warn(hdev, "lg4ff probe: dd_lg4ff_init failed: %d\n", ret);
+		hid_hw_stop(hdev);
+		return ret;
+	}
+
+	return 0;
+}
+
 static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	struct hidpp_device *hidpp;
@@ -14814,6 +14845,28 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 				return hidpp_dd_minimal_probe(hdev);
 			}
 			dd_info(hdev, "Letting hid-generic handle interface %d\n", ifnum);
+		}
+		if ((hidpp->quirks & HIDPP_QUIRK_CLASS_LG4FF) && hid_is_usb(hdev)) {
+			struct usb_interface *intf = to_usb_interface(hdev->dev.parent);
+			int ifnum = intf->cur_altsetting->desc.bInterfaceNumber;
+
+			/*
+			 * The classic FFB engine only speaks to interface 0;
+			 * interfaces 1 and 2 carry no HID++ and no FFB, so
+			 * reject them the way new-lg4ff does (hid-lg.c:770-777)
+			 * rather than binding a driver instance with nothing
+			 * to do.
+			 */
+			if (ifnum != 0) {
+				dd_info(hdev, "ignoring ifnum %d for classic FFB\n", ifnum);
+				hid_set_drvdata(hdev, NULL);
+				devm_kfree(&hdev->dev, hidpp);
+				return -ENODEV;
+			}
+
+			dd_info(hdev, "Claiming interface 0 for classic FFB\n");
+			hidpp->no_hidpp_reports = true;
+			return hidpp_dd_lg4ff_probe(hdev);
 		}
 		hid_set_drvdata(hdev, NULL);
 		devm_kfree(&hdev->dev, hidpp);
@@ -15123,6 +15176,14 @@ static void hidpp_remove(struct hid_device *hdev)
 				WRITE_ONCE(ff->input, NULL);
 		}
 	}
+
+	/*
+	 * Classic FFB teardown: cancel the hrtimer and free the entry before
+	 * hid_hw_stop() tears down the input device, mirroring new-lg4ff's
+	 * lg_remove() ordering (hid-lg.c: lg4ff_deinit before hid_hw_stop).
+	 */
+	if (hidpp->quirks & HIDPP_QUIRK_CLASS_LG4FF)
+		dd_lg4ff_deinit(hdev);
 
 	/*
 	 * Stop hardware to prevent raw_event callbacks from accessing
