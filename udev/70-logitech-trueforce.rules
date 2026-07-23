@@ -29,6 +29,7 @@
 #   Gear-driven, but same TrueForce stream protocol - access is purely
 #   so the SDK DLLs can reach the wheel under Proton:
 #     C266  G923 (PlayStation/PC)
+#     C267  G923 (PlayStation 4/PC)
 #     C26D  G923 (Xbox/PC, alt PID)
 #     C26E  G923 (Xbox/PC)
 #
@@ -40,7 +41,7 @@ SUBSYSTEM!="hidraw", GOTO="trueforce_end"
 
 # One alternation instead of a GOTO per PID: adding a wheel is a
 # five-character diff that cannot forget the GOTO.
-ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c262|c266|c26d|c26e|c268|c272|c276", GOTO="trueforce_apply"
+ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c262|c266|c267|c26d|c26e|c268|c272|c276", GOTO="trueforce_apply"
 GOTO="trueforce_end"
 
 LABEL="trueforce_apply"

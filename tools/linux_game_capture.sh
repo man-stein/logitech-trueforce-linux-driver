@@ -83,9 +83,9 @@ fi
 # Discover the wheel: walk lsusb for any of the IDs we ship support
 # for. If the user has more than one matching device connected we bail
 # rather than guess.
-WHEEL_LINE=$(lsusb | grep -iE '046d:(c272|c268|c276|c269)' || true)
+WHEEL_LINE=$(lsusb | grep -iE '046d:(c272|c268|c276|c269|c262|c266|c267|c26d|c26e)' || true)
 if [ -z "$WHEEL_LINE" ]; then
-	echo "error: no Logitech RS50 / G PRO wheel found via lsusb" >&2
+	echo "error: no Logitech RS50 / G PRO / G923 wheel found via lsusb" >&2
 	exit 1
 fi
 if [ "$(echo "$WHEEL_LINE" | wc -l)" -gt 1 ]; then
