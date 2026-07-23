@@ -398,6 +398,8 @@ struct hidpp_device {
 	 * allocated on hdev; cleared by hidpp_dd_pid_uninstall on teardown.
 	 */
 	struct hidpp_dd_pid_state *pid_state;
+
+	void *lg4ff_entry;	/* struct dd_lg4ff_device_entry *, classic G923 FFB */
 };
 
 /* HID++ 1.0 error codes */
@@ -15134,16 +15136,19 @@ static void hidpp_remove(struct hid_device *hdev)
 
 static const struct hid_device_id hidpp_devices[] = {
 	/*
-	 * Wheel-scoped fork: this driver claims ONLY the Logitech direct-drive
+	 * Wheel-scoped fork: this driver claims the Logitech direct-drive
 	 * wheels - the RS50 and G PRO, across their three USB IDs (c276 RS50
 	 * native, c272 G PRO Xbox/PC which the RS50 also uses in compatibility
 	 * mode, c268 G PRO PS/PC) - whose TrueForce / direct-drive FFB support
-	 * it adds. Every other Logitech HID++ device (mice, keyboards, receiver-
-	 * paired and 27 MHz devices, and the belt-driven G920/G923 wheels) is
-	 * deliberately left to the in-tree hid-logitech-hidpp driver, which is
-	 * continuously maintained and supports far more hardware. Do not add
-	 * non-direct-drive IDs here: that would shadow the in-tree driver with
-	 * this fork's copy and regress those devices (see the project README's
+	 * it adds, plus the belt-driven G923, whose classic FFB engine and
+	 * HID++ 0x8123 path are also implemented here (c266/c267 classic,
+	 * c26e Xbox). Every other Logitech HID++ device (mice, keyboards,
+	 * receiver-paired and 27 MHz devices, and other belt-driven wheels
+	 * such as the G920) is deliberately left to the in-tree
+	 * hid-logitech-hidpp driver, which is continuously maintained and
+	 * supports far more hardware. Do not add IDs here beyond the ones
+	 * already listed: that would shadow the in-tree driver with this
+	 * fork's copy and regress those devices (see the project README's
 	 * "wheel-scoped" note).
 	 *
 	 * Direct-drive base architecture: HID++ 4.2 on interface 1, a dedicated
@@ -15161,6 +15166,15 @@ static const struct hid_device_id hidpp_devices[] = {
 	{ /* Logitech RS50 Direct Drive Wheel (PlayStation/PC) over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_RS50),
 		.driver_data = HIDPP_QUIRK_CLASS_G920 | HIDPP_QUIRK_DD_FFB },
+	{ /* Logitech G923 (PlayStation native / Classic mode) */
+	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_G923_WHEEL),
+	  .driver_data = HIDPP_QUIRK_CLASS_LG4FF },
+	{ /* Logitech G923 (PlayStation mode, switches to Classic) */
+	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_G923_PS_WHEEL),
+	  .driver_data = HIDPP_QUIRK_CLASS_LG4FF },
+	{ /* Logitech G923 (Xbox) - HID++ 0x8123 via the g920 path */
+	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_G923_XBOX_WHEEL),
+	  .driver_data = HIDPP_QUIRK_CLASS_G920 },
 	{}
 };
 
