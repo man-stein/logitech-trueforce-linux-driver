@@ -15,8 +15,10 @@
 #include <linux/input.h>
 #include <linux/jiffies.h>
 #include <linux/math.h>
+#include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
+#include <linux/usb.h>
 #ifdef CONFIG_LEDS_CLASS
 #include <linux/leds.h>
 #endif
@@ -45,6 +47,8 @@
 		((a) - (long)(b)); })
 
 #define DD_LG4FF_MAX_EFFECTS 16
+#define DD_LG4FF_DEFAULT_TIMER_PERIOD 2
+#define DD_LG4FF_CAP_FRICTION 1
 
 #define DD_LG4FF_FF_EFFECT_STARTED 0
 #define DD_LG4FF_FF_EFFECT_ALLSET 1
@@ -238,6 +242,37 @@ static const struct dd_lg4ff_wheel_ident_info *dd_lg4ff_main_checklist[] __maybe
 };
 
 /*
+ * Module parameters for the hrtimer effect engine, ported from new-lg4ff
+ * (hid-lg4ff.c:423-455). The exposed parameter names are additionally
+ * given a dd_lg4ff_ prefix (on top of the module's own hid-logitech-dd
+ * namespace) so they cannot be confused with an in-tree lg4ff.ko's
+ * timer_msecs/timer_mode/etc if both happen to be loaded at once.
+ */
+static int dd_lg4ff_timer_msecs = DD_LG4FF_DEFAULT_TIMER_PERIOD;
+module_param_named(dd_lg4ff_timer_msecs, dd_lg4ff_timer_msecs, int, 0660);
+MODULE_PARM_DESC(dd_lg4ff_timer_msecs, "Timer resolution in msecs.");
+
+static int dd_lg4ff_fixed_loop;
+module_param_named(dd_lg4ff_fixed_loop, dd_lg4ff_fixed_loop, int, 0);
+MODULE_PARM_DESC(dd_lg4ff_fixed_loop, "Put the device into fixed loop mode.");
+
+static int dd_lg4ff_timer_mode = 2;
+module_param_named(dd_lg4ff_timer_mode, dd_lg4ff_timer_mode, int, 0660);
+MODULE_PARM_DESC(dd_lg4ff_timer_mode, "Timer mode: 0) fixed, 1) static, 2) dynamic (default).");
+
+static int dd_lg4ff_spring_level = 30;
+module_param_named(dd_lg4ff_spring_level, dd_lg4ff_spring_level, int, 0);
+MODULE_PARM_DESC(dd_lg4ff_spring_level, "Level of spring force (0-100).");
+
+static int dd_lg4ff_damper_level = 30;
+module_param_named(dd_lg4ff_damper_level, dd_lg4ff_damper_level, int, 0);
+MODULE_PARM_DESC(dd_lg4ff_damper_level, "Level of damper force (0-100).");
+
+static int dd_lg4ff_friction_level = 30;
+module_param_named(dd_lg4ff_friction_level, dd_lg4ff_friction_level, int, 0);
+MODULE_PARM_DESC(dd_lg4ff_friction_level, "Level of friction force (0-100).");
+
+/*
  * Single choke point for reaching the ported engine's per-device state.
  * new-lg4ff keeps this pointer in lg_drv_data->device_props; we have no
  * lg_drv_data, so it lives directly on struct hidpp_device (lg4ff_entry)
@@ -247,7 +282,6 @@ static const struct dd_lg4ff_wheel_ident_info *dd_lg4ff_main_checklist[] __maybe
  * (hid-lg4ff.c:457-478); every later ported function calls this instead
  * of touching drv_data->device_props directly.
  */
-static struct dd_lg4ff_device_entry *dd_lg4ff_get_entry(struct hid_device *hdev) __maybe_unused;
 static struct dd_lg4ff_device_entry *dd_lg4ff_get_entry(struct hid_device *hdev)
 {
 	void **slot;
@@ -270,8 +304,8 @@ static struct dd_lg4ff_device_entry *dd_lg4ff_get_entry(struct hid_device *hdev)
  * 7-byte SET_REPORT command senders, ported verbatim from new-lg4ff
  * (hid-lg4ff.c:480-514). dd_lg4ff_send_cmd_with_id() forces the report's
  * id first; it is used only by the mode-switch sequence, wired up once
- * that lands. Neither sender has a caller yet: the timer/upload/play path
- * that calls them arrives in a later task.
+ * that lands, so it stays __maybe_unused. dd_lg4ff_send_cmd() is now called
+ * from the hrtimer effect engine below.
  */
 static void __maybe_unused dd_lg4ff_send_cmd_with_id(struct dd_lg4ff_device_entry *entry, u8 *cmd, u8 id)
 {
@@ -292,7 +326,7 @@ static void __maybe_unused dd_lg4ff_send_cmd_with_id(struct dd_lg4ff_device_entr
 	DD_LG4FF_DEBUG("send_cmd: %02X %02X %02X %02X %02X %02X %02X %02X\n", id, cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6]);
 }
 
-static void __maybe_unused dd_lg4ff_send_cmd(struct dd_lg4ff_device_entry *entry, u8 *cmd)
+static void dd_lg4ff_send_cmd(struct dd_lg4ff_device_entry *entry, u8 *cmd)
 {
 	unsigned long flags;
 	s32 *value = entry->report->field[0]->value;
@@ -315,10 +349,10 @@ static void __maybe_unused dd_lg4ff_send_cmd(struct dd_lg4ff_device_entry *entry
  * This is the heart of the classic command protocol: it fills
  * slot->current_cmd[0..6] with the F8/3E slot-select byte plus the
  * per-effect-type payload (CONSTANT 0x00, SPRING 0x0b, DAMPER 0x0c,
- * FRICTION 0x0e; op3 stops the slot). No caller yet; arrives with the
- * update/play path in a later task.
+ * FRICTION 0x0e; op3 stops the slot). Called from the hrtimer effect
+ * engine below.
  */
-static void __maybe_unused dd_lg4ff_update_slot(struct dd_lg4ff_slot *slot, struct dd_lg4ff_effect_parameters *parameters)
+static void dd_lg4ff_update_slot(struct dd_lg4ff_slot *slot, struct dd_lg4ff_effect_parameters *parameters)
 {
 	u8 original_cmd[7];
 	int d1;
@@ -424,9 +458,8 @@ static void __maybe_unused dd_lg4ff_update_slot(struct dd_lg4ff_slot *slot, stru
 
 /*
  * Per-effect-type force math, ported verbatim from new-lg4ff
- * (hid-lg4ff.c:620-741). All __always_inline, so the compiler does not
- * warn about them lacking a caller yet (the timer tick that drives these
- * arrives in a later task).
+ * (hid-lg4ff.c:620-741). All __always_inline; called from the timer tick
+ * (dd_lg4ff_timer, below) that drives these once per effect.
  */
 static __always_inline int dd_lg4ff_calculate_constant(struct dd_lg4ff_effect_state *state)
 {
@@ -554,8 +587,8 @@ static __always_inline struct ff_envelope *dd_lg4ff_effect_envelope(struct ff_ef
 /*
  * Effect scheduling state machine, ported verbatim from new-lg4ff
  * (hid-lg4ff.c:743-795). Advances start/play/stop timestamps and the
- * playing/updating flags off the FF core's ff_effect fields; the timer
- * that calls this on each tick arrives in a later task.
+ * playing/updating flags off the FF core's ff_effect fields; called once
+ * per effect from the timer tick (dd_lg4ff_timer, below).
  */
 static __always_inline void dd_lg4ff_update_state(struct dd_lg4ff_effect_state *state, const unsigned long now)
 {
@@ -609,6 +642,377 @@ static __always_inline void dd_lg4ff_update_state(struct dd_lg4ff_effect_state *
 			state->phase += state->phase_adj % 360;
 		}
 	}
+}
+
+/*
+ * Partial mirror of struct usbhid_device from the kernel's
+ * drivers/hid/usbhid/usbhid.h, trimmed to the fields dd_lg4ff_timer() below
+ * needs: outhead/outtail, the USB output-report FIFO indices used to detect
+ * a stalled SET_REPORT queue. That header is kernel-internal and is not
+ * exported by kernel-devel on several distributions (see the hid_to_usb_dev
+ * note in hid-logitech-hidpp.c for the same class of problem with a
+ * different symbol from it), so entry->hid->driver_data is read through
+ * this local, offset-compatible mirror instead of including it. Field
+ * order and types must track upstream exactly up to and including outtail;
+ * checked against drivers/hid/usbhid/usbhid.h as shipped in Linux 7.1.
+ */
+struct dd_lg4ff_usbhid_device {
+	struct hid_device *hid;
+	struct usb_interface *intf;
+	int ifnum;
+	unsigned int bufsize;
+	struct urb *urbin;
+	char *inbuf;
+	dma_addr_t inbuf_dma;
+	struct urb *urbctrl;
+	struct usb_ctrlrequest *cr;
+	struct hid_control_fifo ctrl[HID_CONTROL_FIFO_SIZE];
+	unsigned char ctrlhead, ctrltail;
+	char *ctrlbuf;
+	dma_addr_t ctrlbuf_dma;
+	unsigned long last_ctrl;
+	struct urb *urbout;
+	struct hid_output_fifo out[HID_CONTROL_FIFO_SIZE];
+	unsigned char outhead, outtail;
+};
+
+/*
+ * hrtimer effect engine, ported from new-lg4ff (hid-lg4ff.c:797-968). Sums
+ * CONSTANT/RAMP/PERIODIC into slot 0 and condition effects (SPRING/DAMPER/
+ * FRICTION/INERTIA) into slots 1-3, applies master/wheel gain and the
+ * spring/damper/friction level scalers, then pushes any slot whose command
+ * changed out over SET_REPORT. The timer_mode back-off below is load-bearing:
+ * without it a stalled USB output queue gets more SET_REPORT commands piled
+ * onto it every tick, which only makes the stall worse.
+ *
+ * new-lg4ff's LED calibration output (its CONFIG_LEDS_CLASS block, gated on
+ * the ffb_leds param) is intentionally not ported here: it needs
+ * dd_lg4ff_set_leds(), which does not exist yet, and ffb_leds/profile are
+ * not among this task's module params.
+ */
+static __always_inline int dd_lg4ff_timer(struct dd_lg4ff_device_entry *entry)
+{
+	struct dd_lg4ff_usbhid_device *usbhid = entry->hid->driver_data;
+	struct dd_lg4ff_slot *slot;
+	struct dd_lg4ff_effect_state *state;
+	struct dd_lg4ff_effect_parameters parameters[4];
+	unsigned long jiffies_now = jiffies;
+	unsigned long now = DD_LG4FF_JIFFIES2MS(jiffies_now);
+	unsigned long flags;
+	unsigned gain;
+	int current_period;
+	int count;
+	int effect_id;
+	int i;
+	int ffb_level;
+
+	if (dd_lg4ff_timer_mode > 0 && usbhid->outhead != usbhid->outtail) {
+		current_period = dd_lg4ff_timer_msecs;
+		if (dd_lg4ff_timer_mode == 1) {
+			dd_lg4ff_timer_msecs *= 2;
+			hid_info(entry->hid, "Commands stacking up, increasing timer period to %d ms.", dd_lg4ff_timer_msecs);
+		} else {
+			DD_LG4FF_DEBUG("Commands stacking up, delaying timer.");
+		}
+		return current_period;
+	}
+
+	memset(parameters, 0, sizeof(parameters));
+
+	gain = (unsigned)entry->wdata.master_gain * entry->wdata.gain / 0xffff;
+
+	spin_lock_irqsave(&entry->timer_lock, flags);
+
+	count = entry->effects_used;
+
+	for (effect_id = 0; effect_id < DD_LG4FF_MAX_EFFECTS; effect_id++) {
+
+		if (!count) {
+			break;
+		}
+
+		state = &entry->states[effect_id];
+
+		if (!test_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags)) {
+			continue;
+		}
+
+		count--;
+
+		if (test_bit(DD_LG4FF_FF_EFFECT_ALLSET, &state->flags)) {
+			if (state->effect.replay.length && time_after_eq(now, state->stop_at)) {
+				DD_LG4FF_STOP_EFFECT(state);
+				if (!--state->count) {
+					entry->effects_used--;
+					continue;
+				}
+				__set_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags);
+				state->start_at = state->stop_at;
+			}
+		}
+
+		dd_lg4ff_update_state(state, now);
+
+		if (!test_bit(DD_LG4FF_FF_EFFECT_PLAYING, &state->flags)) {
+			continue;
+		}
+
+		switch (state->effect.type) {
+			case FF_CONSTANT:
+				parameters[0].level += dd_lg4ff_calculate_constant(state);
+				break;
+			case FF_RAMP:
+				parameters[0].level += dd_lg4ff_calculate_ramp(state);
+				break;
+			case FF_PERIODIC:
+				parameters[0].level += dd_lg4ff_calculate_periodic(state);
+				break;
+			case FF_SPRING:
+				if (state->slot != 0) {
+					dd_lg4ff_calculate_spring(state, &parameters[state->slot]);
+				}
+				break;
+			case FF_DAMPER:
+			case FF_FRICTION:
+			case FF_INERTIA:
+				if (state->slot != 0) {
+					dd_lg4ff_calculate_resistance(state, &parameters[state->slot]);
+				}
+		}
+	}
+
+	spin_unlock_irqrestore(&entry->timer_lock, flags);
+
+	parameters[0].level = (long)parameters[0].level * gain / 0xffff;
+
+	ffb_level = abs(parameters[0].level);
+	for (i = 1; i < 4; i++) {
+		parameters[i].k1 = (long)parameters[i].k1 * gain / 0xffff;
+		parameters[i].k2 = (long)parameters[i].k2 * gain / 0xffff;
+		switch (entry->slots[i].effect_type) {
+			case FF_SPRING:
+				parameters[i].clip = parameters[i].clip * dd_lg4ff_spring_level / 100;
+				break;
+			case FF_DAMPER:
+				parameters[i].clip = parameters[i].clip * dd_lg4ff_damper_level / 100;
+				break;
+			case FF_FRICTION:
+				parameters[i].clip = parameters[i].clip * dd_lg4ff_friction_level / 100;
+				break;
+		}
+		parameters[i].clip = parameters[i].clip * gain / 0xffff;
+		ffb_level += parameters[i].clip * 0x7fff / 0xffff;
+	}
+	if (ffb_level > entry->peak_ffb_level) {
+		entry->peak_ffb_level = ffb_level;
+	}
+
+	for (i = 0; i < 4; i++) {
+		slot = &entry->slots[i];
+		dd_lg4ff_update_slot(slot, &parameters[i]);
+		if (slot->is_updated) {
+			dd_lg4ff_send_cmd(entry, slot->current_cmd);
+			slot->is_updated = 0;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * hrtimer callback wrapper, ported from new-lg4ff (hid-lg4ff.c:970-994).
+ * Re-arms at the back-off period dd_lg4ff_timer() just returned, or at the
+ * normal tick period while effects are still playing, or stops the timer
+ * once nothing is left to play. Not yet assigned to entry->hrtimer.function:
+ * that wiring lands with dd_lg4ff_init() in a later task.
+ */
+static enum hrtimer_restart __maybe_unused dd_lg4ff_timer_hires(struct hrtimer *t)
+{
+	struct dd_lg4ff_device_entry *entry = container_of(t, struct dd_lg4ff_device_entry, hrtimer);
+	int delay_timer;
+	int overruns;
+
+	delay_timer = dd_lg4ff_timer(entry);
+
+	if (delay_timer) {
+		hrtimer_forward_now(&entry->hrtimer, ms_to_ktime(delay_timer));
+		return HRTIMER_RESTART;
+	}
+
+	if (entry->effects_used) {
+		overruns = hrtimer_forward_now(&entry->hrtimer, ms_to_ktime(dd_lg4ff_timer_msecs));
+		overruns--;
+		if (unlikely(overruns > 0))
+			DD_LG4FF_DEBUG("Overruns: %d", overruns);
+		return HRTIMER_RESTART;
+	}
+
+	DD_LG4FF_DEBUG("Stop timer.");
+	return HRTIMER_NORESTART;
+}
+
+/*
+ * Slot/loop-mode initializer, ported from new-lg4ff (hid-lg4ff.c:996-1019).
+ * Sends the 0x0d fixed-loop-mode command, then resets and re-sends all four
+ * slots empty. Not yet called: its caller, dd_lg4ff_init(), arrives in a
+ * later task.
+ */
+static void __maybe_unused dd_lg4ff_init_slots(struct dd_lg4ff_device_entry *entry)
+{
+	struct dd_lg4ff_effect_parameters parameters;
+	u8 cmd[8] = {0};
+	int i;
+
+	/* Set/unset fixed loop mode */
+	cmd[0] = 0x0d;
+	cmd[1] = dd_lg4ff_fixed_loop ? 1 : 0;
+	dd_lg4ff_send_cmd(entry, cmd);
+
+	memset(&entry->states, 0, sizeof(entry->states));
+	memset(&entry->slots, 0, sizeof(entry->slots));
+	memset(&parameters, 0, sizeof(parameters));
+
+	entry->slots[0].effect_type = FF_CONSTANT;
+
+	for (i = 0; i < 4; i++) {
+		entry->slots[i].id = i;
+		dd_lg4ff_update_slot(&entry->slots[i], &parameters);
+		dd_lg4ff_send_cmd(entry, entry->slots[i].current_cmd);
+		entry->slots[i].is_updated = 0;
+	}
+}
+
+/*
+ * Ported from new-lg4ff (hid-lg4ff.c:1021-1027): cmd[0]=0xf3 tells the wheel
+ * to drop whatever it is currently playing. Not yet called; wired up
+ * alongside dd_lg4ff_init_slots() in a later task.
+ */
+static void __maybe_unused dd_lg4ff_stop_effects(struct dd_lg4ff_device_entry *entry)
+{
+	u8 cmd[7] = {0};
+
+	cmd[0] = 0xf3;
+	dd_lg4ff_send_cmd(entry, cmd);
+}
+
+/*
+ * ff->upload callback, ported from new-lg4ff (hid-lg4ff.c:1029-1064). Pure
+ * bookkeeping: stores the ff_effect into entry->states[id] and marks it
+ * updating if it was already playing. No hardware I/O. Not yet wired to
+ * an input_dev's ff_device: that assignment lands with dd_lg4ff_init() in
+ * a later task.
+ */
+static int __maybe_unused dd_lg4ff_upload_effect(struct input_dev *dev, struct ff_effect *effect, struct ff_effect *old)
+{
+	struct hid_device *hid = input_get_drvdata(dev);
+	struct dd_lg4ff_device_entry *entry;
+	struct dd_lg4ff_effect_state *state;
+	unsigned long now = DD_LG4FF_JIFFIES2MS(jiffies);
+	unsigned long flags;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return -EINVAL;
+	}
+
+	if (effect->type == FF_PERIODIC && effect->u.periodic.period == 0) {
+		return -EINVAL;
+	}
+
+	state = &entry->states[effect->id];
+
+	if (test_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags) && effect->type != state->effect.type) {
+		return -EINVAL;
+	}
+
+	spin_lock_irqsave(&entry->timer_lock, flags);
+
+	state->effect = *effect;
+
+	if (test_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags)) {
+		__set_bit(DD_LG4FF_FF_EFFECT_UPDATING, &state->flags);
+		state->updated_at = now;
+	}
+
+	spin_unlock_irqrestore(&entry->timer_lock, flags);
+
+	return 0;
+}
+
+/*
+ * ff->playback callback, ported from new-lg4ff (hid-lg4ff.c:1066-1131).
+ * Starts the hrtimer on the first effect and stops it when the last one
+ * ends; allocates a condition slot (1-3) for SPRING/DAMPER/FRICTION/INERTIA
+ * on start and frees it on stop. INERTIA and FRICTION on a wheel lacking
+ * DD_LG4FF_CAP_FRICTION are cast to DAMPER, matching what the Windows driver
+ * does for these toy-strength wheels. Not yet wired to an input_dev's
+ * ff_device: that assignment lands with dd_lg4ff_init() in a later task.
+ */
+static int __maybe_unused dd_lg4ff_play_effect(struct input_dev *dev, int effect_id, int value)
+{
+	struct hid_device *hid = input_get_drvdata(dev);
+	struct dd_lg4ff_device_entry *entry;
+	struct dd_lg4ff_effect_state *state;
+	unsigned long now = DD_LG4FF_JIFFIES2MS(jiffies);
+	unsigned long flags;
+	int i;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return -EINVAL;
+	}
+
+	state = &entry->states[effect_id];
+
+	spin_lock_irqsave(&entry->timer_lock, flags);
+
+	if (value > 0) {
+		if (test_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags)) {
+			DD_LG4FF_STOP_EFFECT(state);
+		} else {
+			entry->effects_used++;
+			if (!hrtimer_active(&entry->hrtimer)) {
+				hrtimer_start(&entry->hrtimer, ms_to_ktime(dd_lg4ff_timer_msecs), HRTIMER_MODE_REL);
+				DD_LG4FF_DEBUG("Start timer.");
+			}
+			if ((state->effect.type == FF_SPRING || state->effect.type == FF_DAMPER
+					|| state->effect.type == FF_FRICTION || state->effect.type == FF_INERTIA)
+					&& state->slot == 0) {
+				/* Find a free slot */
+				for (i = 1; i < 4 && entry->slots[i].effect_type != 0; i++)
+					;
+				if (i < 4) {
+					state->slot = i;
+					entry->slots[i].effect_type = state->effect.type;
+
+					/* Cast unsupported effect types to "damper": this is what the Windows
+					 * driver does.
+					 * This is not physically plausible, but we are working with toy-strength
+					 * wheels that won't let you feel more than "big value = wheel stuck" */
+					if (state->effect.type == FF_INERTIA
+							|| (state->effect.type == FF_FRICTION && !(entry->wdata.capabilities & DD_LG4FF_CAP_FRICTION))) {
+						entry->slots[i].effect_type = FF_DAMPER;
+					}
+				}
+			}
+		}
+		__set_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags);
+		state->start_at = now;
+		state->count = value;
+	} else {
+		if (test_bit(DD_LG4FF_FF_EFFECT_STARTED, &state->flags)) {
+			DD_LG4FF_STOP_EFFECT(state);
+			entry->effects_used--;
+			if (state->slot) {
+				entry->slots[state->slot].effect_type = 0;
+				state->slot = 0;
+			}
+		}
+	}
+
+	spin_unlock_irqrestore(&entry->timer_lock, flags);
+
+	return 0;
 }
 
 int dd_lg4ff_init(struct hid_device *hdev)
