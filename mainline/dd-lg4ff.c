@@ -7,11 +7,13 @@
  *  Copyright (c) 2019 Bernat Arlandis <berarma@hotmail.com>
  */
 
+#include <linux/bitops.h>
 #include <linux/bits.h>
 #include <linux/fixp-arith.h>
 #include <linux/hid.h>
 #include <linux/hrtimer.h>
 #include <linux/input.h>
+#include <linux/jiffies.h>
 #include <linux/math.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
@@ -36,6 +38,11 @@
 #define DD_LG4FF_JIFFIES2MS(jiffies) ((jiffies) * 1000 / HZ)
 #undef fixp_sin16
 #define fixp_sin16(v) (((v % 360) > 180) ? -(fixp_sin32((v % 360) - 180) >> 16) : fixp_sin32(v) >> 16)
+#define DD_LG4FF_DEBUG(...) pr_debug("dd_lg4ff: " __VA_ARGS__)
+#define DD_LG4FF_TIME_DIFF(a, b) ({ \
+		typecheck(unsigned long, a); \
+		typecheck(unsigned long, b); \
+		((a) - (long)(b)); })
 
 #define DD_LG4FF_MAX_EFFECTS 16
 
@@ -257,6 +264,351 @@ static struct dd_lg4ff_device_entry *dd_lg4ff_get_entry(struct hid_device *hdev)
 	}
 
 	return (struct dd_lg4ff_device_entry *)*slot;
+}
+
+/*
+ * 7-byte SET_REPORT command senders, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:480-514). dd_lg4ff_send_cmd_with_id() forces the report's
+ * id first; it is used only by the mode-switch sequence, wired up once
+ * that lands. Neither sender has a caller yet: the timer/upload/play path
+ * that calls them arrives in a later task.
+ */
+static void __maybe_unused dd_lg4ff_send_cmd_with_id(struct dd_lg4ff_device_entry *entry, u8 *cmd, u8 id)
+{
+	unsigned long flags;
+	s32 *value = entry->report->field[0]->value;
+
+	spin_lock_irqsave(&entry->report_lock, flags);
+	entry->report->id = id;
+	value[0] = cmd[0];
+	value[1] = cmd[1];
+	value[2] = cmd[2];
+	value[3] = cmd[3];
+	value[4] = cmd[4];
+	value[5] = cmd[5];
+	value[6] = cmd[6];
+	hid_hw_request(entry->hid, entry->report, HID_REQ_SET_REPORT);
+	spin_unlock_irqrestore(&entry->report_lock, flags);
+	DD_LG4FF_DEBUG("send_cmd: %02X %02X %02X %02X %02X %02X %02X %02X\n", id, cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6]);
+}
+
+static void __maybe_unused dd_lg4ff_send_cmd(struct dd_lg4ff_device_entry *entry, u8 *cmd)
+{
+	unsigned long flags;
+	s32 *value = entry->report->field[0]->value;
+
+	spin_lock_irqsave(&entry->report_lock, flags);
+	value[0] = cmd[0];
+	value[1] = cmd[1];
+	value[2] = cmd[2];
+	value[3] = cmd[3];
+	value[4] = cmd[4];
+	value[5] = cmd[5];
+	value[6] = cmd[6];
+	hid_hw_request(entry->hid, entry->report, HID_REQ_SET_REPORT);
+	spin_unlock_irqrestore(&entry->report_lock, flags);
+	DD_LG4FF_DEBUG("send_cmd: %02X %02X %02X %02X %02X %02X %02X", cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6]);
+}
+
+/*
+ * Wire-format packer, ported verbatim from new-lg4ff (hid-lg4ff.c:516-618).
+ * This is the heart of the classic command protocol: it fills
+ * slot->current_cmd[0..6] with the F8/3E slot-select byte plus the
+ * per-effect-type payload (CONSTANT 0x00, SPRING 0x0b, DAMPER 0x0c,
+ * FRICTION 0x0e; op3 stops the slot). No caller yet; arrives with the
+ * update/play path in a later task.
+ */
+static void __maybe_unused dd_lg4ff_update_slot(struct dd_lg4ff_slot *slot, struct dd_lg4ff_effect_parameters *parameters)
+{
+	u8 original_cmd[7];
+	int d1;
+	int d2;
+	int k1;
+	int k2;
+	int s1;
+	int s2;
+
+	memcpy(original_cmd, slot->current_cmd, sizeof(original_cmd));
+
+	if ((original_cmd[0] & 0xf) == 1) {
+		original_cmd[0] = (original_cmd[0] & 0xf0) + 0xc;
+	}
+
+	if (slot->effect_type == FF_CONSTANT) {
+		if (slot->cmd_op == 0) {
+			slot->cmd_op = 1;
+		} else {
+			slot->cmd_op = 0xc;
+		}
+	} else {
+		if (parameters->clip == 0 || slot->effect_type == 0) {
+			slot->cmd_op = 3;
+		} else if (slot->cmd_op == 3) {
+			slot->cmd_op = 1;
+		} else {
+			slot->cmd_op = 0xc;
+		}
+	}
+
+	slot->current_cmd[0] = (0x10 << slot->id) + slot->cmd_op;
+
+	if (slot->cmd_op == 3) {
+		slot->current_cmd[1] = 0;
+		slot->current_cmd[2] = 0;
+		slot->current_cmd[3] = 0;
+		slot->current_cmd[4] = 0;
+		slot->current_cmd[5] = 0;
+		slot->current_cmd[6] = 0;
+	} else {
+		switch (slot->effect_type) {
+			case FF_CONSTANT:
+				slot->current_cmd[1] = 0x00;
+				slot->current_cmd[2] = 0;
+				slot->current_cmd[3] = 0;
+				slot->current_cmd[4] = 0;
+				slot->current_cmd[5] = 0;
+				slot->current_cmd[6] = 0;
+				slot->current_cmd[2 + slot->id] = DD_LG4FF_TRANSLATE_FORCE(parameters->level);
+				break;
+			case FF_SPRING:
+				d1 = DD_LG4FF_SCALE_VALUE_U16(((parameters->d1) + 0x8000) & 0xffff, 11);
+				d2 = DD_LG4FF_SCALE_VALUE_U16(((parameters->d2) + 0x8000) & 0xffff, 11);
+				s1 = parameters->k1 < 0;
+				s2 = parameters->k2 < 0;
+				k1 = abs(parameters->k1);
+				k2 = abs(parameters->k2);
+				if (k1 < 2048) {
+					d1 = 0;
+				} else {
+					k1 -= 2048;
+				}
+				if (k2 < 2048) {
+					d2 = 2047;
+				} else {
+					k2 -= 2048;
+				}
+				slot->current_cmd[1] = 0x0b;
+				slot->current_cmd[2] = d1 >> 3;
+				slot->current_cmd[3] = d2 >> 3;
+				slot->current_cmd[4] = (DD_LG4FF_SCALE_COEFF(k2, 4) << 4) + DD_LG4FF_SCALE_COEFF(k1, 4);
+				slot->current_cmd[5] = ((d2 & 7) << 5) + ((d1 & 7) << 1) + (s2 << 4) + s1;
+				slot->current_cmd[6] = DD_LG4FF_SCALE_VALUE_U16(parameters->clip, 8);
+				break;
+			case FF_DAMPER:
+				s1 = parameters->k1 < 0;
+				s2 = parameters->k2 < 0;
+				slot->current_cmd[1] = 0x0c;
+				slot->current_cmd[2] = DD_LG4FF_SCALE_COEFF(parameters->k1, 4);
+				slot->current_cmd[3] = s1;
+				slot->current_cmd[4] = DD_LG4FF_SCALE_COEFF(parameters->k2, 4);
+				slot->current_cmd[5] = s2;
+				slot->current_cmd[6] = DD_LG4FF_SCALE_VALUE_U16(parameters->clip, 8);
+				break;
+			case FF_FRICTION:
+				s1 = parameters->k1 < 0;
+				s2 = parameters->k2 < 0;
+				slot->current_cmd[1] = 0x0e;
+				slot->current_cmd[2] = DD_LG4FF_SCALE_COEFF(parameters->k1, 8);
+				slot->current_cmd[3] = DD_LG4FF_SCALE_COEFF(parameters->k2, 8);
+				slot->current_cmd[4] = DD_LG4FF_SCALE_VALUE_U16(parameters->clip, 8);
+				slot->current_cmd[5] = (s2 << 4) + s1;
+				slot->current_cmd[6] = 0;
+				break;
+		}
+	}
+
+	if (memcmp(original_cmd, slot->current_cmd, sizeof(original_cmd))) {
+		slot->is_updated = 1;
+	}
+}
+
+/*
+ * Per-effect-type force math, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:620-741). All __always_inline, so the compiler does not
+ * warn about them lacking a caller yet (the timer tick that drives these
+ * arrives in a later task).
+ */
+static __always_inline int dd_lg4ff_calculate_constant(struct dd_lg4ff_effect_state *state)
+{
+	int level_sign;
+	int level = state->effect.u.constant.level;
+	int d, t;
+
+	if (state->time_playing < state->envelope->attack_length) {
+		level_sign = level < 0 ? -1 : 1;
+		d = level - level_sign * state->envelope->attack_level;
+		level = level_sign * state->envelope->attack_level + d * state->time_playing / state->envelope->attack_length;
+	} else if (state->effect.replay.length) {
+		t = state->time_playing - state->effect.replay.length + state->envelope->fade_length;
+		if (t > 0) {
+			level_sign = level < 0 ? -1 : 1;
+			d = level - level_sign * state->envelope->fade_level;
+			level = level - d * t / state->envelope->fade_length;
+		}
+	}
+
+	return state->direction_gain * level / 0x7fff;
+}
+
+static __always_inline int dd_lg4ff_calculate_ramp(struct dd_lg4ff_effect_state *state)
+{
+	struct ff_ramp_effect *ramp = &state->effect.u.ramp;
+	int level_sign;
+	int level = INT_MAX;
+	int d, t;
+
+	if (state->time_playing < state->envelope->attack_length) {
+		level = ramp->start_level;
+		level_sign =  level < 0 ? -1 : 1;
+		t = state->envelope->attack_length - state->time_playing;
+		d = level - level_sign * state->envelope->attack_level;
+		level = level_sign * state->envelope->attack_level + d * t / state->envelope->attack_length;
+	} else if (state->effect.replay.length && state->time_playing >= state->effect.replay.length - state->envelope->fade_length) {
+		level = ramp->end_level;
+		level_sign = level < 0 ? -1 : 1;
+		t = state->time_playing - state->effect.replay.length + state->envelope->fade_length;
+		d = level_sign * state->envelope->fade_level - level;
+		level = level - d * t / state->envelope->fade_length;
+	} else {
+		t = state->time_playing - state->envelope->attack_length;
+		level = ramp->start_level + ((t * state->slope) >> 16);
+	}
+
+	return state->direction_gain * level / 0x7fff;
+}
+
+static __always_inline int dd_lg4ff_calculate_periodic(struct dd_lg4ff_effect_state *state)
+{
+	struct ff_periodic_effect *periodic = &state->effect.u.periodic;
+	int magnitude = periodic->magnitude;
+	int magnitude_sign = magnitude < 0 ? -1 : 1;
+	int level = periodic->offset;
+	int d, t;
+
+	if (state->time_playing < state->envelope->attack_length) {
+		d = magnitude - magnitude_sign * state->envelope->attack_level;
+		magnitude = magnitude_sign * state->envelope->attack_level + d * state->time_playing / state->envelope->attack_length;
+	} else if (state->effect.replay.length) {
+		t = state->time_playing - state->effect.replay.length + state->envelope->fade_length;
+		if (t > 0) {
+			d = magnitude - magnitude_sign * state->envelope->fade_level;
+			magnitude = magnitude - d * t / state->envelope->fade_length;
+		}
+	}
+
+	switch (periodic->waveform) {
+		case FF_SINE:
+			level += fixp_sin16(state->phase) * magnitude / 0x7fff;
+			break;
+		case FF_SQUARE:
+			level += (state->phase < 180 ? 1 : -1) * magnitude;
+			break;
+		case FF_TRIANGLE:
+			level += abs(state->phase * magnitude * 2 / 360 - magnitude) * 2 - magnitude;
+			break;
+		case FF_SAW_UP:
+			level += state->phase * magnitude * 2 / 360 - magnitude;
+			break;
+		case FF_SAW_DOWN:
+			level += magnitude - state->phase * magnitude * 2 / 360;
+			break;
+	}
+
+	return state->direction_gain * level / 0x7fff;
+}
+
+static __always_inline void dd_lg4ff_calculate_spring(struct dd_lg4ff_effect_state *state, struct dd_lg4ff_effect_parameters *parameters)
+{
+	struct ff_condition_effect *condition = &state->effect.u.condition[0];
+
+	parameters->d1 = ((int)condition->center) - condition->deadband / 2;
+	parameters->d2 = ((int)condition->center) + condition->deadband / 2;
+	parameters->k1 = condition->left_coeff;
+	parameters->k2 = condition->right_coeff;
+	parameters->clip = (unsigned)condition->right_saturation;
+}
+
+static __always_inline void dd_lg4ff_calculate_resistance(struct dd_lg4ff_effect_state *state, struct dd_lg4ff_effect_parameters *parameters)
+{
+	struct ff_condition_effect *condition = &state->effect.u.condition[0];
+
+	parameters->k1 = condition->left_coeff;
+	parameters->k2 = condition->right_coeff;
+	parameters->clip = (unsigned)condition->right_saturation;
+}
+
+static __always_inline struct ff_envelope *dd_lg4ff_effect_envelope(struct ff_effect *effect)
+{
+	switch (effect->type) {
+		case FF_CONSTANT:
+			return &effect->u.constant.envelope;
+		case FF_RAMP:
+			return &effect->u.ramp.envelope;
+		case FF_PERIODIC:
+			return &effect->u.periodic.envelope;
+	}
+
+	return NULL;
+}
+
+/*
+ * Effect scheduling state machine, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:743-795). Advances start/play/stop timestamps and the
+ * playing/updating flags off the FF core's ff_effect fields; the timer
+ * that calls this on each tick arrives in a later task.
+ */
+static __always_inline void dd_lg4ff_update_state(struct dd_lg4ff_effect_state *state, const unsigned long now)
+{
+	struct ff_effect *effect = &state->effect;
+	unsigned long phase_time;
+
+	if (!__test_and_set_bit(DD_LG4FF_FF_EFFECT_ALLSET, &state->flags)) {
+		state->play_at = state->start_at + effect->replay.delay;
+		if (!test_bit(DD_LG4FF_FF_EFFECT_UPDATING, &state->flags)) {
+			state->updated_at = state->play_at;
+		}
+		state->direction_gain = fixp_sin16(effect->direction * 360 / 0x10000);
+		if (effect->type == FF_PERIODIC) {
+			state->phase_adj = effect->u.periodic.phase * 360 / effect->u.periodic.period;
+		}
+		if (effect->replay.length) {
+			state->stop_at = state->play_at + effect->replay.length;
+		}
+	}
+
+	if (__test_and_clear_bit(DD_LG4FF_FF_EFFECT_UPDATING, &state->flags)) {
+		__clear_bit(DD_LG4FF_FF_EFFECT_PLAYING, &state->flags);
+		state->play_at = state->updated_at + effect->replay.delay;
+		state->direction_gain = fixp_sin16(effect->direction * 360 / 0x10000);
+		if (effect->replay.length) {
+			state->stop_at = state->updated_at + effect->replay.length;
+		}
+		if (effect->type == FF_PERIODIC) {
+			state->phase_adj = state->phase;
+		}
+	}
+
+	state->envelope = dd_lg4ff_effect_envelope(effect);
+
+	state->slope = 0;
+	if (effect->type == FF_RAMP && effect->replay.length) {
+		state->slope = ((effect->u.ramp.end_level - effect->u.ramp.start_level) << 16) / (effect->replay.length - state->envelope->attack_length - state->envelope->fade_length);
+	}
+
+	if (!test_bit(DD_LG4FF_FF_EFFECT_PLAYING, &state->flags) && time_after_eq(now,
+				state->play_at) && (effect->replay.length == 0 ||
+					time_before(now, state->stop_at))) {
+		__set_bit(DD_LG4FF_FF_EFFECT_PLAYING, &state->flags);
+	}
+
+	if (test_bit(DD_LG4FF_FF_EFFECT_PLAYING, &state->flags)) {
+		state->time_playing = DD_LG4FF_TIME_DIFF(now, state->play_at);
+		if (effect->type == FF_PERIODIC) {
+			phase_time = DD_LG4FF_TIME_DIFF(now, state->updated_at);
+			state->phase = (phase_time % effect->u.periodic.period) * 360 / effect->u.periodic.period;
+			state->phase += state->phase_adj % 360;
+		}
+	}
 }
 
 int dd_lg4ff_init(struct hid_device *hdev)
