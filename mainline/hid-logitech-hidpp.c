@@ -402,6 +402,22 @@ struct hidpp_device {
 	void *lg4ff_entry;	/* struct dd_lg4ff_device_entry *, classic G923 FFB */
 };
 
+/*
+ * dd-lg4ff.c has no visibility into struct hidpp_device (defined above),
+ * so this is the sole accessor it uses to reach the lg4ff_entry slot. See
+ * dd_lg4ff_get_entry() in dd-lg4ff.c for the other half of this choke
+ * point.
+ */
+void *hidpp_dd_lg4ff_slot(struct hid_device *hdev)
+{
+	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
+
+	if (!hidpp)
+		return NULL;
+
+	return (void *)&hidpp->lg4ff_entry;
+}
+
 /* HID++ 1.0 error codes */
 #define HIDPP_ERROR				0x8f
 #define HIDPP_ERROR_SUCCESS			0x00
