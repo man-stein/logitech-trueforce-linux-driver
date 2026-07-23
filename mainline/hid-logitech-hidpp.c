@@ -68,6 +68,7 @@
 	to_usb_device((hid_dev)->dev.parent->parent)
 #endif
 #include "hid-ids.h"
+#include "dd-lg4ff.h"
 
 /*
  * Model tag for kernel log messages, resolved from the bound identity.
