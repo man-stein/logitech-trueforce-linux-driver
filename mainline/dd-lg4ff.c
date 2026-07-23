@@ -19,12 +19,25 @@
 #include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <linux/usb.h>
+#include <linux/version.h>
 #ifdef CONFIG_LEDS_CLASS
 #include <linux/leds.h>
 #endif
 
 #include "dd-lg4ff.h"
 #include "hid-ids.h"
+
+/*
+ * Upstream in-tree drivers include "usbhid/usbhid.h" to get hid_to_usb_dev().
+ * That header is not exported by kernel-devel on several distributions (see
+ * hid-logitech-hidpp.c's identical note), so the one macro this file needs
+ * from it is inlined here too; dd-lg4ff.c is its own translation unit and
+ * does not share hid-logitech-hidpp.c's definition.
+ */
+#ifndef hid_to_usb_dev
+#define hid_to_usb_dev(hid_dev) \
+	to_usb_device((hid_dev)->dev.parent->parent)
+#endif
 
 /*
  * Scaling/translation helpers, ported verbatim from new-lg4ff
@@ -54,6 +67,11 @@
 #define DD_LG4FF_FF_EFFECT_ALLSET 1
 #define DD_LG4FF_FF_EFFECT_PLAYING 2
 #define DD_LG4FF_FF_EFFECT_UPDATING 3
+
+/* dd_lg4ff_handle_multimode_wheel() return values, ported from new-lg4ff. */
+#define DD_LG4FF_MMODE_IS_MULTIMODE 0
+#define DD_LG4FF_MMODE_SWITCHED 1
+#define DD_LG4FF_MMODE_NOT_MULTIMODE 2
 
 /*
  * new-lg4ff numbers its multimode-wheel mode bits 0..8, one per supported
@@ -150,7 +168,7 @@ struct dd_lg4ff_device_entry {
 #endif
 };
 
-static const signed short dd_lg4ff_wheel_effects[] __maybe_unused = {
+static const signed short dd_lg4ff_wheel_effects[] = {
 	FF_CONSTANT,
 	FF_SPRING,
 	FF_DAMPER,
@@ -205,13 +223,13 @@ struct dd_lg4ff_alternate_mode {
 static void dd_lg4ff_set_range_g25(struct hid_device *hid, u16 range);
 
 /* Device table, trimmed to the G923 (c266) row. */
-static const struct dd_lg4ff_wheel dd_lg4ff_devices[] __maybe_unused = {
+static const struct dd_lg4ff_wheel dd_lg4ff_devices[] = {
 	{USB_DEVICE_ID_LOGITECH_G923_WHEEL,
 		dd_lg4ff_wheel_effects, 40, 900, 0, dd_lg4ff_set_range_g25},
 };
 
 /* Multimode wheel table, trimmed to the G923 PS (c267) and G923 (c266) rows. */
-static const struct dd_lg4ff_multimode_wheel dd_lg4ff_multimode_wheels[] __maybe_unused = {
+static const struct dd_lg4ff_multimode_wheel dd_lg4ff_multimode_wheels[] = {
 	{USB_DEVICE_ID_LOGITECH_G923_PS_WHEEL,
 	 DD_LG4FF_MODE_G923_PS | DD_LG4FF_MODE_G923,
 	 DD_LG4FF_G923_PS_TAG, DD_LG4FF_G923_PS_NAME},
@@ -220,7 +238,7 @@ static const struct dd_lg4ff_multimode_wheel dd_lg4ff_multimode_wheels[] __maybe
 	 DD_LG4FF_G923_TAG, DD_LG4FF_G923_NAME},
 };
 
-static const struct dd_lg4ff_alternate_mode dd_lg4ff_alternate_modes[DD_LG4FF_MODE_MAX_IDX] __maybe_unused = {
+static const struct dd_lg4ff_alternate_mode dd_lg4ff_alternate_modes[DD_LG4FF_MODE_MAX_IDX] = {
 	[DD_LG4FF_MODE_G923_PS_IDX] = {USB_DEVICE_ID_LOGITECH_G923_PS_WHEEL,
 					DD_LG4FF_G923_PS_TAG, DD_LG4FF_G923_PS_NAME},
 	[DD_LG4FF_MODE_G923_IDX] = {USB_DEVICE_ID_LOGITECH_G923_WHEEL,
@@ -228,7 +246,7 @@ static const struct dd_lg4ff_alternate_mode dd_lg4ff_alternate_modes[DD_LG4FF_MO
 };
 
 /* Multimode wheel identificator for the G923 family. */
-static const struct dd_lg4ff_wheel_ident_info dd_lg4ff_g923_ident_info __maybe_unused = {
+static const struct dd_lg4ff_wheel_ident_info dd_lg4ff_g923_ident_info = {
 	DD_LG4FF_MODE_G923_PS | DD_LG4FF_MODE_G923,
 	0xff00,
 	0x3800,
@@ -236,7 +254,7 @@ static const struct dd_lg4ff_wheel_ident_info dd_lg4ff_g923_ident_info __maybe_u
 };
 
 /* Multimode wheel identification checklist, reduced to the G923 entry. */
-static const struct dd_lg4ff_wheel_ident_info *dd_lg4ff_main_checklist[] __maybe_unused = {
+static const struct dd_lg4ff_wheel_ident_info *dd_lg4ff_main_checklist[] = {
 	&dd_lg4ff_g923_ident_info,
 };
 
@@ -302,11 +320,11 @@ static struct dd_lg4ff_device_entry *dd_lg4ff_get_entry(struct hid_device *hdev)
 /*
  * 7-byte SET_REPORT command senders, ported verbatim from new-lg4ff
  * (hid-lg4ff.c:480-514). dd_lg4ff_send_cmd_with_id() forces the report's
- * id first; it is used only by the mode-switch sequence, wired up once
- * that lands, so it stays __maybe_unused. dd_lg4ff_send_cmd() is now called
- * from the hrtimer effect engine below.
+ * id first; it is used by the PS-mode switch sequence below, which must
+ * address report id 0x30 explicitly. dd_lg4ff_send_cmd() is called from
+ * the hrtimer effect engine below.
  */
-static void __maybe_unused dd_lg4ff_send_cmd_with_id(struct dd_lg4ff_device_entry *entry, u8 *cmd, u8 id)
+static void dd_lg4ff_send_cmd_with_id(struct dd_lg4ff_device_entry *entry, u8 *cmd, u8 id)
 {
 	unsigned long flags;
 	s32 *value = entry->report->field[0]->value;
@@ -822,10 +840,10 @@ static __always_inline int dd_lg4ff_timer(struct dd_lg4ff_device_entry *entry)
  * hrtimer callback wrapper, ported from new-lg4ff (hid-lg4ff.c:970-994).
  * Re-arms at the back-off period dd_lg4ff_timer() just returned, or at the
  * normal tick period while effects are still playing, or stops the timer
- * once nothing is left to play. Not yet assigned to entry->hrtimer.function:
- * that wiring lands with dd_lg4ff_init() in a later task.
+ * once nothing is left to play. Assigned to entry->hrtimer.function by
+ * dd_lg4ff_init() below.
  */
-static enum hrtimer_restart __maybe_unused dd_lg4ff_timer_hires(struct hrtimer *t)
+static enum hrtimer_restart dd_lg4ff_timer_hires(struct hrtimer *t)
 {
 	struct dd_lg4ff_device_entry *entry = container_of(t, struct dd_lg4ff_device_entry, hrtimer);
 	int delay_timer;
@@ -853,10 +871,9 @@ static enum hrtimer_restart __maybe_unused dd_lg4ff_timer_hires(struct hrtimer *
 /*
  * Slot/loop-mode initializer, ported from new-lg4ff (hid-lg4ff.c:996-1019).
  * Sends the 0x0d fixed-loop-mode command, then resets and re-sends all four
- * slots empty. Not yet called: its caller, dd_lg4ff_init(), arrives in a
- * later task.
+ * slots empty. Called from dd_lg4ff_init() below.
  */
-static void __maybe_unused dd_lg4ff_init_slots(struct dd_lg4ff_device_entry *entry)
+static void dd_lg4ff_init_slots(struct dd_lg4ff_device_entry *entry)
 {
 	struct dd_lg4ff_effect_parameters parameters;
 	u8 cmd[8] = {0};
@@ -883,10 +900,10 @@ static void __maybe_unused dd_lg4ff_init_slots(struct dd_lg4ff_device_entry *ent
 
 /*
  * Ported from new-lg4ff (hid-lg4ff.c:1021-1027): cmd[0]=0xf3 tells the wheel
- * to drop whatever it is currently playing. Not yet called; wired up
- * alongside dd_lg4ff_init_slots() in a later task.
+ * to drop whatever it is currently playing. Called from dd_lg4ff_deinit()
+ * below.
  */
-static void __maybe_unused dd_lg4ff_stop_effects(struct dd_lg4ff_device_entry *entry)
+static void dd_lg4ff_stop_effects(struct dd_lg4ff_device_entry *entry)
 {
 	u8 cmd[7] = {0};
 
@@ -897,11 +914,10 @@ static void __maybe_unused dd_lg4ff_stop_effects(struct dd_lg4ff_device_entry *e
 /*
  * ff->upload callback, ported from new-lg4ff (hid-lg4ff.c:1029-1064). Pure
  * bookkeeping: stores the ff_effect into entry->states[id] and marks it
- * updating if it was already playing. No hardware I/O. Not yet wired to
- * an input_dev's ff_device: that assignment lands with dd_lg4ff_init() in
- * a later task.
+ * updating if it was already playing. No hardware I/O. Wired to the
+ * input_dev's ff_device by dd_lg4ff_init() below.
  */
-static int __maybe_unused dd_lg4ff_upload_effect(struct input_dev *dev, struct ff_effect *effect, struct ff_effect *old)
+static int dd_lg4ff_upload_effect(struct input_dev *dev, struct ff_effect *effect, struct ff_effect *old)
 {
 	struct hid_device *hid = input_get_drvdata(dev);
 	struct dd_lg4ff_device_entry *entry;
@@ -944,10 +960,10 @@ static int __maybe_unused dd_lg4ff_upload_effect(struct input_dev *dev, struct f
  * ends; allocates a condition slot (1-3) for SPRING/DAMPER/FRICTION/INERTIA
  * on start and frees it on stop. INERTIA and FRICTION on a wheel lacking
  * DD_LG4FF_CAP_FRICTION are cast to DAMPER, matching what the Windows driver
- * does for these toy-strength wheels. Not yet wired to an input_dev's
- * ff_device: that assignment lands with dd_lg4ff_init() in a later task.
+ * does for these toy-strength wheels. Wired to the input_dev's ff_device by
+ * dd_lg4ff_init() below.
  */
-static int __maybe_unused dd_lg4ff_play_effect(struct input_dev *dev, int effect_id, int value)
+static int dd_lg4ff_play_effect(struct input_dev *dev, int effect_id, int value)
 {
 	struct hid_device *hid = input_get_drvdata(dev);
 	struct dd_lg4ff_device_entry *entry;
@@ -1019,10 +1035,9 @@ static int __maybe_unused dd_lg4ff_play_effect(struct input_dev *dev, int effect
  * (hid-lg4ff.c:1255-1283). Fills wdata's product/range/capabilities fields
  * from the wheel table row (dd_lg4ff_devices[]) and, for a multimode wheel,
  * layers on the alternate-mode bitmask and the real_tag/real_name pointers
- * used by mode switching. Not yet called: its caller, dd_lg4ff_init(),
- * arrives in a later task.
+ * used by mode switching. Called from dd_lg4ff_init() below.
  */
-static void __maybe_unused dd_lg4ff_init_wheel_data(struct dd_lg4ff_wheel_data * const wdata, const struct dd_lg4ff_wheel *wheel,
+static void dd_lg4ff_init_wheel_data(struct dd_lg4ff_wheel_data * const wdata, const struct dd_lg4ff_wheel *wheel,
 				  const struct dd_lg4ff_multimode_wheel *mmode_wheel,
 				  const u16 real_product_id)
 {
@@ -1056,10 +1071,10 @@ static void __maybe_unused dd_lg4ff_init_wheel_data(struct dd_lg4ff_wheel_data *
  * Default autocentering command sender, ported verbatim from new-lg4ff
  * (hid-lg4ff.c:1287-1350). Compatible with every wheel we carry (the G923
  * family); the Formula Force EX variant (hid-lg4ff.c:1353-1376) is dropped,
- * matching the trimmed device table. Not yet wired to an input_dev's
- * ff_device: that assignment lands with dd_lg4ff_init() in a later task.
+ * matching the trimmed device table. Wired to the input_dev's ff_device by
+ * dd_lg4ff_init() below.
  */
-static void __maybe_unused dd_lg4ff_set_autocenter_default(struct input_dev *dev, u16 magnitude)
+static void dd_lg4ff_set_autocenter_default(struct input_dev *dev, u16 magnitude)
 {
 	struct hid_device *hid = input_get_drvdata(dev);
 	u8 cmd[7];
@@ -1155,11 +1170,10 @@ static void dd_lg4ff_set_range_g25(struct hid_device *hid, u16 range)
 /*
  * ff->set_gain callback, ported verbatim from new-lg4ff
  * (hid-lg4ff.c:1457-1468). Just stores the gain; dd_lg4ff_timer() (above)
- * is what folds it into the force math on the next tick. Not yet wired to
- * an input_dev's ff_device: that assignment lands with dd_lg4ff_init() in
- * a later task.
+ * is what folds it into the force math on the next tick. Wired to the
+ * input_dev's ff_device by dd_lg4ff_init() below.
  */
-static void __maybe_unused dd_lg4ff_set_gain(struct input_dev *dev, u16 gain)
+static void dd_lg4ff_set_gain(struct input_dev *dev, u16 gain)
 {
 	struct hid_device *hid = input_get_drvdata(dev);
 	struct dd_lg4ff_device_entry *entry;
@@ -1172,11 +1186,320 @@ static void __maybe_unused dd_lg4ff_set_gain(struct input_dev *dev, u16 gain)
 	entry->wdata.gain = gain;
 }
 
+/*
+ * ff->destroy callback, ported verbatim from new-lg4ff (hid-lg4ff.c:2271-
+ * 2273). The classic engine keeps no ff_device-private allocation to free
+ * here; entry itself is torn down separately by dd_lg4ff_deinit() below.
+ */
+static void dd_lg4ff_destroy(struct ff_device *ff)
+{
+}
+
+/*
+ * PS-mode -> native-mode switch command, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:418-421). dd_lg4ff_switch_from_ps_mode() below is the only
+ * sender that knows to force this.
+ */
+/* 0x30 - PS mode - Understood by G923 PS */
+/* Report ID must be 0x30 */
+static const struct dd_lg4ff_compat_mode_switch dd_lg4ff_mode_switch_30_g923 = {
+	1,
+	{0xf8, 0x09, 0x07, 0x01, 0x01, 0x00, 0x00}	/* Switch mode to G923 with detach */
+};
+
+/*
+ * PS-mode switch sender, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:1577-1598). Unlike dd_lg4ff_switch_compatibility_mode() (not
+ * ported: only used by wheel families we don't carry), this one forces the
+ * SET_REPORT's report id to 0x30, which is what the G923 PS wheel expects
+ * while still in PlayStation mode.
+ */
+static int dd_lg4ff_switch_from_ps_mode(struct hid_device *hid, const struct dd_lg4ff_compat_mode_switch *s)
+{
+	struct dd_lg4ff_device_entry *entry;
+	u8 cmd[7];
+	u8 i;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return -EINVAL;
+	}
+
+	for (i = 0; i < s->cmd_count; i++) {
+		u8 j;
+
+		for (j = 0; j < 7; j++)
+			cmd[j] = s->cmd[j + (7 * i)];
+
+		dd_lg4ff_send_cmd_with_id(entry, cmd, 0x30);
+	}
+	hid_hw_wait(hid);
+	return 0;
+}
+
+/*
+ * Multimode wheel identification, ported from new-lg4ff (hid-lg4ff.c:2174-
+ * 2207), reduced to the G923 family. new-lg4ff's dd_lg4ff_alternate_modes[0]
+ * is a "native" placeholder entry (product_id 0) that its identical loop
+ * skips by starting at i=1; our renumbered table (see DD_LG4FF_MODE_*_IDX
+ * above) has no such placeholder, so this loop starts at i=0.
+ */
+static u16 dd_lg4ff_identify_multimode_wheel(struct hid_device *hid, const u16 reported_product_id, const u16 bcdDevice)
+{
+	u32 current_mode;
+	int i;
+
+	/* identify current mode from USB PID */
+	for (i = 0; i < ARRAY_SIZE(dd_lg4ff_alternate_modes); i++) {
+		DD_LG4FF_DEBUG("Testing whether PID is %X", dd_lg4ff_alternate_modes[i].product_id);
+		if (reported_product_id == dd_lg4ff_alternate_modes[i].product_id)
+			break;
+	}
+
+	if (i == ARRAY_SIZE(dd_lg4ff_alternate_modes))
+		return 0;
+
+	current_mode = BIT(i);
+
+	for (i = 0; i < ARRAY_SIZE(dd_lg4ff_main_checklist); i++) {
+		const u16 mask = dd_lg4ff_main_checklist[i]->mask;
+		const u16 result = dd_lg4ff_main_checklist[i]->result;
+		const u16 real_product_id = dd_lg4ff_main_checklist[i]->real_product_id;
+
+		if ((current_mode & dd_lg4ff_main_checklist[i]->modes) &&
+				(bcdDevice & mask) == result) {
+			DD_LG4FF_DEBUG("Found wheel with real PID %X whose reported PID is %X", real_product_id, reported_product_id);
+			return real_product_id;
+		}
+	}
+
+	/* No match found. This is an unknown wheel; do not touch it. */
+	DD_LG4FF_DEBUG("Wheel with bcdDevice %X was not recognized as multimode wheel, leaving in its current mode", bcdDevice);
+	return 0;
+}
+
+/*
+ * Multimode wheel handling, ported from new-lg4ff (hid-lg4ff.c:2209-2269),
+ * reduced to the G923 PS -> G923 native switch. The Driving-Force auto-switch
+ * branch (hid-lg4ff.c:2222-2242) is dropped: no wheel in dd_lg4ff_devices[]
+ * reports as USB_DEVICE_ID_LOGITECH_WHEEL. new-lg4ff gates the G923 PS switch
+ * on a module parameter (lg4ff_no_autoswitch, owned by its hid-lg.c glue);
+ * this driver has no such glue and no other wheel family to keep in a
+ * "compat" mode for, so the switch always runs.
+ */
+static int dd_lg4ff_handle_multimode_wheel(struct hid_device *hid, u16 *real_product_id, const u16 bcdDevice)
+{
+	const u16 reported_product_id = hid->product;
+	int ret;
+
+	*real_product_id = dd_lg4ff_identify_multimode_wheel(hid, reported_product_id, bcdDevice);
+	/* Probed wheel is not a multimode wheel */
+	if (!*real_product_id) {
+		*real_product_id = reported_product_id;
+		DD_LG4FF_DEBUG("Wheel is not a multimode wheel");
+		return DD_LG4FF_MMODE_NOT_MULTIMODE;
+	}
+
+	/* Switch from "G923 PS" mode to native mode automatically. */
+	if (reported_product_id == USB_DEVICE_ID_LOGITECH_G923_PS_WHEEL &&
+			reported_product_id != *real_product_id) {
+		ret = dd_lg4ff_switch_from_ps_mode(hid, &dd_lg4ff_mode_switch_30_g923);
+		if (ret) {
+			/* Wheel could not have been switched to Classic mode,
+			 * leave it in "PS" mode and continue */
+			hid_err(hid, "Unable to switch wheel mode, errno %d\n", ret);
+			return DD_LG4FF_MMODE_IS_MULTIMODE;
+		}
+		return DD_LG4FF_MMODE_SWITCHED;
+	}
+
+	return DD_LG4FF_MMODE_IS_MULTIMODE;
+}
+
+/*
+ * dd_lg4ff_init() / dd_lg4ff_deinit(), ported from new-lg4ff's lg4ff_init()
+ * / lg4ff_deinit() (hid-lg4ff.c:2275-2571), reduced to FFB setup: the LEDs
+ * block (hid-lg4ff.c:2400-2409, 2456-2462, 2545-2563) and the sysfs-file
+ * creation/removal blocks (hid-lg4ff.c:2411-2462, 2517-2541) are dropped;
+ * sysfs comes in a later task.
+ *
+ * The entry is reached through hidpp_dd_lg4ff_slot(), a caller-owned
+ * void** into struct hidpp_device::lg4ff_entry (see the comment on
+ * dd_lg4ff_get_entry() above) rather than new-lg4ff's lg_drv_data->
+ * device_props, since this driver has no lg_drv_data.
+ *
+ * Idempotency: a G923 PS wheel (c267) re-enumerates as a native G923 (c266)
+ * after dd_lg4ff_handle_multimode_wheel() switches it, which means probe
+ * runs this function a second time. The first (c267) pass allocates entry,
+ * stores it in the slot, then hits LG4FF_MMODE_SWITCHED and must free that
+ * entry and clear the slot before returning, mirroring new-lg4ff's
+ * err_init path, or the second (c266) pass would leak it.
+ */
 int dd_lg4ff_init(struct hid_device *hdev)
 {
+	struct hid_input *hidinput;
+	struct input_dev *dev;
+	struct list_head *report_list = &hdev->report_enum[HID_OUTPUT_REPORT].report_list;
+	struct hid_report *report = list_entry(report_list->next, struct hid_report, list);
+	const struct usb_device_descriptor *udesc = &(hid_to_usb_dev(hdev)->descriptor);
+	const u16 bcdDevice = le16_to_cpu(udesc->bcdDevice);
+	const struct dd_lg4ff_multimode_wheel *mmode_wheel = NULL;
+	struct dd_lg4ff_device_entry *entry;
+	void **slot;
+	int error, i, j;
+	int mmode_ret, mmode_idx = -1;
+	u16 real_product_id;
+	struct ff_device *ff;
+
+	if (list_empty(&hdev->inputs)) {
+		hid_err(hdev, "no inputs found\n");
+		return -ENODEV;
+	}
+	hidinput = list_entry(hdev->inputs.next, struct hid_input, list);
+	dev = hidinput->input;
+
+	/* Check that the report looks ok */
+	if (!hid_validate_values(hdev, HID_OUTPUT_REPORT, 0, 0, 7))
+		return -EINVAL;
+
+	slot = (void **)hidpp_dd_lg4ff_slot(hdev);
+	if (!slot) {
+		hid_err(hdev, "Cannot add device, private driver data not allocated\n");
+		return -EINVAL;
+	}
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	spin_lock_init(&entry->report_lock);
+	entry->hid = hdev;
+	entry->report = report;
+	*slot = entry;
+
+	/* Check if a multimode wheel has been connected and
+	 * handle it appropriately */
+	mmode_ret = dd_lg4ff_handle_multimode_wheel(hdev, &real_product_id, bcdDevice);
+
+	/* Wheel has been told to switch to native mode. There is no point in going on
+	 * with the initialization as the wheel will do a USB reset when it switches mode
+	 */
+	if (mmode_ret == DD_LG4FF_MMODE_SWITCHED) {
+		error = 0;
+		goto err_init;
+	} else if (mmode_ret < 0) {
+		hid_err(hdev, "Unable to switch device mode during initialization, errno %d\n", mmode_ret);
+		error = mmode_ret;
+		goto err_init;
+	}
+
+	/* Check what wheel has been connected */
+	for (i = 0; i < ARRAY_SIZE(dd_lg4ff_devices); i++) {
+		if (hdev->product == dd_lg4ff_devices[i].product_id) {
+			DD_LG4FF_DEBUG("Found compatible device, product ID %04X", dd_lg4ff_devices[i].product_id);
+			break;
+		}
+	}
+
+	if (i == ARRAY_SIZE(dd_lg4ff_devices)) {
+		hid_err(hdev, "This device is flagged to be handled by dd-lg4ff but is not listed in dd_lg4ff_devices[]\n");
+		error = -ENODEV;
+		goto err_init;
+	}
+
+	if (mmode_ret == DD_LG4FF_MMODE_IS_MULTIMODE) {
+		for (mmode_idx = 0; mmode_idx < ARRAY_SIZE(dd_lg4ff_multimode_wheels); mmode_idx++) {
+			if (real_product_id == dd_lg4ff_multimode_wheels[mmode_idx].product_id)
+				break;
+		}
+
+		if (mmode_idx == ARRAY_SIZE(dd_lg4ff_multimode_wheels)) {
+			hid_err(hdev, "Device product ID %X is not listed as a multimode wheel\n", real_product_id);
+			error = -ENODEV;
+			goto err_init;
+		}
+	}
+
+	/* Set supported force feedback capabilities */
+	for (j = 0; dd_lg4ff_devices[i].ff_effects[j] >= 0; j++)
+		set_bit(dd_lg4ff_devices[i].ff_effects[j], dev->ffbit);
+
+	error = input_ff_create(dev, DD_LG4FF_MAX_EFFECTS);
+	if (error)
+		goto err_init;
+
+	ff = dev->ff;
+	ff->upload = dd_lg4ff_upload_effect;
+	ff->playback = dd_lg4ff_play_effect;
+	ff->set_gain = dd_lg4ff_set_gain;
+	ff->destroy = dd_lg4ff_destroy;
+
+	/* Initialize device properties */
+	if (mmode_ret == DD_LG4FF_MMODE_IS_MULTIMODE) {
+		BUG_ON(mmode_idx == -1);
+		mmode_wheel = &dd_lg4ff_multimode_wheels[mmode_idx];
+	}
+	dd_lg4ff_init_wheel_data(&entry->wdata, &dd_lg4ff_devices[i], mmode_wheel, real_product_id);
+
+	set_bit(FF_GAIN, dev->ffbit);
+
+	/* Check if autocentering is available and
+	 * set the centering force to zero by default */
+	if (test_bit(FF_AUTOCENTER, dev->ffbit)) {
+		dev->ff->set_autocenter = dd_lg4ff_set_autocenter_default;
+		dev->ff->set_autocenter(dev, 0);
+	}
+
+	/* Set the maximum range to start with */
+	entry->wdata.range = entry->wdata.max_range;
+	if (entry->wdata.set_range)
+		entry->wdata.set_range(hdev, entry->wdata.range);
+
+	dd_lg4ff_init_slots(entry);
+
+	entry->effects_used = 0;
+	entry->wdata.master_gain = 0xffff;
+	entry->wdata.gain = 0xffff;
+
+	spin_lock_init(&entry->timer_lock);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
+	hrtimer_init(&entry->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	entry->hrtimer.function = dd_lg4ff_timer_hires;
+#else
+	hrtimer_setup(&entry->hrtimer, dd_lg4ff_timer_hires, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#endif
+
+	hid_info(hdev, "Force feedback support for G923 (classic mode)\n");
+	hid_info(hdev, "Hires timer: period = %d ms", dd_lg4ff_timer_msecs);
+
 	return 0;
+
+err_init:
+	*slot = NULL;
+	kfree(entry);
+	return error;
 }
 
 void dd_lg4ff_deinit(struct hid_device *hdev)
 {
+	struct dd_lg4ff_device_entry *entry;
+	void **slot;
+
+	slot = (void **)hidpp_dd_lg4ff_slot(hdev);
+	if (!slot) {
+		hid_err(hdev, "Error while deinitializing device, no private driver data.\n");
+		return;
+	}
+
+	entry = (struct dd_lg4ff_device_entry *)*slot;
+	if (!entry)
+		return; /* Nothing more to do */
+
+	hrtimer_cancel(&entry->hrtimer);
+
+	dd_lg4ff_stop_effects(entry);
+
+	*slot = NULL;
+	kfree(entry);
 }
