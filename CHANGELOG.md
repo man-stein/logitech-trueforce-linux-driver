@@ -5,6 +5,26 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Added
+- **G923 support (PlayStation, c266/c267).** A classic force feedback engine
+  ported from berarma's new-lg4ff (GPL-2.0-or-later, credited in the source
+  along with the original lg4ff authors) drives the wheel: constant, spring,
+  damper, friction, inertia, periodic and ramp effects, an automatic
+  PlayStation-to-PC mode switch, and range/gain/autocenter/combine_pedals
+  sysfs settings. Hardware-verified on a c266.
+- **G923 support (Xbox, c26e), routed through the existing HID++ 0x8123
+  path** used by the other direct-drive wheels. Unverified pending an
+  Xbox-edition tester.
+- **PID-scoped driver pre-emption** for c266/c267/c26e: a new udev rule
+  reclaims the wheel from a competing driver that wins the bind race, with
+  no blanket blacklisting, so every other Logitech device is unaffected.
+
+### Notes
+- TrueForce for the G923 in SDK games still comes through the existing SDK
+  DLL shim; simulated TrueForce for the G923 is future work.
+
 ## 0.19.1 - 2026-07-23
 
 ### Fixed

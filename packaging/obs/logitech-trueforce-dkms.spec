@@ -166,19 +166,29 @@ cargo build --release --offline --locked
 # Module source DKMS compiles, under /usr/src (the .c keeps its historical
 # name; Kbuild emits hid-logitech-dd.ko).
 install -d %{buildroot}%{_usrsrc}/%{module}-%{modver}
-install -m 0644 mainline/hid-logitech-hidpp.c mainline/hid-ids.h \
+# dd-lg4ff.c/.h carry the ported classic force-feedback engine for the
+# G923 (c266/c267); the Kbuild links it into the same hid-logitech-dd.ko.
+install -m 0644 mainline/hid-logitech-hidpp.c mainline/dd-lg4ff.c \
+    mainline/dd-lg4ff.h mainline/hid-ids.h \
     mainline/hidpp_dd_tf_init.h mainline/Kbuild mainline/Makefile \
     %{buildroot}%{_usrsrc}/%{module}-%{modver}/
 sed 's/@PKGVER@/%{modver}/' packaging/aur/logitech-trueforce-dkms/dkms.conf \
     > %{buildroot}%{_usrsrc}/%{module}-%{modver}/dkms.conf
 echo "v%{modver}" > %{buildroot}%{_usrsrc}/%{module}-%{modver}/.git_hash
 # udev rules: hand the wheel's sysfs + hidraw nodes, and /dev/uhid for the
-# logi-ffb virtual-device proxy, to the input group. Both ship with the
-# driver package.
+# logi-ffb virtual-device proxy, to the input group. All three ship with
+# the driver package.
 install -D -m 0644 udev/70-logitech-trueforce.rules \
     %{buildroot}%{_prefix}/lib/udev/rules.d/70-logitech-trueforce.rules
 install -D -m 0644 udev/71-logi-ffb-uhid.rules \
     %{buildroot}%{_prefix}/lib/udev/rules.d/71-logi-ffb-uhid.rules
+# G923 (c266/c267/c26e) driver pre-emption: PID-scoped rebind rule plus a
+# softdep/blacklist hint (see the file for why the fork blacklist is safe).
+install -D -m 0644 udev/72-logitech-g923-rebind.rules \
+    %{buildroot}%{_prefix}/lib/udev/rules.d/72-logitech-g923-rebind.rules
+install -D -m 0644 packaging/modprobe.d/hid-logitech-dd.conf \
+    %{buildroot}%{_sysconfdir}/modprobe.d/hid-logitech-dd.conf
+
 # Headless toolset (the logi-dd subpackage).
 install -D -m 0755 userspace/logi-dd/target/release/logi-dd \
     %{buildroot}%{_bindir}/logi-dd
@@ -203,6 +213,8 @@ install -D -m 0644 desktop/logi-dd-gui.svg \
 %{_usrsrc}/%{module}-%{modver}/
 %{_prefix}/lib/udev/rules.d/70-logitech-trueforce.rules
 %{_prefix}/lib/udev/rules.d/71-logi-ffb-uhid.rules
+%{_prefix}/lib/udev/rules.d/72-logitech-g923-rebind.rules
+%config(noreplace) %{_sysconfdir}/modprobe.d/hid-logitech-dd.conf
 
 %files -n logi-dd
 %{_bindir}/logi-dd

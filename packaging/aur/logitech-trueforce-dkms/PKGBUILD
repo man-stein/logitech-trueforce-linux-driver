@@ -55,8 +55,12 @@ package_logitech-trueforce-dkms() {
 
 	# DKMS module source. The .c keeps its historical name; Kbuild builds
 	# it as hid-logitech-dd.ko (scoped to the direct-drive wheels).
+	# dd-lg4ff.c/.h carry the ported classic force-feedback engine for the
+	# G923 (c266/c267); the Kbuild links it into the same module.
 	install -Dm644 -t "$_dst" \
 		"$_src/mainline/hid-logitech-hidpp.c" \
+		"$_src/mainline/dd-lg4ff.c" \
+		"$_src/mainline/dd-lg4ff.h" \
 		"$_src/mainline/hid-ids.h" \
 		"$_src/mainline/hidpp_dd_tf_init.h" \
 		"$_src/mainline/Kbuild" \
@@ -75,6 +79,16 @@ package_logitech-trueforce-dkms() {
 		"$pkgdir/usr/lib/udev/rules.d/70-logitech-trueforce.rules"
 	install -Dm644 "$_src/udev/71-logi-ffb-uhid.rules" \
 		"$pkgdir/usr/lib/udev/rules.d/71-logi-ffb-uhid.rules"
+	# G923 (c266/c267/c26e) driver pre-emption: reclaims the wheel from a
+	# competing driver that won the bind race, PID-scoped only.
+	install -Dm644 "$_src/udev/72-logitech-g923-rebind.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/72-logitech-g923-rebind.rules"
+
+	# softdep ordering hint for the G923 PIDs, plus a narrow blacklist of
+	# the standalone new-lg4ff DKMS fork (see the file for why that one
+	# blacklist entry is safe).
+	install -Dm644 "$_src/packaging/modprobe.d/hid-logitech-dd.conf" \
+		"$pkgdir/etc/modprobe.d/hid-logitech-dd.conf"
 
 	# Docs + license.
 	install -Dm644 "$_src/README.md" \

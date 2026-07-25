@@ -80,6 +80,8 @@ force-feedback device).
 %files -n %{kmod_name}-kmod-common
 %{_prefix}/lib/udev/rules.d/70-logitech-trueforce.rules
 %{_prefix}/lib/udev/rules.d/71-logi-ffb-uhid.rules
+%{_prefix}/lib/udev/rules.d/72-logitech-g923-rebind.rules
+%config(noreplace) %{_sysconfdir}/modprobe.d/hid-logitech-dd.conf
 
 # Userspace companions are ordinary compiled binaries (arch-specific, not
 # tied to a kernel version), so they get their own subpackages rather than
@@ -170,11 +172,16 @@ for kver in %{?kernel_versions}; do
 done
 %{?akmod_install}
 
-# Shared, kernel-independent bits (both udev rules) ship in -kmod-common.
+# Shared, kernel-independent bits (all udev rules + the modprobe.d config)
+# ship in -kmod-common.
 install -D -m 0644 udev/70-logitech-trueforce.rules \
     "%{buildroot}%{_prefix}/lib/udev/rules.d/70-logitech-trueforce.rules"
 install -D -m 0644 udev/71-logi-ffb-uhid.rules \
     "%{buildroot}%{_prefix}/lib/udev/rules.d/71-logi-ffb-uhid.rules"
+install -D -m 0644 udev/72-logitech-g923-rebind.rules \
+    "%{buildroot}%{_prefix}/lib/udev/rules.d/72-logitech-g923-rebind.rules"
+install -D -m 0644 packaging/modprobe.d/hid-logitech-dd.conf \
+    "%{buildroot}%{_sysconfdir}/modprobe.d/hid-logitech-dd.conf"
 
 # Headless toolset (the logi-dd package).
 install -D -m 0755 userspace/logi-dd/target/release/logi-dd \
