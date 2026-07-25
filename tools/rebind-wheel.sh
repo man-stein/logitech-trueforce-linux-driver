@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
 #
-# Diagnose and fix the common "wheel stuck on hid-generic" problem.
+# Diagnose and fix the common "wheel stuck on the wrong driver" problem.
 #
-# If the wheel enumerates before hid-logitech-dd is loaded (a boot
-# race, or the in-kernel module loaded instead of this fork), hid-generic
-# claims it. The symptom is no wheel_* sysfs, no force feedback, and the
-# dmesg "Invalid code 768" phantom-button spam - the wheel works as a
-# plain joystick but none of the driver features come up.
+# If the wheel enumerates before hid-logitech-dd is loaded, hid-generic
+# claims it (a boot race). For the G923 PIDs (c266/c267/c26e) the in-tree
+# "logitech" (lg4ff family) or "logitech-hidpp-device" driver - or a
+# standalone fork registered under either name - can win the bind race
+# instead, since these PIDs also match their MODALIAS. Either way the
+# symptom is no wheel_* sysfs and no force feedback - the wheel works as
+# a plain joystick (with, on hid-generic, the dmesg "Invalid code 768"
+# phantom-button spam) but none of this driver's features come up.
 #
 # This script loads the module, reports which driver each wheel interface
-# is on, and rebinds any interface left on hid-generic to this driver.
+# is on, and rebinds any interface not already on this driver (whatever
+# it is currently on, or nothing at all) to this driver.
 # Run as root (or via sudo).
+#
+# udev/72-logitech-g923-rebind.rules does the same reclaim automatically
+# for c266/c267/c26e on every add/bind event; this script is the manual
+# fallback (and covers the other PIDs, which have no such rule).
 
 set -euo pipefail
 
 DRIVER="logitech-dd"
 MODULE="hid-logitech-dd"
 # Supported wheels (USB product IDs, upper-case to match the HID device
-# directory names under /sys/bus/hid/devices).
-PIDS="C262 C26E C268 C272 C276"
+# directory names under /sys/bus/hid/devices). C262 (G920) is deliberately
+# absent: this driver does not bind it (see mainline/hid-logitech-hidpp.c's
+# id_table comment), so rebinding it here would just fail.
+PIDS="C266 C267 C26E C268 C272 C276"
 
 if [ "$(id -u)" -ne 0 ]; then
 	echo "This script binds/unbinds kernel drivers and must run as root." >&2
@@ -54,29 +64,47 @@ for dev in /sys/bus/hid/devices/*; do
 	is_supported "$name" || continue
 	found=1
 
-	cur="$(basename "$(readlink -f "$dev/driver" 2>/dev/null)" 2>/dev/null || true)"
+	# -L, not readlink -f: on an unbound device "driver" does not exist as
+	# a symlink at all, but its parent dir does, and GNU readlink -f
+	# canonicalizes as far as it can and still exits 0 - so testing its
+	# output for emptiness does not reliably detect "unbound".
+	cur=""
+	[ -L "$dev/driver" ] && cur="$(basename "$(readlink -f "$dev/driver")")"
+
 	if [ "$cur" = "$DRIVER" ]; then
 		echo "ok:      $name already on $DRIVER"
 		ok=$((ok + 1))
 		continue
 	fi
 
-	if [ "$cur" = "hid-generic" ]; then
-		echo "rescue:  $name is on hid-generic, rebinding to $DRIVER ..."
-		echo "$name" > "/sys/bus/hid/drivers/hid-generic/unbind" 2>/dev/null || true
+	if [ -n "$cur" ]; then
+		# Bound to something else: hid-generic (the classic boot race),
+		# or a competing driver that won the bind race for this PID -
+		# the in-tree "logitech" (lg4ff family) or "logitech-hidpp-device",
+		# or a standalone fork registered under either name. Reclaim it
+		# regardless of which; these PIDs belong to this driver.
+		echo "rescue:  $name is on $cur, rebinding to $DRIVER ..."
+		echo "$name" > "/sys/bus/hid/drivers/$cur/unbind" 2>/dev/null || true
 		if echo "$name" > "/sys/bus/hid/drivers/$DRIVER/bind" 2>/dev/null; then
 			echo "         -> now on $(basename "$(readlink -f "$dev/driver" 2>/dev/null)")"
 			rescued=$((rescued + 1))
 		else
-			# Bind failed: put it back so the wheel still works as a
-			# plain joystick rather than ending up unbound.
-			echo "$name" > "/sys/bus/hid/drivers/hid-generic/bind" 2>/dev/null || true
-			echo "         -> bind to $DRIVER FAILED (is the in-kernel module loaded instead of the fork?); left on hid-generic" >&2
+			# Bind failed: put it back so the wheel still works under
+			# its previous driver rather than ending up unbound.
+			echo "$name" > "/sys/bus/hid/drivers/$cur/bind" 2>/dev/null || true
+			echo "         -> bind to $DRIVER FAILED (is the module loaded?); left on $cur" >&2
 		fi
 		continue
 	fi
 
-	echo "info:    $name is on '${cur:-none}' (not hid-generic); leaving it alone"
+	# Unbound entirely: some sub-interfaces of these composite devices are
+	# left unbound by design (this driver's own probe declines them), so
+	# a failed bind attempt here is expected and is not reported as an
+	# error.
+	if echo "$name" > "/sys/bus/hid/drivers/$DRIVER/bind" 2>/dev/null; then
+		echo "rescue:  $name was unbound, bound to $DRIVER"
+		rescued=$((rescued + 1))
+	fi
 done
 
 if [ "$found" -eq 0 ]; then
@@ -86,7 +114,7 @@ if [ "$found" -eq 0 ]; then
 fi
 
 echo
-echo "Summary: $ok already bound, $rescued rescued from hid-generic."
+echo "Summary: $ok already bound, $rescued rescued."
 if [ "$rescued" -gt 0 ]; then
 	echo "Force feedback and wheel_* sysfs should be available now."
 fi

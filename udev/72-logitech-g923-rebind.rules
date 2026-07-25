@@ -1,0 +1,42 @@
+# G923 driver pre-emption: c266 (PlayStation/PC classic), c267
+# (PlayStation 4/PC classic), c26e (Xbox/PC, HID++ 0x8123).
+#
+# hid-logitech-dd (driver name "logitech-dd") claims these PIDs alongside
+# its direct-drive wheels - see the id_table comment in
+# mainline/hid-logitech-hidpp.c. But kernel module autoload starts every
+# module whose MODALIAS matches a device, and probe order between modules
+# is not guaranteed, so the in-tree "logitech" (lg4ff family, hid-logitech)
+# or "logitech-hidpp-device" (hid-logitech-hidpp) - or a standalone fork
+# registered under either of those same driver names - can still win the
+# bind race on boot or hotplug.
+#
+# This rule is scoped to c266/c267/c26e only. It never touches any other
+# device those drivers serve (G29/G27/DFGT/G920, mice, keyboards,
+# receivers, ...), so hid-logitech and hid-logitech-hidpp keep working
+# normally for everything else. Do NOT widen the PID match or the driver
+# match without re-reading that guarantee.
+#
+# Covers three cases:
+#   - a competing driver won the bind race: unbind it, bind ours.
+#   - the interface enumerated with no driver at all: bind ours.
+#   - already ours: no-op (case falls through).
+# modprobe first because module autoload from the "add"/"bind" uevent can
+# still be in flight; a bind attempt before the module is loaded is a
+# harmless no-op (the driver directory does not exist yet).
+#
+# Note: "$$" not "$" for the shell variables below - udev treats a lone
+# "$" as its own substitution marker, so a literal shell "$d" must be
+# written "$$d" (passes udevadm verify). "%k" is udev's own kernel-name
+# substitution (e.g. "0003:046D:C266.0007") and is left unescaped on
+# purpose, same as $env{...} would be.
+
+ACTION!="add|bind", GOTO="g923_rebind_end"
+SUBSYSTEM!="hid", GOTO="g923_rebind_end"
+KERNEL=="0003:046D:C266.*|0003:046D:C267.*|0003:046D:C26E.*", GOTO="g923_rebind_apply"
+GOTO="g923_rebind_end"
+
+LABEL="g923_rebind_apply"
+
+RUN+="/bin/sh -c 'modprobe hid-logitech-dd 2>/dev/null; p=/sys/bus/hid/devices/%k/driver; d=; [ -L \"$$p\" ] && d=$$(basename $$(readlink -f \"$$p\")); case \"$$d\" in logitech-dd) ;; \"\") echo %k > /sys/bus/hid/drivers/logitech-dd/bind 2>/dev/null ;; *) echo %k > /sys/bus/hid/drivers/$$d/unbind 2>/dev/null; echo %k > /sys/bus/hid/drivers/logitech-dd/bind 2>/dev/null ;; esac'"
+
+LABEL="g923_rebind_end"

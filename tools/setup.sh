@@ -24,6 +24,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OLD_BLACKLIST_FILE="/etc/modprobe.d/blacklist-hid-logitech-hidpp.conf"
 UDEV_DST="/etc/udev/rules.d/70-logitech-trueforce.rules"
 UDEV_FFB_DST="/etc/udev/rules.d/71-logi-ffb-uhid.rules"
+UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
+MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
 WHEEL_PIDS="c276 c272 c268"
 # Steam appids of the Logitech-SDK sims for launch-option checks:
 #   ACC, AC EVO, AC, AMS2, Le Mans Ultimate, rFactor 2
@@ -132,6 +134,16 @@ doctor() {
 		ok "logi-ffb uhid udev rule installed"
 	else
 		wrn "logi-ffb uhid udev rule missing - logi-ffb needs sudo for /dev/uhid (run: sudo ./tools/setup.sh)"
+	fi
+	if [ -f "$UDEV_G923_DST" ] || [ -f "/usr/lib/udev/rules.d/72-logitech-g923-rebind.rules" ]; then
+		ok "G923 (c266/c267/c26e) rebind rule installed"
+	else
+		wrn "G923 rebind rule missing - the in-tree driver may keep winning the bind race on c266/c267/c26e (run: sudo ./tools/setup.sh)"
+	fi
+	if [ -f "$MODPROBE_DST" ]; then
+		ok "hid-logitech-dd modprobe.d config installed"
+	else
+		wrn "hid-logitech-dd modprobe.d config missing (run: sudo ./tools/setup.sh)"
 	fi
 	if [ -n "$W" ]; then
 		if [ -w "$W/wheel_range" ] && [ -w "$W/range" ]; then

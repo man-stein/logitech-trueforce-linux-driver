@@ -46,8 +46,13 @@ Six pieces, all built from this repository:
 
 - **The kernel driver** (`hid-logitech-dd`) is the core. It exposes force
   feedback through the standard Linux evdev interface and every wheel setting
-  under `/sys/.../wheel_*`. It is scoped to the direct-drive wheels and coexists
-  with the in-tree Logitech driver, so no blacklisting is needed.
+  under `/sys/.../wheel_*`. It is scoped to the direct-drive wheels plus the
+  G923's classic FFB (`c266`/`c267`/`c26e`), and coexists with the in-tree
+  Logitech driver everywhere else - no blanket module blacklisting. For those
+  three G923 PIDs specifically, a udev rule pre-empts the in-tree driver if it
+  wins the initial bind race (unbind, then bind this driver); every other
+  Logitech device it serves - G29/G27/DFGT/G920, mice, keyboards, receivers -
+  is untouched.
 
 - **logi-dd**, a terminal settings app: a native-Linux stand-in for the parts of
   G HUB that configure the wheel, with typed, validated edits and a G HUB-style

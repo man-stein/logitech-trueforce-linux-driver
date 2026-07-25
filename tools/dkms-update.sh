@@ -24,6 +24,10 @@ UDEV_SRC="$REPO_ROOT/udev/70-logitech-trueforce.rules"
 UDEV_DST="/etc/udev/rules.d/70-logitech-trueforce.rules"
 UDEV_FFB_SRC="$REPO_ROOT/udev/71-logi-ffb-uhid.rules"
 UDEV_FFB_DST="/etc/udev/rules.d/71-logi-ffb-uhid.rules"
+UDEV_G923_SRC="$REPO_ROOT/udev/72-logitech-g923-rebind.rules"
+UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
+MODPROBE_SRC="$REPO_ROOT/packaging/modprobe.d/hid-logitech-dd.conf"
+MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
 
 if [ "$EUID" -ne 0 ]; then
 	echo "error: run as root (sudo $0)" >&2
@@ -96,6 +100,31 @@ if [ -f "$UDEV_FFB_SRC" ]; then
 		udevadm trigger --subsystem-match=misc
 	else
 		echo "udev rule up to date ($UDEV_FFB_DST)"
+	fi
+fi
+
+# Same for the G923 (c266/c267/c26e) bind-race rebind rule: it fires on
+# SUBSYSTEM=="hid" add/bind, not hidraw, so it needs its own trigger match.
+if [ -f "$UDEV_G923_SRC" ]; then
+	if ! cmp -s "$UDEV_G923_SRC" "$UDEV_G923_DST" 2>/dev/null; then
+		echo "== installing udev rule to $UDEV_G923_DST =="
+		install -m 0644 "$UDEV_G923_SRC" "$UDEV_G923_DST"
+		udevadm control --reload
+		udevadm trigger --subsystem-match=hid
+	else
+		echo "udev rule up to date ($UDEV_G923_DST)"
+	fi
+fi
+
+# modprobe.d: softdep ordering hint for the G923 PIDs, plus a narrow
+# blacklist of the standalone new-lg4ff fork (see the file for why that
+# one is safe to blacklist and hid-logitech-hidpp is not).
+if [ -f "$MODPROBE_SRC" ]; then
+	if ! cmp -s "$MODPROBE_SRC" "$MODPROBE_DST" 2>/dev/null; then
+		echo "== installing $MODPROBE_DST =="
+		install -Dm 0644 "$MODPROBE_SRC" "$MODPROBE_DST"
+	else
+		echo "modprobe.d config up to date ($MODPROBE_DST)"
 	fi
 fi
 
