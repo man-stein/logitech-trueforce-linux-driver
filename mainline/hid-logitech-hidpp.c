@@ -14990,6 +14990,10 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 				hid_info(hidpp->hid_dev,
 					 "g920_get_config ok: num_effects=%d range=%u gain=0x%04x\n",
 					 data.num_effects, data.range, data.gain);
+				if (hidpp->hid_dev->product ==
+				    USB_DEVICE_ID_LOGITECH_G923_XBOX_WHEEL)
+					hid_info(hidpp->hid_dev,
+						 "G923 (Xbox): using HID++ 0x8123 force feedback\n");
 				ret = hidpp_ff_init(hidpp, &data);
 				if (ret == -ENODEV) {
 					hid_info(hidpp->hid_dev,
