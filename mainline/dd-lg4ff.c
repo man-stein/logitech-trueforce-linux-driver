@@ -1317,11 +1317,166 @@ static int dd_lg4ff_handle_multimode_wheel(struct hid_device *hid, u16 *real_pro
 }
 
 /*
+ * Sysfs attributes, ported from new-lg4ff (hid-lg4ff.c: combine_pedals at
+ * :1725-1759, range at :1762-1801, gain at :1838-1872, autocenter at
+ * :1875-1909), trimmed to these four settings. The real_id/alternate_modes,
+ * LED, and per-effect-class (peak_ffb_level/spring_level/damper_level/
+ * friction_level) sysfs from the same reference range are not ported here.
+ *
+ * These deliberately keep the classic lg4ff attribute names (range/gain/
+ * autocenter/combine_pedals) rather than this driver's usual wheel_*
+ * naming: the classic engine's settings have different semantics and
+ * scale than the DD wheels' wheel_* attributes (a different FFB engine
+ * entirely), and downstream tools such as Oversteer already know these
+ * names from upstream lg4ff. The device_attribute objects still use this
+ * file's dd_lg4ff_ symbol prefix; __ATTR() (rather than DEVICE_ATTR(),
+ * which ties the C symbol name to the sysfs file name) is what lets the
+ * symbol and file names differ.
+ */
+static ssize_t dd_lg4ff_range_show(struct device *dev, struct device_attribute *attr,
+				    char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", entry->wdata.range);
+}
+
+/* Set range to the user-specified value, clamped to the wheel's limits. */
+static ssize_t dd_lg4ff_range_store(struct device *dev, struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+	u16 range = simple_strtoul(buf, NULL, 10);
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	if (range == 0)
+		range = entry->wdata.max_range;
+
+	if (entry->wdata.set_range && range >= entry->wdata.min_range && range <= entry->wdata.max_range) {
+		entry->wdata.set_range(hid, range);
+		entry->wdata.range = range;
+	}
+
+	return count;
+}
+
+static struct device_attribute dd_lg4ff_attr_range =
+	__ATTR(range, 0664, dd_lg4ff_range_show, dd_lg4ff_range_store);
+
+static ssize_t dd_lg4ff_gain_show(struct device *dev, struct device_attribute *attr,
+				   char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", entry->wdata.master_gain);
+}
+
+static ssize_t dd_lg4ff_gain_store(struct device *dev, struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+	u16 gain = simple_strtoul(buf, NULL, 10);
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	entry->wdata.master_gain = gain;
+
+	return count;
+}
+
+static struct device_attribute dd_lg4ff_attr_gain =
+	__ATTR(gain, 0664, dd_lg4ff_gain_show, dd_lg4ff_gain_store);
+
+static ssize_t dd_lg4ff_autocenter_show(struct device *dev, struct device_attribute *attr,
+					 char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", entry->wdata.autocenter);
+}
+
+/* Goes through the ff_device's set_autocenter callback, same as the FF core
+ * driving FF_AUTOCENTER would, so entry->wdata.autocenter (updated inside
+ * dd_lg4ff_set_autocenter_default()) stays the single source of truth.
+ */
+static ssize_t dd_lg4ff_autocenter_store(struct device *dev, struct device_attribute *attr,
+					  const char *buf, size_t count)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hid_input *hidinput = list_entry(hid->inputs.next, struct hid_input, list);
+	struct input_dev *inputdev = hidinput->input;
+	u16 autocenter = simple_strtoul(buf, NULL, 10);
+
+	inputdev->ff->set_autocenter(inputdev, autocenter);
+
+	return count;
+}
+
+static struct device_attribute dd_lg4ff_attr_autocenter =
+	__ATTR(autocenter, 0664, dd_lg4ff_autocenter_show, dd_lg4ff_autocenter_store);
+
+static ssize_t dd_lg4ff_combine_show(struct device *dev, struct device_attribute *attr,
+				      char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", entry->wdata.combine);
+}
+
+static ssize_t dd_lg4ff_combine_store(struct device *dev, struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+	u16 combine = simple_strtoul(buf, NULL, 10);
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	if (combine > 2)
+		combine = 2;
+
+	entry->wdata.combine = combine;
+	return count;
+}
+
+static struct device_attribute dd_lg4ff_attr_combine_pedals =
+	__ATTR(combine_pedals, 0664, dd_lg4ff_combine_show, dd_lg4ff_combine_store);
+
+/*
  * dd_lg4ff_init() / dd_lg4ff_deinit(), ported from new-lg4ff's lg4ff_init()
  * / lg4ff_deinit() (hid-lg4ff.c:2275-2571), reduced to FFB setup: the LEDs
- * block (hid-lg4ff.c:2400-2409, 2456-2462, 2545-2563) and the sysfs-file
- * creation/removal blocks (hid-lg4ff.c:2411-2462, 2517-2541) are dropped;
- * sysfs comes in a later task.
+ * block (hid-lg4ff.c:2400-2409, 2456-2462, 2545-2563) is dropped, and the
+ * sysfs-file creation/removal blocks (hid-lg4ff.c:2411-2462, 2517-2541) are
+ * reduced to the four attributes defined just above.
  *
  * The entry is reached through hidpp_dd_lg4ff_slot(), a caller-owned
  * void** into struct hidpp_device::lg4ff_entry (see the comment on
@@ -1450,6 +1605,24 @@ int dd_lg4ff_init(struct hid_device *hdev)
 		dev->ff->set_autocenter(dev, 0);
 	}
 
+	/* Create sysfs interface */
+	error = device_create_file(&hdev->dev, &dd_lg4ff_attr_combine_pedals);
+	if (error)
+		hid_warn(hdev, "Unable to create sysfs interface for \"combine_pedals\", errno %d\n", error);
+	error = device_create_file(&hdev->dev, &dd_lg4ff_attr_range);
+	if (error)
+		hid_warn(hdev, "Unable to create sysfs interface for \"range\", errno %d\n", error);
+	if (test_bit(FF_CONSTANT, dev->ffbit)) {
+		error = device_create_file(&hdev->dev, &dd_lg4ff_attr_gain);
+		if (error)
+			hid_warn(hdev, "Unable to create sysfs interface for \"gain\", errno %d\n", error);
+		if (test_bit(FF_AUTOCENTER, dev->ffbit)) {
+			error = device_create_file(&hdev->dev, &dd_lg4ff_attr_autocenter);
+			if (error)
+				hid_warn(hdev, "Unable to create sysfs interface for \"autocenter\", errno %d\n", error);
+		}
+	}
+
 	/* Set the maximum range to start with */
 	entry->wdata.range = entry->wdata.max_range;
 	if (entry->wdata.set_range)
@@ -1483,6 +1656,8 @@ err_init:
 
 void dd_lg4ff_deinit(struct hid_device *hdev)
 {
+	struct hid_input *hidinput = list_entry(hdev->inputs.next, struct hid_input, list);
+	struct input_dev *dev = hidinput->input;
 	struct dd_lg4ff_device_entry *entry;
 	void **slot;
 
@@ -1495,6 +1670,14 @@ void dd_lg4ff_deinit(struct hid_device *hdev)
 	entry = (struct dd_lg4ff_device_entry *)*slot;
 	if (!entry)
 		return; /* Nothing more to do */
+
+	device_remove_file(&hdev->dev, &dd_lg4ff_attr_combine_pedals);
+	device_remove_file(&hdev->dev, &dd_lg4ff_attr_range);
+	if (test_bit(FF_CONSTANT, dev->ffbit)) {
+		device_remove_file(&hdev->dev, &dd_lg4ff_attr_gain);
+		if (test_bit(FF_AUTOCENTER, dev->ffbit))
+			device_remove_file(&hdev->dev, &dd_lg4ff_attr_autocenter);
+	}
 
 	hrtimer_cancel(&entry->hrtimer);
 
