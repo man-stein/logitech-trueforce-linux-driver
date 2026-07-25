@@ -19,7 +19,11 @@ the contract is "it works on RS50 and G Pro as listed here".
   Xbox-edition tester.
 - **PID-scoped driver pre-emption** for c266/c267/c26e: a new udev rule
   reclaims the wheel from a competing driver that wins the bind race, with
-  no blanket blacklisting, so every other Logitech device is unaffected.
+  no blanket blacklisting, so every other Logitech device stays on its
+  usual driver. The one exception is berarma's new-lg4ff (`hid-logitech-new`),
+  which we blacklist outright to stop it racing us for c266/c267 - if you
+  run it for a different Logitech wheel (G29, G27, DFGT, ...) that wheel
+  now falls back to the in-tree `hid-logitech` driver instead.
 
 ### Notes
 - TrueForce for the G923 in SDK games still comes through the existing SDK

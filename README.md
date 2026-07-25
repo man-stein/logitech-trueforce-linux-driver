@@ -10,8 +10,9 @@ G HUB-equivalent wheel settings to Linux, including in Proton/Wine sims -
 all managed from a desktop app (**logi-dd-gui**) or a terminal one
 (**logi-dd**).
 
-> Not a direct-drive wheel? The belt-driven **G920 / G923** are already served
-> by the in-tree `hid-logitech-hidpp` driver and do not need this one.
+> Not a direct-drive wheel? The belt-driven **G920** is already served by the
+> in-tree `hid-logitech-hidpp` driver and does not need this one. The **G923**
+> (all editions) is supported by this driver instead - see the carve-out below.
 
 ## What works
 
