@@ -1468,8 +1468,74 @@ static ssize_t dd_lg4ff_combine_store(struct device *dev, struct device_attribut
 	return count;
 }
 
+/*
+ * Writing to combine_pedals only records entry->wdata.combine; the byte
+ * rewrite that actually makes it take effect happens in
+ * dd_lg4ff_raw_event(), called for every interface-0 input report.
+ */
 static struct device_attribute dd_lg4ff_attr_combine_pedals =
 	__ATTR(combine_pedals, 0664, dd_lg4ff_combine_show, dd_lg4ff_combine_store);
+
+/*
+ * Rewrite the wheel's interface-0 input report to synthesize a combined
+ * pedal axis, ported from new-lg4ff's lg4ff_raw_event() (hid-lg4ff.c:
+ * 1183-1253), trimmed to the G923's byte offset: the reference also
+ * carries cases for the DFP/G25/G27/DFGT/G29 and older non-multimode
+ * wheels, none of which this driver supports, so only the G923 case
+ * survives.
+ *
+ * Called from hidpp_raw_event() in hid-logitech-hidpp.c for devices
+ * carrying HIDPP_QUIRK_CLASS_LG4FF. Always returns 0 (rather than the
+ * reference's 1 on a match) so the caller lets the modified bytes
+ * continue on to normal input processing instead of having the report
+ * treated as fully consumed.
+ */
+int dd_lg4ff_raw_event(struct hid_device *hdev, struct hid_report *report, u8 *data, int size)
+{
+	int offset;
+	struct dd_lg4ff_device_entry *entry = dd_lg4ff_get_entry(hdev);
+
+	if (!entry)
+		return 0;
+
+	if (entry->wdata.combine == 1) {
+		switch (entry->wdata.product_id) {
+		case USB_DEVICE_ID_LOGITECH_G923_WHEEL:
+			offset = 6;
+			break;
+		default:
+			return 0;
+		}
+
+		if (size < offset + 2)
+			return 0;
+
+		/* Compute a combined axis when wheel does not supply it */
+		data[offset] = (0xFF + data[offset] - data[offset + 1]) >> 1;
+		data[offset + 1] = 0x7F;
+		return 0;
+	}
+
+	if (entry->wdata.combine == 2) {
+		switch (entry->wdata.product_id) {
+		case USB_DEVICE_ID_LOGITECH_G923_WHEEL:
+			offset = 6;
+			break;
+		default:
+			return 0;
+		}
+
+		if (size < offset + 3)
+			return 0;
+
+		/* Compute a combined axis when wheel does not supply it */
+		data[offset] = (0xFF + data[offset] - data[offset + 2]) >> 1;
+		data[offset + 2] = 0x7F;
+		return 0;
+	}
+
+	return 0;
+}
 
 /*
  * dd_lg4ff_init() / dd_lg4ff_deinit(), ported from new-lg4ff's lg4ff_init()

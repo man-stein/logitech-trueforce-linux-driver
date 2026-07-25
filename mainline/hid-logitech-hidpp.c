@@ -14221,6 +14221,19 @@ static int hidpp_raw_event(struct hid_device *hdev, struct hid_report *report,
 		return m560_raw_event(hdev, data, size);
 
 	/*
+	 * The classic G923 FFB engine (HIDPP_QUIRK_CLASS_LG4FF, PS c266/c267)
+	 * is only ever probed on interface 0 (see hidpp_probe's ifnum check),
+	 * so every report reaching here for such a device is that interface's
+	 * 12-byte input report. no_hidpp_reports (set for this quirk above)
+	 * already kept it out of the HID++ demux. dd_lg4ff_raw_event() rewrites
+	 * combined-pedal bytes in place per the combine_pedals sysfs setting
+	 * and always returns 0, so the (possibly modified) report still
+	 * reaches the normal input-mapping path below/after this function.
+	 */
+	if (hidpp->quirks & HIDPP_QUIRK_CLASS_LG4FF)
+		return dd_lg4ff_raw_event(hdev, report, data, size);
+
+	/*
 	 * Process direct-drive joystick reports for steering-position tracking.
 	 * Only process 30-byte reports from interface 0 (joystick).
 	 * Checking the interface number first guards against a 30-byte
