@@ -5,7 +5,7 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## Unreleased
+## 0.20.0 - 2026-07-26
 
 ### Added
 - **G923 support, PlayStation edition (`046d:c266`/`c267`).** A classic
