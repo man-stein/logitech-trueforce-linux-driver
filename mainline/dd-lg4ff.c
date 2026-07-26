@@ -162,6 +162,7 @@ struct dd_lg4ff_device_entry {
 	struct dd_lg4ff_slot slots[4];
 	struct dd_lg4ff_effect_state states[DD_LG4FF_MAX_EFFECTS];
 	unsigned peak_ffb_level;
+	s32 ffb_output; /* Slot-0 net force, post-gain; lockless, WRITE_ONCE/READ_ONCE */
 	int effects_used;
 #ifdef CONFIG_LEDS_CLASS
 	int has_leds;
@@ -802,6 +803,7 @@ static __always_inline int dd_lg4ff_timer(struct dd_lg4ff_device_entry *entry)
 	spin_unlock_irqrestore(&entry->timer_lock, flags);
 
 	parameters[0].level = (long)parameters[0].level * gain / 0xffff;
+	WRITE_ONCE(entry->ffb_output, parameters[0].level);
 
 	ffb_level = abs(parameters[0].level);
 	for (i = 1; i < 4; i++) {
@@ -902,7 +904,10 @@ static void dd_lg4ff_init_slots(struct dd_lg4ff_device_entry *entry)
 /*
  * Ported from new-lg4ff (hid-lg4ff.c:1021-1027): cmd[0]=0xf3 tells the wheel
  * to drop whatever it is currently playing. Called from dd_lg4ff_deinit()
- * below.
+ * below. Also zeroes ffb_output, since nothing is playing past this point;
+ * the timer itself stopping (hrtimer_restart returning HRTIMER_NORESTART)
+ * leaves the last computed value in place for a moment, which is fine since
+ * that path always leads here shortly after.
  */
 static void dd_lg4ff_stop_effects(struct dd_lg4ff_device_entry *entry)
 {
@@ -910,6 +915,8 @@ static void dd_lg4ff_stop_effects(struct dd_lg4ff_device_entry *entry)
 
 	cmd[0] = 0xf3;
 	dd_lg4ff_send_cmd(entry, cmd);
+
+	WRITE_ONCE(entry->ffb_output, 0);
 }
 
 /*
@@ -1333,6 +1340,10 @@ static int dd_lg4ff_handle_multimode_wheel(struct hid_device *hid, u16 *real_pro
  * file's dd_lg4ff_ symbol prefix; __ATTR() (rather than DEVICE_ATTR(),
  * which ties the C symbol name to the sysfs file name) is what lets the
  * symbol and file names differ.
+ *
+ * ffb_output, further down, is not part of that port: it is new, read-only,
+ * and named without the wheel_* prefix for the same downstream-tool-naming
+ * reason as the four attributes above.
  */
 static ssize_t dd_lg4ff_range_show(struct device *dev, struct device_attribute *attr,
 				    char *buf)
@@ -1476,6 +1487,29 @@ static ssize_t dd_lg4ff_combine_store(struct device *dev, struct device_attribut
  */
 static struct device_attribute dd_lg4ff_attr_combine_pedals =
 	__ATTR(combine_pedals, 0664, dd_lg4ff_combine_show, dd_lg4ff_combine_store);
+
+/*
+ * Read-only: the classic engine's current slot-0 net force (post-gain),
+ * updated once per timer tick by dd_lg4ff_timer() above. Range is roughly
+ * -32768..32767, 0 meaning no force. Consumers such as a userspace
+ * TrueForce streamer poll this to mirror the classic engine's force into a
+ * TrueForce stream's cur field while that stream is running.
+ */
+static ssize_t dd_lg4ff_ffb_output_show(struct device *dev, struct device_attribute *attr,
+					 char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL)
+		return -EINVAL;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(entry->ffb_output));
+}
+
+static struct device_attribute dd_lg4ff_attr_ffb_output =
+	__ATTR(ffb_output, 0444, dd_lg4ff_ffb_output_show, NULL);
 
 /*
  * Rewrite the wheel's interface-0 input report to synthesize a combined
@@ -1838,6 +1872,9 @@ int dd_lg4ff_init(struct hid_device *hdev)
 	error = device_create_file(&hdev->dev, &dd_lg4ff_attr_range);
 	if (error)
 		hid_warn(hdev, "Unable to create sysfs interface for \"range\", errno %d\n", error);
+	error = device_create_file(&hdev->dev, &dd_lg4ff_attr_ffb_output);
+	if (error)
+		hid_warn(hdev, "Unable to create sysfs interface for \"ffb_output\", errno %d\n", error);
 	if (test_bit(FF_CONSTANT, dev->ffbit)) {
 		error = device_create_file(&hdev->dev, &dd_lg4ff_attr_gain);
 		if (error)
@@ -1909,6 +1946,7 @@ void dd_lg4ff_deinit(struct hid_device *hdev)
 
 	device_remove_file(&hdev->dev, &dd_lg4ff_attr_combine_pedals);
 	device_remove_file(&hdev->dev, &dd_lg4ff_attr_range);
+	device_remove_file(&hdev->dev, &dd_lg4ff_attr_ffb_output);
 	if (test_bit(FF_CONSTANT, dev->ffbit)) {
 		device_remove_file(&hdev->dev, &dd_lg4ff_attr_gain);
 		if (test_bit(FF_AUTOCENTER, dev->ffbit))
@@ -1916,6 +1954,12 @@ void dd_lg4ff_deinit(struct hid_device *hdev)
 	}
 
 	hrtimer_cancel(&entry->hrtimer);
+
+	/* Belt and suspenders: dd_lg4ff_stop_effects() below also zeroes
+	 * ffb_output, but a poller reading it between hrtimer_cancel() and
+	 * that call would otherwise still see the last live value.
+	 */
+	WRITE_ONCE(entry->ffb_output, 0);
 
 	dd_lg4ff_stop_effects(entry);
 
