@@ -16,6 +16,9 @@
 //! - [`synth`]: pure engine-note generator (1 kHz sample stream).
 //! - [`config`]: `~/.config/logi-dd/tf-sim.conf` key=value store.
 //! - [`tf`]: safe wrapper over the libtrueforce FFI (stream lifecycle).
+//! - [`g923`]: TrueForce for the Logitech G923, which libtrueforce does not
+//!   recognize; discovery, packet building, and the FFB-mirror/idle state
+//!   machine live here instead.
 //! - [`leds`]: the rev-display feeder (`wheel_rev_level` via sysfs).
 //! - [`relay`]: the shared-memory telemetry relay wire format, for sims
 //!   (iRacing, rF2/LMU, ...) that only publish telemetry through a
@@ -33,6 +36,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod f1;
+pub mod g923;
 pub mod leds;
 pub mod pcars;
 pub mod relay;

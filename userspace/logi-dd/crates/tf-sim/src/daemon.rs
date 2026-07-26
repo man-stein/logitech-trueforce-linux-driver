@@ -22,7 +22,7 @@ use crate::leds::RevLeds;
 use crate::synth::EngineSynth;
 use crate::telemetry::Telemetry;
 use crate::tf::TfStream;
-use crate::{beamng, codemasters, f1, pcars, relay, wrc};
+use crate::{beamng, codemasters, f1, g923, pcars, relay, wrc};
 
 /// Stop the stream after this much telemetry silence (spec safety rail).
 pub const SILENCE_TIMEOUT_MS: u64 = 500;
@@ -61,9 +61,43 @@ pub fn install_signal_handlers() -> Result<()> {
     Ok(())
 }
 
+/// Either wheel family's open TrueForce stream, so [`Active`] does not
+/// have to care which one it holds. libtrueforce's own discovery only
+/// recognizes the RS50-family PIDs, so a G923 never reaches [`TfStream`];
+/// [`open_wheel_stream`] tries the G923 path first and falls back to it.
+enum WheelStream {
+    Dd(TfStream),
+    G923(g923::G923Stream),
+}
+
+impl WheelStream {
+    fn push(&mut self, samples: &[f32]) -> Result<()> {
+        match self {
+            WheelStream::Dd(s) => s.push(samples),
+            WheelStream::G923(s) => {
+                s.push(samples).map_err(|e| Error::Io("G923 TrueForce stream write".into(), e))
+            }
+        }
+    }
+}
+
+/// Open whichever wheel is present: a G923 (via [`g923::discover`], which
+/// libtrueforce cannot see) takes priority since a G923 never answers
+/// libtrueforce's own RS50-family discovery; otherwise fall back to the DD
+/// wheels' libtrueforce-backed [`TfStream`].
+fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
+    if let Some(paths) = g923::discover() {
+        let sign = g923::Sign::resolve(cfg.g923_ffb_invert);
+        let stream = g923::G923Stream::open(&paths, sign)
+            .map_err(|e| Error::Io("open G923 TrueForce stream".into(), e))?;
+        return Ok(WheelStream::G923(stream));
+    }
+    TfStream::open(0).map(WheelStream::Dd)
+}
+
 /// A live wheel stream plus the state that feeds it.
 struct Active {
-    stream: TfStream,
+    stream: WheelStream,
     synth: EngineSynth,
     game: &'static str,
     tel: Telemetry,
@@ -191,7 +225,7 @@ pub fn run(cfg: &Config) -> Result<()> {
                         a.tel = tel;
                         a.last_telemetry = now;
                     }
-                    None if now >= next_open_attempt => match TfStream::open(0) {
+                    None if now >= next_open_attempt => match open_wheel_stream(cfg) {
                         Ok(stream) => {
                             eprintln!(
                                 "logi-tf-sim: stream start ({id}, rpm {:.0}/{:.0}, speed {:.0} m/s)",

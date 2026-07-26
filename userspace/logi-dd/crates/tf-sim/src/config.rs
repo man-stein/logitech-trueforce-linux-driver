@@ -14,6 +14,10 @@
 //! - `port.codemasters` (also serves modern F1 and EA Sports WRC),
 //!   `port.pcars`, `port.beamng`, `port.relay`: UDP listen ports
 //! - `game.<id>.enabled` (0/1), `game.<id>.intensity` (0-100)
+//! - `g923.ffb_invert` (0/1): sign flag for the G923 FFB mirror (see
+//!   [`crate::g923::Sign`]); unverified on hardware, defaults off. The
+//!   `LOGI_TF_SIM_G923_FFB_SIGN` environment variable overrides this for a
+//!   one-off check without editing the file.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -68,6 +72,10 @@ pub struct Config {
     pub beamng_port: u16,
     /// Shared-memory telemetry relay listen port (see [`crate::relay`]).
     pub relay_port: u16,
+    /// The G923 FFB-mirror sign flag, persisted; see
+    /// [`crate::g923::Sign::resolve`] for how this combines with the
+    /// environment override.
+    pub g923_ffb_invert: bool,
     /// Per-game overrides, keyed by game id.
     pub games: BTreeMap<String, GameConfig>,
 }
@@ -86,6 +94,7 @@ impl Default for Config {
             pcars_port: pcars::DEFAULT_PORT,
             beamng_port: beamng::DEFAULT_PORT,
             relay_port: relay::DEFAULT_PORT,
+            g923_ffb_invert: false,
             games: BTreeMap::new(),
         }
     }
@@ -177,6 +186,11 @@ impl Config {
                         cfg.relay_port = v;
                     }
                 }
+                "g923.ffb_invert" => {
+                    if let Some(v) = parse_bool(raw) {
+                        cfg.g923_ffb_invert = v;
+                    }
+                }
                 _ => {
                     let Some(rest) = key.strip_prefix("game.") else { continue };
                     let Some((id, field)) = rest.rsplit_once('.') else { continue };
@@ -219,6 +233,7 @@ impl Config {
         out.push_str(&format!("port.pcars={}\n", self.pcars_port));
         out.push_str(&format!("port.beamng={}\n", self.beamng_port));
         out.push_str(&format!("port.relay={}\n", self.relay_port));
+        out.push_str(&format!("g923.ffb_invert={}\n", u8::from(self.g923_ffb_invert)));
         for (id, game) in &self.games {
             out.push_str(&format!("game.{id}.enabled={}\n", u8::from(game.enabled)));
             out.push_str(&format!("game.{id}.intensity={}\n", game.intensity));
@@ -271,12 +286,24 @@ mod tests {
         assert_eq!(cfg.pcars_port, 5606);
         assert_eq!(cfg.beamng_port, 4444);
         assert_eq!(cfg.relay_port, 20780);
+        assert!(!cfg.g923_ffb_invert, "the FFB mirror sign defaults non-inverted");
     }
 
     #[test]
     fn save_load_round_trips() {
         let path = tempdir().join(FILE_NAME);
-        let mut cfg = Config { enabled: false, intensity: 42, pitch_pct: 50, leds: false, codemasters_port: 30500, pcars_port: 5607, beamng_port: 4445, relay_port: 20781, games: BTreeMap::new() };
+        let mut cfg = Config {
+            enabled: false,
+            intensity: 42,
+            pitch_pct: 50,
+            leds: false,
+            codemasters_port: 30500,
+            pcars_port: 5607,
+            beamng_port: 4445,
+            relay_port: 20781,
+            g923_ffb_invert: true,
+            games: BTreeMap::new(),
+        };
         cfg.games.insert("dirt-rally-2".into(), GameConfig { enabled: true, intensity: 80 });
         cfg.games.insert("ams2-pcars2".into(), GameConfig { enabled: false, intensity: 100 });
         cfg.save_to(&path).unwrap();
@@ -285,6 +312,7 @@ mod tests {
         assert!(text.starts_with(FILE_HEADER));
         assert!(text.contains("leds=0\n"));
         assert!(text.contains("port.relay=20781\n"));
+        assert!(text.contains("g923.ffb_invert=1\n"));
         assert!(text.contains("game.dirt-rally-2.intensity=80\n"));
     }
 
@@ -313,6 +341,16 @@ mod tests {
         assert!(cfg.leds, "unparsable leds bool keeps the default");
         assert!(!cfg.game_enabled("dirt-rally-2"));
         assert_eq!(cfg.games.len(), 1);
+    }
+
+    #[test]
+    fn g923_ffb_invert_parses_and_defaults() {
+        let path = tempdir().join(FILE_NAME);
+        fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=1\n")).unwrap();
+        assert!(Config::load_from(&path).g923_ffb_invert);
+
+        fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=maybe\n")).unwrap();
+        assert!(!Config::load_from(&path).g923_ffb_invert, "unparsable bool keeps the default");
     }
 
     #[test]

@@ -1,0 +1,900 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! TrueForce for the Logitech G923 (PS edition, PID 0xC266; Xbox edition,
+//! PID 0xC26E, once it lands on the same interface-2 transport).
+//!
+//! libtrueforce's own discovery only recognizes the RS50-family PIDs (see
+//! `userspace/libtrueforce/src/discovery.c`'s `is_supported_wheel`), so
+//! this module talks to the G923 directly: it finds the wheel's
+//! interface-2 hidraw node (the vendor-page-0xFFFD TrueForce transport)
+//! and, separately, the interface-0 HID device's `ffb_output` sysfs
+//! attribute (the classic FFB engine's live net force, added by the
+//! kernel driver), and streams the same 64-byte type-0x01 packets the DD
+//! wheels get.
+//!
+//! # Why the FFB mirror is not optional
+//!
+//! Hardware fact (verified live on this wheel 2026-07-26): once a
+//! type-0x01 sample stream is running on interface 2, the wheel's motor
+//! follows that stream's `cur` field and *stops* reacting to interface
+//! 0's classic FFB commands. So the moment this module starts streaming,
+//! it becomes the wheel's only path to feeling anything at all: each
+//! outgoing packet's samples are the game's synthesized engine texture
+//! (if any) merged with the classic engine's own live force
+//! (`ffb_output`, read fresh each packet), not just the texture on its
+//! own. Skip that merge and the driver's steering-force FFB simply goes
+//! silent for as long as the stream runs.
+//!
+//! # State machine
+//!
+//! ```text
+//! Streaming --(no audio AND ffb_output == 0, for IDLE_TIMEOUT)--> Idle
+//! Idle --(audio or ffb_output become nonzero)--> Streaming
+//! ```
+//!
+//! While `Streaming`, [`G923Stream::push`] merges each new sample with the
+//! freshly read `ffb_output` and emits one sample packet per
+//! [`NEW_PER_PACKET`]-sample chunk. Crossing into `Idle` sends the
+//! type-0x04 stop template exactly once (handing the wheel back to its
+//! native interface-0 FFB) and then withholds packets entirely: any
+//! further type-0x01 traffic would immediately re-arm the follow behavior
+//! above. Leaving `Idle` re-runs the full two-pass init sequence (the same
+//! one [`G923Stream::open`] sends) before resuming samples, since the
+//! wheel's stream-side state cannot be trusted to have survived the gap.
+//! [`Drop`] (which also runs during panic unwinding) sends the stop
+//! template unconditionally, best-effort, as a last-resort safety net:
+//! TF4ALL issue #13 documents a stream left following a stale `cur`
+//! walking the wheel to its force limit.
+//!
+//! # Sign flag
+//!
+//! `ffb_output`'s sign relative to the wheel's felt push direction is
+//! *unverified* on the classic FFB engine (TF4ALL's own HID++-family path
+//! negates it; the classic path is a different engine entirely). See
+//! [`Sign::resolve`]. The default is non-inverted; flipping it is a
+//! config/env change, not a code change, pending the hardware sign test
+//! (Task 17 Step 4).
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// Logitech's USB vendor id.
+pub const VID: u16 = 0x046D;
+/// G923, PlayStation/PC edition.
+pub const PID_PS: u16 = 0xC266;
+/// G923, Xbox/PC edition (same transport once it lands on interface 2;
+/// recognized here so Task 18's mode switch has nothing left to do here).
+pub const PID_XBOX: u16 = 0xC26E;
+
+/// USB interface number of the TrueForce (vendor page 0xFFFD) transport.
+const TF_IFACE: &str = "2";
+/// First three bytes of a report descriptor opening with
+/// `Usage Page (0xFFFD)` (tag 0x06, 2-byte little-endian data FD FF).
+const VENDOR_PAGE_PREFIX: [u8; 3] = [0x06, 0xFD, 0xFF];
+
+const HIDRAW_ROOT: &str = "/sys/class/hidraw";
+const HID_BUS_ROOT: &str = "/sys/bus/hid/devices";
+/// The kernel driver's read-only classic-FFB mirror attribute (interface 0).
+const FFB_OUTPUT_ATTR: &str = "ffb_output";
+
+/// Samples per packet's rolling window (13 slots, oldest first).
+pub const WINDOW: usize = 13;
+/// New samples appended per emitted packet.
+pub const NEW_PER_PACKET: usize = 4;
+/// Wire-format zero force (offset-binary center).
+pub const CENTER: u16 = 0x8000;
+/// Wire packet length.
+pub const PACKET_LEN: usize = 64;
+
+/// How long audio-and-force silence must persist before [`G923Stream`]
+/// sends the stop template and stops streaming (see module docs).
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Spacing between init packets, matching libtrueforce's `session.c`
+/// (the capture this was extracted from showed ~2-4 ms; below that risks
+/// overrunning the device's interrupt-OUT processing on slower firmware).
+const INIT_INTERPACKET: Duration = Duration::from_micros(2000);
+
+include!(concat!(env!("OUT_DIR"), "/g923_init_data.rs"));
+
+/// True if `pid` is a recognized G923 edition (PS now; Xbox once it
+/// reaches this transport).
+fn is_g923_pid(pid: u16) -> bool {
+    pid == PID_PS || pid == PID_XBOX
+}
+
+// ---------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------
+
+/// Paths [`discover`] found for one G923: the TrueForce hidraw node to
+/// stream to, and (best-effort) the classic engine's `ffb_output`
+/// attribute to mirror. A missing `ffb_output` is not a discovery
+/// failure: [`FfbMirror`] treats it as a permanently-zero mirror, which
+/// degrades to "no force merge" rather than refusing to stream at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct G923Paths {
+    pub hidraw: PathBuf,
+    pub ffb_output: Option<PathBuf>,
+}
+
+/// Scan the real sysfs (`/sys/class/hidraw`, `/sys/bus/hid/devices`) for a
+/// G923's TrueForce interface. See [`discover_at`] for the algorithm.
+pub fn discover() -> Option<G923Paths> {
+    discover_at(Path::new(HIDRAW_ROOT), Path::new(HID_BUS_ROOT))
+}
+
+/// Same as [`discover`], against caller-supplied sysfs roots (unit tests
+/// point these at a fabricated tree; see the `tests` module below for its
+/// shape).
+///
+/// Algorithm, mirroring libtrueforce's `discovery.c`/`sysfs.c`:
+/// 1. Walk `hidraw_root` for a `hidrawN` entry whose `device` symlink
+///    resolves to a HID device sitting on USB interface 2 of a G923
+///    (`bInterfaceNumber`/`idVendor`/`idProduct` read from the resolved
+///    path's parent USB-interface and USB-device directories).
+/// 2. Confirm it via `device/report_descriptor`'s vendor-page prefix, the
+///    same signal `ffb-proxy` uses to pick its own hidraw node.
+/// 3. Correlate the resolved USB device root against every entry under
+///    `hid_bus_root` to find the sibling interface-0 HID device exposing
+///    `ffb_output`, if any.
+pub fn discover_at(hidraw_root: &Path, hid_bus_root: &Path) -> Option<G923Paths> {
+    let entries = std::fs::read_dir(hidraw_root).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("hidraw") {
+            continue;
+        }
+        let device_link = entry.path().join("device");
+        let Ok(hid_device_dir) = std::fs::canonicalize(&device_link) else { continue };
+        if !is_g923_tf_interface(&hid_device_dir) {
+            continue;
+        }
+        if !report_descriptor_matches(&device_link) {
+            continue;
+        }
+        return Some(G923Paths {
+            hidraw: PathBuf::from("/dev").join(&*name),
+            ffb_output: find_ffb_output(&hid_device_dir, hid_bus_root),
+        });
+    }
+    None
+}
+
+fn read_trim(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+fn parse_hex_u16(s: &str) -> Option<u16> {
+    u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+}
+
+/// True if the (already-canonicalized) HID device directory sits on the
+/// G923's TrueForce USB interface: its parent (the USB interface dir) has
+/// `bInterfaceNumber == 2`, and that parent's parent (the USB device dir)
+/// has a G923 `idVendor`/`idProduct`.
+fn is_g923_tf_interface(hid_device_dir: &Path) -> bool {
+    let Some(iface_dir) = hid_device_dir.parent() else { return false };
+    let Some(usb_dir) = iface_dir.parent() else { return false };
+    let ifnum = read_trim(&iface_dir.join("bInterfaceNumber"));
+    if ifnum.as_deref() != Some(TF_IFACE) {
+        return false;
+    }
+    let vid = read_trim(&usb_dir.join("idVendor")).and_then(|s| parse_hex_u16(&s));
+    let pid = read_trim(&usb_dir.join("idProduct")).and_then(|s| parse_hex_u16(&s));
+    vid == Some(VID) && pid.is_some_and(is_g923_pid)
+}
+
+/// True if `device_link`'s `report_descriptor` opens with the vendor-page
+/// prefix ([`VENDOR_PAGE_PREFIX`]). Belt-and-suspenders alongside the
+/// interface-number check above: a report descriptor mismatch on a
+/// same-PID interface would mean the kernel driver's interface layout
+/// changed underneath this assumption.
+fn report_descriptor_matches(device_link: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(device_link.join("report_descriptor")) else { return false };
+    bytes.starts_with(&VENDOR_PAGE_PREFIX)
+}
+
+/// Find the sibling HID device (same physical USB device as
+/// `hid_device_dir`, i.e. same wheel) exposing [`FFB_OUTPUT_ATTR`], by
+/// scanning `hid_bus_root`.
+fn find_ffb_output(hid_device_dir: &Path, hid_bus_root: &Path) -> Option<PathBuf> {
+    // Two levels up from the HID device dir: past the USB interface dir,
+    // to the USB device dir shared by every interface of this one wheel.
+    let usb_root = hid_device_dir.parent()?.parent()?;
+    let entries = std::fs::read_dir(hid_bus_root).ok()?;
+    for entry in entries.flatten() {
+        let Ok(candidate) = std::fs::canonicalize(entry.path()) else { continue };
+        if !candidate.starts_with(usb_root) {
+            continue;
+        }
+        let attr = entry.path().join(FFB_OUTPUT_ATTR);
+        if attr.exists() {
+            return Some(attr);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------
+// Wire-format conversions
+// ---------------------------------------------------------------------
+
+/// The classic engine's mirror sign relative to the wire's offset-binary
+/// convention. Unverified on hardware; see the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sign {
+    Normal,
+    Inverted,
+}
+
+impl Sign {
+    /// Resolve the sign flag: `LOGI_TF_SIM_G923_FFB_SIGN` (`"invert"`,
+    /// `"inverted"`, or `"1"` selects [`Sign::Inverted`]; anything else,
+    /// including unset, falls through) overrides `cfg_invert` (the
+    /// persisted `g923.ffb_invert` config key) when the variable is set at
+    /// all, so a one-off hardware check does not require editing the
+    /// config file. Both ultimately default to [`Sign::Normal`].
+    pub fn resolve(cfg_invert: bool) -> Sign {
+        match std::env::var("LOGI_TF_SIM_G923_FFB_SIGN") {
+            Ok(v) if matches!(v.as_str(), "invert" | "inverted" | "1") => Sign::Inverted,
+            Ok(_) => Sign::Normal,
+            Err(_) => {
+                if cfg_invert {
+                    Sign::Inverted
+                } else {
+                    Sign::Normal
+                }
+            }
+        }
+    }
+
+    fn apply(self, v: i16) -> i16 {
+        match self {
+            Sign::Normal => v,
+            // i16::MIN has no positive i16 representation; saturate to
+            // the max magnitude instead of overflowing.
+            Sign::Inverted => v.checked_neg().unwrap_or(i16::MAX),
+        }
+    }
+}
+
+/// Clamp a driver-reported `ffb_output` (documented range -32768..32767,
+/// but read from a sysfs `%d` with no enforced bound) into `i16`.
+pub fn clamp_ffb(raw: i32) -> i16 {
+    raw.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+/// `sample` (-1.0..1.0) to a signed 16-bit wire amplitude, matching
+/// libtrueforce's `logitf_float_to_wire` scaling (clamp, then `* 32767`).
+fn float_to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * 32767.0) as i16
+}
+
+/// Signed 16-bit amplitude to the wire's offset-binary `u16`
+/// (`0x8000` = zero force), matching libtrueforce's `logitf_s16_to_wire`.
+pub fn i16_to_wire(sample: i16) -> u16 {
+    (i32::from(sample) + 0x8000) as u16
+}
+
+/// `sample` (-1.0..1.0) to the wire's offset-binary `u16` directly, with no
+/// force merge (used by the packet-builder tests below; the merged path
+/// used at runtime is [`mix_to_wire`]).
+pub fn float_to_wire(sample: f32) -> u16 {
+    i16_to_wire(float_to_i16(sample))
+}
+
+/// The per-packet force merge: `sample` (the synthesized engine-texture
+/// amplitude tf-sim would otherwise send alone, -1.0..1.0) plus the
+/// classic engine's live `ffb_output` (raw driver units, sign-and-clamp
+/// adjusted), saturating to the wire's signed 16-bit range before the
+/// offset-binary conversion. See the module docs for why this merge, not
+/// a plain mirror or a plain pass-through, is what keeps the wheel's real
+/// steering force alive while the TrueForce stream runs.
+pub fn mix_to_wire(sample: f32, ffb_raw: i32, sign: Sign) -> u16 {
+    let sample_i = i32::from(float_to_i16(sample));
+    let ffb_i = i32::from(sign.apply(clamp_ffb(ffb_raw)));
+    let mixed = (sample_i + ffb_i).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    i16_to_wire(mixed)
+}
+
+// ---------------------------------------------------------------------
+// Packet builder
+// ---------------------------------------------------------------------
+
+/// Shift `window` left by `new.len()` (dropping the oldest entries) and
+/// append `new` at the tail, in place. `new` must be no longer than
+/// [`WINDOW`]; the DD-wheel format only ever calls this with exactly
+/// [`NEW_PER_PACKET`] entries.
+fn slide_window(window: &mut [u16; WINDOW], new: &[u16]) {
+    let n = new.len().min(WINDOW);
+    window.copy_within(n.., 0);
+    window[WINDOW - n..].copy_from_slice(&new[..n]);
+}
+
+/// Build one type-0x01 sample packet from `window` (already updated by
+/// [`slide_window`]), byte-for-byte matching libtrueforce's `stream.c`
+/// `build_packet` (kept here, not reused, because the G923 is outside
+/// libtrueforce's own supported-wheel table; see the module docs):
+///
+/// ```text
+///  0       0x01           HID report id
+///  4       0x01           packet type: sample
+///  5       seq            u8, wraps
+///  6..9    cur, duplicated (= window[WINDOW-1])
+///  10      0x04           new-samples-this-packet (NEW_PER_PACKET)
+///  11      0x0d           constant per captures
+///  12..63  13 x 4B        window slots, oldest first, each duplicated
+/// ```
+fn build_sample_packet(seq: u8, window: &[u16; WINDOW]) -> [u8; PACKET_LEN] {
+    let mut pkt = [0u8; PACKET_LEN];
+    pkt[0] = 0x01;
+    pkt[4] = 0x01;
+    pkt[5] = seq;
+    let cur = window[WINDOW - 1];
+    pkt[6] = (cur & 0xff) as u8;
+    pkt[7] = (cur >> 8) as u8;
+    pkt[8] = (cur & 0xff) as u8;
+    pkt[9] = (cur >> 8) as u8;
+    pkt[10] = NEW_PER_PACKET as u8;
+    pkt[11] = 0x0d;
+    for (i, &v) in window.iter().enumerate() {
+        let off = 12 + i * 4;
+        pkt[off] = (v & 0xff) as u8;
+        pkt[off + 1] = (v >> 8) as u8;
+        pkt[off + 2] = (v & 0xff) as u8;
+        pkt[off + 3] = (v >> 8) as u8;
+    }
+    pkt
+}
+
+/// The type-0x04 stop template from the embedded init sequence (its
+/// second-to-last packet), with `seq` written into offset 5. Sending this
+/// hands the wheel back to native interface-0 FFB.
+fn stop_packet(seq: u8) -> [u8; PACKET_LEN] {
+    let mut pkt = TF_INIT_PACKETS[TF_INIT_PACKET_COUNT - 2];
+    pkt[5] = seq;
+    pkt
+}
+
+// ---------------------------------------------------------------------
+// ffb_output mirror
+// ---------------------------------------------------------------------
+
+/// Reads the classic engine's live net force from an already-open
+/// `ffb_output` attribute file, or reports a constant zero when no
+/// attribute was found at discovery time.
+struct FfbMirror {
+    file: Option<File>,
+}
+
+impl FfbMirror {
+    fn open(path: Option<&Path>) -> FfbMirror {
+        FfbMirror { file: path.and_then(|p| File::open(p).ok()) }
+    }
+
+    /// `pread`s the attribute (offset 0, no seek needed) and parses it as
+    /// a decimal `i32`. Any failure (missing file, transient read error,
+    /// unparsable content) reads as zero: a wheel this module cannot read
+    /// force from is treated the same as one reporting no force, which is
+    /// the safe direction to fail in (never invents force that is not
+    /// there).
+    fn read_raw(&self) -> i32 {
+        let Some(file) = &self.file else { return 0 };
+        let mut buf = [0u8; 16];
+        let Ok(n) = file.read_at(&mut buf, 0) else { return 0 };
+        std::str::from_utf8(&buf[..n]).ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Idle policy (pure, clock-injected state machine)
+// ---------------------------------------------------------------------
+
+/// What [`G923Stream::push`] should do this tick, per [`IdlePolicy::tick`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleAction {
+    /// Keep streaming samples normally.
+    Stream,
+    /// Just crossed the idle timeout: send the stop template once, then
+    /// withhold sample packets.
+    EnterIdle,
+    /// Already idle; keep withholding.
+    StayIdle,
+    /// Activity resumed: re-init before this tick's sample packet.
+    Resume,
+}
+
+/// The clock-injected state machine behind the module's `Streaming`/`Idle`
+/// states (see module docs). Pure and independent of any file descriptor,
+/// so it is unit-tested without a real wheel.
+#[derive(Debug)]
+struct IdlePolicy {
+    /// When the current run of silent ticks started; `None` while active.
+    silent_since: Option<Instant>,
+    idle: bool,
+}
+
+impl IdlePolicy {
+    fn new() -> IdlePolicy {
+        IdlePolicy { silent_since: None, idle: false }
+    }
+
+    fn tick(&mut self, now: Instant, silent: bool, timeout: Duration) -> IdleAction {
+        if silent {
+            if self.idle {
+                return IdleAction::StayIdle;
+            }
+            let since = *self.silent_since.get_or_insert(now);
+            if now.duration_since(since) >= timeout {
+                self.idle = true;
+                return IdleAction::EnterIdle;
+            }
+            return IdleAction::Stream;
+        }
+        self.silent_since = None;
+        if self.idle {
+            self.idle = false;
+            return IdleAction::Resume;
+        }
+        IdleAction::Stream
+    }
+}
+
+// ---------------------------------------------------------------------
+// The stream
+// ---------------------------------------------------------------------
+
+/// An open G923 TrueForce session: the interface-2 hidraw node, plus the
+/// interface-0 `ffb_output` mirror. Created by [`G923Stream::open`], which
+/// sends the two-pass init sequence before returning; dropped, it always
+/// sends the stop template (best-effort) so the wheel is never left
+/// following a stale `cur`.
+pub struct G923Stream {
+    hidraw: File,
+    ffb: FfbMirror,
+    sign: Sign,
+    seq: u8,
+    window: [u16; WINDOW],
+    /// Samples accumulated by [`push`](Self::push) between whole
+    /// [`NEW_PER_PACKET`]-sized chunks.
+    pending: Vec<f32>,
+    idle: IdlePolicy,
+}
+
+impl G923Stream {
+    /// Open `paths.hidraw`, send the two-pass init sequence (blocks for
+    /// roughly `2 * 68 * INIT_INTERPACKET`, a bit over a quarter second),
+    /// and return a stream ready for [`push`](Self::push).
+    pub fn open(paths: &G923Paths, sign: Sign) -> io::Result<G923Stream> {
+        let hidraw = OpenOptions::new().read(true).write(true).open(&paths.hidraw)?;
+        let mut stream = G923Stream {
+            hidraw,
+            ffb: FfbMirror::open(paths.ffb_output.as_deref()),
+            sign,
+            seq: 0,
+            window: [CENTER; WINDOW],
+            pending: Vec::with_capacity(NEW_PER_PACKET * 4),
+            idle: IdlePolicy::new(),
+        };
+        stream.send_init()?;
+        Ok(stream)
+    }
+
+    /// Send the embedded 68-packet sequence twice, sequence byte
+    /// restarting at 1 each pass, matching libtrueforce's `session.c`.
+    fn send_init(&mut self) -> io::Result<()> {
+        for _pass in 0..2 {
+            for (i, packet) in TF_INIT_PACKETS.iter().enumerate() {
+                let mut pkt = *packet;
+                pkt[5] = ((i + 1) & 0xff) as u8;
+                self.hidraw.write_all(&pkt)?;
+                std::thread::sleep(INIT_INTERPACKET);
+            }
+        }
+        self.seq = ((TF_INIT_PACKET_COUNT + 1) & 0xff) as u8;
+        self.window = [CENTER; WINDOW];
+        Ok(())
+    }
+
+    fn next_seq(&mut self) -> u8 {
+        let seq = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        seq
+    }
+
+    fn send_stop(&mut self) -> io::Result<()> {
+        let seq = self.next_seq();
+        self.hidraw.write_all(&stop_packet(seq))
+    }
+
+    /// Queue `samples` (each -1.0..1.0, tf-sim's usual synthesized-audio
+    /// rate) and emit one packet per complete [`NEW_PER_PACKET`]-sample
+    /// chunk, merging the wheel's live `ffb_output` into each. Leftover
+    /// samples shorter than a full chunk carry over to the next call.
+    pub fn push(&mut self, samples: &[f32]) -> io::Result<()> {
+        self.pending.extend_from_slice(samples);
+        while self.pending.len() >= NEW_PER_PACKET {
+            let chunk: Vec<f32> = self.pending.drain(..NEW_PER_PACKET).collect();
+            self.emit(&chunk)?;
+        }
+        Ok(())
+    }
+
+    fn emit(&mut self, chunk: &[f32]) -> io::Result<()> {
+        let ffb_raw = self.ffb.read_raw();
+        let silent = ffb_raw == 0 && chunk.iter().all(|&s| s == 0.0);
+
+        match self.idle.tick(Instant::now(), silent, IDLE_TIMEOUT) {
+            IdleAction::Stream => {}
+            IdleAction::EnterIdle => return self.send_stop(),
+            IdleAction::StayIdle => return Ok(()),
+            IdleAction::Resume => self.send_init()?,
+        }
+
+        let mut new_wire = [CENTER; NEW_PER_PACKET];
+        for (slot, &sample) in new_wire.iter_mut().zip(chunk.iter()) {
+            *slot = mix_to_wire(sample, ffb_raw, self.sign);
+        }
+        slide_window(&mut self.window, &new_wire);
+        let seq = self.next_seq();
+        self.hidraw.write_all(&build_sample_packet(seq, &self.window))
+    }
+
+    /// Best-effort stop; safe to call repeatedly (e.g. once from explicit
+    /// teardown and again from [`Drop`]).
+    pub fn stop(&mut self) {
+        let _ = self.send_stop();
+    }
+}
+
+impl Drop for G923Stream {
+    fn drop(&mut self) {
+        // Runs during panic unwinding too: the last-resort guard against
+        // TF4ALL issue #13 (a stream left following a stale `cur` walks
+        // the wheel to its force limit).
+        self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn tempdir() -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tf-sim-g923-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // -- discovery -------------------------------------------------------
+
+    /// Build a fake sysfs tree with the same relative shape as the real
+    /// one: a `devices/usb1/1-1` USB device directory holding an
+    /// interface-0 and an interface-2 HID device dir, a `hidraw` root with
+    /// a symlinked `device`, and a `hid_bus` root with symlinked entries
+    /// for both interfaces (mirroring `/sys/bus/hid/devices`, whose
+    /// entries are themselves symlinks into the same device tree).
+    struct FakeSysfs {
+        root: PathBuf,
+        hidraw_root: PathBuf,
+        hid_bus_root: PathBuf,
+    }
+
+    impl FakeSysfs {
+        fn build(vid: &str, pid: &str, report_descriptor: &[u8]) -> FakeSysfs {
+            let root = tempdir();
+            let usb_dev = root.join("devices/usb1/1-1");
+            std::fs::create_dir_all(&usb_dev).unwrap();
+            std::fs::write(usb_dev.join("idVendor"), format!("{vid}\n")).unwrap();
+            std::fs::write(usb_dev.join("idProduct"), format!("{pid}\n")).unwrap();
+
+            let if0 = usb_dev.join("1-1:1.0");
+            let hid0 = if0.join("0003:046D:C266.0003");
+            std::fs::create_dir_all(&hid0).unwrap();
+            std::fs::write(if0.join("bInterfaceNumber"), "0\n").unwrap();
+            std::fs::write(hid0.join(FFB_OUTPUT_ATTR), "0\n").unwrap();
+
+            let if2 = usb_dev.join("1-1:1.2");
+            let hid2 = if2.join("0003:046D:C266.0005");
+            std::fs::create_dir_all(&hid2).unwrap();
+            std::fs::write(if2.join("bInterfaceNumber"), "2\n").unwrap();
+            std::fs::write(hid2.join("report_descriptor"), report_descriptor).unwrap();
+
+            let hidraw_root = root.join("class/hidraw");
+            let hidraw3 = hidraw_root.join("hidraw3");
+            std::fs::create_dir_all(&hidraw3).unwrap();
+            symlink(&hid2, hidraw3.join("device")).unwrap();
+
+            let hid_bus_root = root.join("bus/hid/devices");
+            std::fs::create_dir_all(&hid_bus_root).unwrap();
+            symlink(&hid0, hid_bus_root.join("0003:046D:C266.0003")).unwrap();
+            symlink(&hid2, hid_bus_root.join("0003:046D:C266.0005")).unwrap();
+
+            FakeSysfs { root, hidraw_root, hid_bus_root }
+        }
+    }
+
+    fn vendor_page_descriptor() -> Vec<u8> {
+        let mut d = VENDOR_PAGE_PREFIX.to_vec();
+        d.extend_from_slice(&[0x09, 0x01, 0xA1, 0x01]); // arbitrary trailing bytes
+        d
+    }
+
+    #[test]
+    fn discovers_the_g923_tf_interface_and_its_ffb_mirror() {
+        let fs = FakeSysfs::build("046d", "c266", &vendor_page_descriptor());
+        let paths = discover_at(&fs.hidraw_root, &fs.hid_bus_root).expect("discovered");
+        assert_eq!(paths.hidraw, PathBuf::from("/dev/hidraw3"));
+        let ffb = paths.ffb_output.expect("ffb_output found");
+        assert!(ffb.ends_with("0003:046D:C266.0003/ffb_output"));
+        let _ = fs.root; // keep the tempdir alive until here
+    }
+
+    #[test]
+    fn discovers_the_xbox_pid_too() {
+        let fs = FakeSysfs::build("046d", "c26e", &vendor_page_descriptor());
+        assert!(discover_at(&fs.hidraw_root, &fs.hid_bus_root).is_some());
+    }
+
+    #[test]
+    fn ignores_a_non_g923_vendor_or_product() {
+        let fs = FakeSysfs::build("046d", "c276", &vendor_page_descriptor());
+        assert!(discover_at(&fs.hidraw_root, &fs.hid_bus_root).is_none(), "RS50 PID must not match");
+
+        let fs = FakeSysfs::build("1234", "c266", &vendor_page_descriptor());
+        assert!(discover_at(&fs.hidraw_root, &fs.hid_bus_root).is_none(), "foreign vendor must not match");
+    }
+
+    #[test]
+    fn ignores_a_report_descriptor_without_the_vendor_page_prefix() {
+        let fs = FakeSysfs::build("046d", "c266", &[0x05, 0x01, 0x09, 0x04]); // generic desktop page
+        assert!(discover_at(&fs.hidraw_root, &fs.hid_bus_root).is_none());
+    }
+
+    #[test]
+    fn missing_ffb_output_still_discovers_the_hidraw() {
+        // Interface-0 present but without the attribute (older driver, or
+        // a wheel plugged into a kernel predating Task 16).
+        let fs = FakeSysfs::build("046d", "c266", &vendor_page_descriptor());
+        std::fs::remove_file(fs.root.join("devices/usb1/1-1/1-1:1.0/0003:046D:C266.0003").join(FFB_OUTPUT_ATTR))
+            .unwrap();
+        let paths = discover_at(&fs.hidraw_root, &fs.hid_bus_root).expect("hidraw still found");
+        assert_eq!(paths.ffb_output, None);
+    }
+
+    #[test]
+    fn missing_hidraw_root_is_not_a_wheel() {
+        assert!(discover_at(Path::new("/nonexistent-hidraw-root"), Path::new("/nonexistent-bus-root")).is_none());
+    }
+
+    // -- wire conversions -------------------------------------------------
+
+    #[test]
+    fn i16_to_wire_is_offset_binary() {
+        assert_eq!(i16_to_wire(0), 0x8000);
+        assert_eq!(i16_to_wire(i16::MIN), 0x0000);
+        assert_eq!(i16_to_wire(i16::MAX), 0xFFFF);
+        assert_eq!(i16_to_wire(-1), 0x7FFF);
+        assert_eq!(i16_to_wire(1), 0x8001);
+    }
+
+    #[test]
+    fn float_to_wire_clamps_and_scales() {
+        assert_eq!(float_to_wire(0.0), 0x8000);
+        assert_eq!(float_to_wire(1.0), i16_to_wire(32767));
+        assert_eq!(float_to_wire(-1.0), i16_to_wire(-32767));
+        assert_eq!(float_to_wire(5.0), float_to_wire(1.0), "over-range clamps");
+        assert_eq!(float_to_wire(-5.0), float_to_wire(-1.0), "under-range clamps");
+    }
+
+    #[test]
+    fn clamp_ffb_bounds_to_i16() {
+        assert_eq!(clamp_ffb(0), 0);
+        assert_eq!(clamp_ffb(32767), i16::MAX);
+        assert_eq!(clamp_ffb(-32768), i16::MIN);
+        assert_eq!(clamp_ffb(1_000_000), i16::MAX, "over-range clamps rather than wraps");
+        assert_eq!(clamp_ffb(-1_000_000), i16::MIN);
+    }
+
+    #[test]
+    fn sign_normal_passes_through_and_inverted_negates() {
+        assert_eq!(Sign::Normal.apply(1000), 1000);
+        assert_eq!(Sign::Inverted.apply(1000), -1000);
+        assert_eq!(Sign::Inverted.apply(-1000), 1000);
+        assert_eq!(Sign::Inverted.apply(i16::MIN), i16::MAX, "MIN negation saturates instead of overflowing");
+    }
+
+    #[test]
+    fn mix_to_wire_combines_audio_and_force_with_saturation() {
+        assert_eq!(mix_to_wire(0.0, 0, Sign::Normal), CENTER, "silence both ways stays centered");
+        assert_eq!(mix_to_wire(0.0, 16384, Sign::Normal), i16_to_wire(16384), "pure force mirror");
+        assert_eq!(mix_to_wire(0.5, 0, Sign::Normal), float_to_wire(0.5), "pure audio, no force");
+        assert_eq!(
+            mix_to_wire(0.0, 16384, Sign::Inverted),
+            i16_to_wire(-16384),
+            "inverted sign flips the mirrored force"
+        );
+        // Both near-max, same direction: must saturate rather than wrap.
+        assert_eq!(mix_to_wire(1.0, 32767, Sign::Normal), i16_to_wire(i16::MAX));
+        assert_eq!(mix_to_wire(-1.0, -32768, Sign::Normal), i16_to_wire(i16::MIN));
+    }
+
+    #[test]
+    fn sign_resolve_prefers_env_then_config_then_default() {
+        // The only test in this module that touches the environment, so
+        // it cannot race any other test over LOGI_TF_SIM_G923_FFB_SIGN.
+        std::env::remove_var("LOGI_TF_SIM_G923_FFB_SIGN");
+        assert_eq!(Sign::resolve(false), Sign::Normal, "default is non-inverted");
+        assert_eq!(Sign::resolve(true), Sign::Inverted, "config value used when env unset");
+
+        std::env::set_var("LOGI_TF_SIM_G923_FFB_SIGN", "invert");
+        assert_eq!(Sign::resolve(false), Sign::Inverted, "env overrides config");
+        std::env::set_var("LOGI_TF_SIM_G923_FFB_SIGN", "0");
+        assert_eq!(Sign::resolve(true), Sign::Normal, "any other env value forces Normal");
+        std::env::remove_var("LOGI_TF_SIM_G923_FFB_SIGN");
+    }
+
+    // -- packet builder ---------------------------------------------------
+
+    #[test]
+    fn build_sample_packet_matches_the_exact_wire_layout() {
+        let mut window = [CENTER; WINDOW];
+        // A distinctive, easily-traced value per slot: 0x8000 + 100*i.
+        for (i, slot) in window.iter_mut().enumerate() {
+            *slot = CENTER + (i as u16) * 100;
+        }
+        let pkt = build_sample_packet(0x2a, &window);
+
+        let mut expected = [0u8; PACKET_LEN];
+        expected[0] = 0x01;
+        expected[4] = 0x01;
+        expected[5] = 0x2a;
+        let cur = window[WINDOW - 1];
+        expected[6] = (cur & 0xff) as u8;
+        expected[7] = (cur >> 8) as u8;
+        expected[8] = (cur & 0xff) as u8;
+        expected[9] = (cur >> 8) as u8;
+        expected[10] = NEW_PER_PACKET as u8;
+        expected[11] = 0x0d;
+        for (i, &v) in window.iter().enumerate() {
+            let off = 12 + i * 4;
+            expected[off] = (v & 0xff) as u8;
+            expected[off + 1] = (v >> 8) as u8;
+            expected[off + 2] = (v & 0xff) as u8;
+            expected[off + 3] = (v >> 8) as u8;
+        }
+        assert_eq!(pkt, expected);
+
+        // A fully spelled-out spot check on the header bytes, independent
+        // of the generic per-slot loop above: cur = window[12] =
+        // 0x8000 + 12*100 = 0x84B0, little-endian, duplicated.
+        assert_eq!(pkt[0], 0x01);
+        assert_eq!(pkt[4], 0x01);
+        assert_eq!(pkt[5], 0x2a);
+        assert_eq!(&pkt[6..10], &[0xb0, 0x84, 0xb0, 0x84]);
+        assert_eq!(pkt[10], 0x04);
+        assert_eq!(pkt[11], 0x0d);
+    }
+
+    #[test]
+    fn build_sample_packet_cur_matches_the_newest_window_slot() {
+        let window: [u16; WINDOW] = [
+            0x8000, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8007, 0x8008, 0x8009, 0x800a, 0x800b, 0x800c,
+        ];
+        let pkt = build_sample_packet(1, &window);
+        assert_eq!(&pkt[6..10], &[0x0c, 0x80, 0x0c, 0x80]);
+        assert_eq!(&pkt[60..64], &[0x0c, 0x80, 0x0c, 0x80], "last window slot occupies the last 4 bytes too");
+    }
+
+    #[test]
+    fn slide_window_shifts_and_appends() {
+        let mut window = [CENTER; WINDOW];
+        slide_window(&mut window, &[1, 2, 3, 4]);
+        let mut expected = [CENTER; WINDOW];
+        expected[WINDOW - 4..].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(window, expected);
+
+        slide_window(&mut window, &[5, 6, 7, 8]);
+        assert_eq!(&window[WINDOW - 4..], &[5, 6, 7, 8]);
+        assert_eq!(&window[WINDOW - 8..WINDOW - 4], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn stop_packet_is_the_embedded_type_0x04_template() {
+        let pkt = stop_packet(7);
+        assert_eq!(pkt[4], 0x04, "must be the stop template, not the start one");
+        assert_eq!(pkt[5], 7, "sequence byte overwritten");
+    }
+
+    // -- init data ----------------------------------------------------
+
+    #[test]
+    fn embedded_init_data_has_the_documented_shape() {
+        assert_eq!(TF_INIT_PACKET_COUNT, 68);
+        assert_eq!(TF_INIT_PACKET_LEN, 64);
+        assert_eq!(TF_INIT_PACKETS.len(), 68);
+        assert_eq!(TF_INIT_PACKETS[0][0], 0x01, "every packet opens with the HID report id");
+        assert_eq!(TF_INIT_PACKETS[TF_INIT_PACKET_COUNT - 2][4], 0x04, "second-to-last is the stop template");
+        assert_eq!(TF_INIT_PACKETS[TF_INIT_PACKET_COUNT - 1][4], 0x03, "last is the start template");
+    }
+
+    // -- ffb mirror -----------------------------------------------------
+
+    #[test]
+    fn ffb_mirror_reads_and_reparses_without_seeking() {
+        let dir = tempdir();
+        let path = dir.join("ffb_output");
+        std::fs::write(&path, "-1234\n").unwrap();
+        let mirror = FfbMirror::open(Some(&path));
+        assert_eq!(mirror.read_raw(), -1234);
+        // A real attribute changes value between reads without the reader
+        // re-opening or seeking; read_at(0) must see the update.
+        std::fs::write(&path, "500\n").unwrap();
+        assert_eq!(mirror.read_raw(), 500);
+    }
+
+    #[test]
+    fn ffb_mirror_defaults_to_zero_when_absent_or_unparsable() {
+        assert_eq!(FfbMirror::open(None).read_raw(), 0);
+
+        let dir = tempdir();
+        let path = dir.join("ffb_output");
+        std::fs::write(&path, "not a number\n").unwrap();
+        assert_eq!(FfbMirror::open(Some(&path)).read_raw(), 0);
+    }
+
+    // -- idle policy ------------------------------------------------------
+
+    #[test]
+    fn idle_policy_stays_streaming_under_the_timeout() {
+        let mut policy = IdlePolicy::new();
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(5);
+        assert_eq!(policy.tick(t0, true, timeout), IdleAction::Stream);
+        assert_eq!(policy.tick(t0 + Duration::from_secs(4), true, timeout), IdleAction::Stream);
+    }
+
+    #[test]
+    fn idle_policy_enters_idle_exactly_once_at_the_timeout() {
+        let mut policy = IdlePolicy::new();
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(5);
+        policy.tick(t0, true, timeout);
+        assert_eq!(policy.tick(t0 + timeout, true, timeout), IdleAction::EnterIdle);
+        assert_eq!(policy.tick(t0 + timeout + Duration::from_secs(1), true, timeout), IdleAction::StayIdle);
+    }
+
+    #[test]
+    fn idle_policy_resumes_on_activity_after_idle() {
+        let mut policy = IdlePolicy::new();
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(5);
+        policy.tick(t0, true, timeout);
+        policy.tick(t0 + timeout, true, timeout);
+        assert_eq!(policy.tick(t0 + timeout + Duration::from_secs(1), false, timeout), IdleAction::Resume);
+        // Back to normal streaming immediately after the resume tick.
+        assert_eq!(policy.tick(t0 + timeout + Duration::from_secs(2), false, timeout), IdleAction::Stream);
+    }
+
+    #[test]
+    fn idle_policy_activity_before_the_timeout_resets_the_clock() {
+        let mut policy = IdlePolicy::new();
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(5);
+        policy.tick(t0, true, timeout);
+        assert_eq!(policy.tick(t0 + Duration::from_secs(3), false, timeout), IdleAction::Stream, "not idle yet, no resume needed");
+        // Silence again: the 3s of prior silence must not carry over.
+        assert_eq!(policy.tick(t0 + Duration::from_secs(3) + Duration::from_secs(4), true, timeout), IdleAction::Stream);
+    }
+}

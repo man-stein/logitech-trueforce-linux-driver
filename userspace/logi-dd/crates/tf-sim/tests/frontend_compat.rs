@@ -52,6 +52,7 @@ fn full_config() -> Config {
         pcars_port: 5607,
         beamng_port: 4445,
         relay_port: 20780,
+        g923_ffb_invert: false,
         games,
     }
 }
