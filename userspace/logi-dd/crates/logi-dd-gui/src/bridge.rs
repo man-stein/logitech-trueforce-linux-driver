@@ -107,6 +107,13 @@ pub fn attr_group(attr: &str) -> &'static str {
         "wheel_mode" => "MODE",
         "wheel_profile" | "wheel_profile_names" => "ONBOARD PROFILES",
         "wheel_serial" | "wheel_firmware" => "THIS WHEEL",
+        // The G923's classic engine (CLASSIC_REGISTRY): its own small
+        // group per category, since it never shares a card with the DD
+        // rows above (a device only ever has one registry's worth of
+        // rows at a time).
+        "range" => "ROTATION",
+        "gain" | "autocenter" => "STRENGTH",
+        "combine_pedals" => "GENERAL",
         _ => "",
     }
 }
@@ -2085,6 +2092,13 @@ mod tests {
     fn every_registry_attr_has_a_group() {
         // No device setting should land header-less in the GUI.
         for s in REGISTRY {
+            assert!(!attr_group(s.attr).is_empty(), "no group for {}", s.attr);
+        }
+    }
+
+    #[test]
+    fn every_classic_registry_attr_has_a_group() {
+        for s in logi_dd_core::CLASSIC_REGISTRY {
             assert!(!attr_group(s.attr).is_empty(), "no group for {}", s.attr);
         }
     }

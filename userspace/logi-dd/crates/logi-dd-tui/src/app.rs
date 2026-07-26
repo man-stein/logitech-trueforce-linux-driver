@@ -11,7 +11,7 @@ use logi_dd_core::lightsync;
 use logi_dd_core::steam;
 use logi_dd_core::sysfs::SysfsIo;
 use logi_dd_core::tfsim;
-use logi_dd_core::{Category, Device, Error, Kind, Mode, ModeReq, Value, REGISTRY};
+use logi_dd_core::{Category, Device, Error, Kind, Mode, ModeReq, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -339,12 +339,13 @@ pub struct App<S: SysfsIo> {
     last_drift: Option<(Option<Value>, Option<Value>)>,
 }
 
-/// Whether `device` looks like a real wheel: at least one registry
-/// attribute is present. Mirrors `Device::discover`'s wheel_range probe
-/// without insisting on that one attribute (a test fake may expose any
-/// subset).
+/// Whether `device` looks like a real wheel: at least one of its own
+/// settings (the DD `wheel_*` set, or the G923's classic set; see
+/// `Device::settings`) is present. Mirrors `Device::discover`'s attribute
+/// probe without insisting on one specific attribute (a test fake may
+/// expose any subset).
 fn wheel_present<S: SysfsIo>(device: &Device<S>) -> bool {
-    REGISTRY.iter().any(|s| device.available(s.attr))
+    device.settings().iter().any(|s| device.available(s.attr))
 }
 
 impl<S: SysfsIo> App<S> {
@@ -529,7 +530,13 @@ impl<S: SysfsIo> App<S> {
             return;
         }
         let cat = self.category();
-        self.rows = if cat == Category::Leds {
+        // `lightsync_rows` hardcodes the wheel_led_* attrs rather than
+        // reading them off a registry, so a wheel whose own settings carry
+        // no Leds entry at all (the G923's classic engine has no LIGHTSYNC
+        // strip) must not get the composed page: it would show an "Effect"/
+        // "Brightness" pair the wheel does not have.
+        let has_leds = self.device.settings().iter().any(|s| s.category == Category::Leds);
+        self.rows = if cat == Category::Leds && has_leds {
             self.lightsync_rows()
         } else if cat == Category::Profiles {
             self.profiles_rows()
@@ -595,9 +602,13 @@ impl<S: SysfsIo> App<S> {
         true
     }
 
-    /// One `Row` per registry spec of `cat`, in registry order.
+    /// One `Row` per registry spec of `cat`, in registry order. Reads from
+    /// `self.device.settings()`, not the bare `REGISTRY` constant, so a
+    /// connected G923 only ever shows its own four classic settings rather
+    /// than every DD wheel row marked unavailable.
     fn registry_rows(&self, cat: Category) -> Vec<Row> {
-        REGISTRY
+        self.device
+            .settings()
             .iter()
             .filter(|s| s.category == cat)
             .map(|s| Row {
@@ -614,8 +625,17 @@ impl<S: SysfsIo> App<S> {
     /// followed by the computer-side profile store (one row per saved
     /// profile: Enter applies, `d` deletes) and the "Save current as..."
     /// row (`n` or Enter opens the name prompt).
+    ///
+    /// A wheel with no `wheel_mode` row at all (the G923's classic engine
+    /// has no desktop/onboard concept, and no onboard profile store to
+    /// snapshot) gets neither branch: just its own (empty) registry rows,
+    /// rather than a computer-profile UI that would silently save nothing
+    /// useful.
     fn profiles_rows(&self) -> Vec<Row> {
         let all = self.registry_rows(Category::Profiles);
+        if !all.iter().any(|r| r.attr == "wheel_mode") {
+            return all;
+        }
         if matches!(self.device.current_mode(), Ok(Mode::Onboard)) {
             return all;
         }
@@ -2142,6 +2162,79 @@ mod tests {
         // absent attrs are marked unavailable, not dropped
         let s = a.rows.iter().find(|r| r.attr == "wheel_ffb_filter").unwrap();
         assert!(!s.available);
+    }
+
+    // --- G923 (classic engine) ---
+
+    fn g923_app() -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        fs.set("gain", "65535");
+        fs.set("autocenter", "0");
+        fs.set("combine_pedals", "0");
+        let device = logi_dd_core::Device::with_io_and_model(fs, logi_dd_core::WheelModel::G923);
+        let mut a = App::new(device);
+        a.focus = Focus::Content;
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn g923_is_recognized_as_a_present_wheel() {
+        // The registry-presence probe must check the classic attr set, not
+        // just the DD wheel_* one, or a connected G923 reads as "no wheel".
+        let a = g923_app();
+        assert!(!a.no_wheel, "a G923 must not read as no wheel");
+    }
+
+    #[test]
+    fn g923_shows_only_its_four_classic_settings_never_dd_rows() {
+        let mut a = g923_app();
+        for cat in Category::ALL {
+            a.cat_idx = Category::ALL.iter().position(|c| c == cat).unwrap();
+            a.reload();
+            // Never a DD wheel_* row: this is a different device model, not
+            // "DD with everything unavailable".
+            assert!(
+                a.rows.iter().all(|r| !r.attr.starts_with("wheel_")),
+                "{cat:?} unexpectedly carries a wheel_* row: {:?}",
+                a.rows.iter().map(|r| &r.attr).collect::<Vec<_>>()
+            );
+        }
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Steering).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "range" && r.available));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "gain" && r.available));
+        assert!(a.rows.iter().any(|r| r.attr == "autocenter" && r.available));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "combine_pedals" && r.available));
+    }
+
+    #[test]
+    fn g923_profiles_page_has_no_computer_profile_ui() {
+        // No wheel_mode, no onboard profile store to snapshot: the Profiles
+        // page must not offer a save/apply UI that would silently do
+        // nothing useful on this wheel.
+        let mut a = g923_app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        assert!(a.rows.is_empty(), "expected no Profiles rows for a G923: {:?}", a.rows.iter().map(|r| &r.attr).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn g923_navigates_every_category_without_panicking() {
+        use crossterm::event::KeyCode;
+        let mut a = g923_app();
+        a.focus = Focus::Sidebar;
+        // Digit-jump through every category (1..=6) plus Setup (7): none of
+        // these may panic for a wheel whose registry has no Leds/Profiles/
+        // Info rows at all.
+        for d in '1'..='7' {
+            a.on_key(KeyCode::Char(d));
+        }
     }
 
     // --- the focus model, digit jumps and Esc discipline ---

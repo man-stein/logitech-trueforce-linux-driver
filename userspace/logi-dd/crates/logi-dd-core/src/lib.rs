@@ -1,4 +1,6 @@
-//! Settings library for the hid-logitech-dd direct-drive wheels.
+//! Settings library for the hid-logitech-dd direct-drive wheels, plus the
+//! G923's classic lg4ff-style FFB engine (see [`WheelModel`], [`REGISTRY`]
+//! vs [`CLASSIC_REGISTRY`]).
 
 pub mod error;
 pub use error::{Error, Mode};
@@ -14,7 +16,7 @@ pub mod lightsync;
 pub mod setting;
 pub use setting::{Access, Category, ModeReq, SettingSpec};
 pub mod registry;
-pub use registry::REGISTRY;
+pub use registry::{CLASSIC_REGISTRY, REGISTRY};
 pub mod helpers;
 pub mod launchers;
 pub mod profiles;
@@ -22,7 +24,7 @@ pub mod shaping;
 pub mod steam;
 pub mod tfsim;
 pub mod device;
-pub use device::{Device, DeviceInfo};
+pub use device::{Device, DeviceInfo, WheelModel};
 pub mod games;
 
 /// Project home, shown in the Info view of both front-ends so users know

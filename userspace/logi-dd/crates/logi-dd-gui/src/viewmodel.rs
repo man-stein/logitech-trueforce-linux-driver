@@ -15,7 +15,7 @@
 use logi_dd_core::curve::Curve;
 use logi_dd_core::profiles;
 use logi_dd_core::sysfs::SysfsIo;
-use logi_dd_core::{Category, Color, Device, DeviceInfo, Error, Kind, Mode, ModeReq, Value, REGISTRY};
+use logi_dd_core::{Category, Color, Device, DeviceInfo, Error, Kind, Mode, ModeReq, Value};
 use std::path::PathBuf;
 
 /// Raw input from a widget, converted to a `Value` per the target setting's
@@ -93,10 +93,15 @@ impl<S: SysfsIo> ViewModel<S> {
     }
 
     /// Rows for one category, in registry order. `mode_ok` is computed
-    /// against a single read of the device's current mode.
+    /// against a single read of the device's current mode. Reads from
+    /// `self.device.settings()`, not the bare `REGISTRY` constant, so a
+    /// connected G923 only ever shows its own four classic settings rather
+    /// than every DD wheel row marked unavailable (a different device
+    /// model, not "DD with everything missing").
     pub fn rows_for(&self, cat: Category) -> Vec<Row> {
         let mode = self.device.current_mode().ok();
-        REGISTRY
+        self.device
+            .settings()
             .iter()
             .filter(|spec| spec.category == cat)
             .map(|spec| {
@@ -146,7 +151,8 @@ impl<S: SysfsIo> ViewModel<S> {
         self.device.write(attr, &value)
     }
 
-    /// The header's device-identity panel: serial, firmware, current mode.
+    /// The header's device-identity panel: serial, firmware, current mode,
+    /// and which wheel model this is (for the Info/Testing page's photo).
     pub fn info(&self) -> Result<DeviceInfo, Error> {
         self.device.info()
     }
@@ -250,6 +256,43 @@ mod tests {
     fn rows_for_a_category_come_from_the_registry() {
         let rows = vm().rows_for(Category::Ffb);
         assert!(rows.iter().any(|r| r.attr == "wheel_strength" && r.label == "FFB strength"));
+    }
+
+    fn g923_vm() -> ViewModel<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        fs.set("gain", "0");
+        fs.set("autocenter", "0");
+        fs.set("combine_pedals", "0");
+        ViewModel::new(logi_dd_core::Device::with_io_and_model(fs, logi_dd_core::WheelModel::G923))
+    }
+
+    #[test]
+    fn g923_rows_are_its_own_classic_settings_not_the_dd_wheel_set() {
+        let rows = g923_vm().rows_for(Category::Steering);
+        assert!(rows.iter().any(|r| r.attr == "range"));
+        assert!(!rows.iter().any(|r| r.attr == "wheel_range"));
+
+        let ffb = g923_vm().rows_for(Category::Ffb);
+        let attrs: Vec<&str> = ffb.iter().map(|r| r.attr).collect();
+        assert_eq!(attrs, vec!["gain", "autocenter"]);
+
+        // Categories the classic engine has nothing in stay empty, not
+        // "every DD row marked unavailable".
+        assert!(g923_vm().rows_for(Category::Leds).is_empty());
+        assert!(g923_vm().rows_for(Category::Profiles).is_empty());
+        assert!(g923_vm().rows_for(Category::Info).is_empty());
+    }
+
+    #[test]
+    fn g923_edit_writes_its_classic_attrs() {
+        let vm = g923_vm();
+        vm.edit("range", WidgetInput::Slider(540)).unwrap();
+        assert_eq!(vm.device_read("range").unwrap(), Value::Int(540));
+        vm.edit("combine_pedals", WidgetInput::Choice(2)).unwrap();
+        assert_eq!(vm.device_read("combine_pedals").unwrap(), Value::Enum(2));
+        // Out-of-range writes are rejected the same way as the DD registry.
+        assert!(vm.edit("range", WidgetInput::Slider(39)).is_err());
     }
 
     #[test]

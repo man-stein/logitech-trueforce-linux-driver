@@ -703,10 +703,16 @@ fn start_test_monitor(
     std::thread::spawn(move || {
         let found = evtest::discover_wheel_input();
         // The configured rotation range, read once through the same sysfs
-        // plumbing the settings pages use; 900 when unreadable.
+        // plumbing the settings pages use; 900 when unreadable. A DD wheel
+        // keeps it at `wheel_range`; the G923's classic engine has no
+        // `wheel_` prefix at all, so read whichever of the two this
+        // device's own registry actually has.
         let range = logi_dd_core::Device::discover()
             .ok()
-            .and_then(|d| d.read("wheel_range").ok())
+            .and_then(|d| {
+                let attr = if d.available("wheel_range") { "wheel_range" } else { "range" };
+                d.read(attr).ok()
+            })
             .and_then(|v| match v {
                 Value::Int(n) => u32::try_from(n).ok(),
                 _ => None,

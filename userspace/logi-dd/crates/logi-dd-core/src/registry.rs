@@ -85,6 +85,32 @@ pub const REGISTRY: &[SettingSpec] = &[
     SettingSpec { attr: "wheel_firmware", label: "Firmware", help: "The firmware versions running on the wheel base and motor, useful when checking for updates. Read-only.", category: Info, kind: Kind::TextField { max_len: 128 }, access: ReadOnly, mode_req: Any },
 ];
 
+/// The G923's classic lg4ff-style settings (`range`, `gain`, `autocenter`,
+/// `combine_pedals`, no `wheel_` prefix): a different FFB engine from the
+/// direct-drive wheels above, with its own attribute names and scales, so
+/// it gets its own registry rather than folding into [`REGISTRY`]. Selected
+/// by `Device::settings()` once discovery identifies the connected wheel as
+/// [`crate::device::WheelModel::G923`]; `Device::spec` still resolves any
+/// attr from either registry, since the two attribute namespaces never
+/// collide.
+///
+/// No LEDs/Profiles/Info entries: the classic engine has no onboard
+/// profile slots or LIGHTSYNC strip, and exposes no serial/firmware sysfs
+/// attrs (see `mainline/dd-lg4ff.c`'s sysfs doc comment). Those category
+/// pages simply render empty for this wheel.
+pub const CLASSIC_REGISTRY: &[SettingSpec] = &[
+    // 40-900 degrees, ported from new-lg4ff's G923 row (dd-lg4ff.c: device
+    // table, min/max 40/900); the store clamps rather than rejecting, but
+    // this app validates up front like every other IntRange.
+    SettingSpec { attr: "range", label: "Rotation range", help: "How far the wheel turns lock to lock (40-900 degrees).", category: Steering, kind: Kind::IntRange { min: 40, max: 900, step: 10, unit: "deg" }, access: ReadWrite, mode_req: Any },
+    SettingSpec { attr: "gain", label: "Overall gain", help: "Global force feedback strength, independent of any game's own gain setting (0-65535).", category: Ffb, kind: Kind::IntRange { min: 0, max: 65535, step: 1, unit: "" }, access: ReadWrite, mode_req: Any },
+    SettingSpec { attr: "autocenter", label: "Autocenter", help: "Strength of the wheel's self-centring spring (0-65535, 0 turns it off).", category: Ffb, kind: Kind::IntRange { min: 0, max: 65535, step: 1, unit: "" }, access: ReadWrite, mode_req: Any },
+    // Semantics per new-lg4ff's README (combine_pedals section): 1 merges
+    // the accelerator with the brake, 2 with the clutch, onto the
+    // accelerator's own axis; 0 leaves every pedal on its own axis.
+    SettingSpec { attr: "combine_pedals", label: "Combine pedals", help: "Merges the accelerator with another pedal onto one axis, for older games that expect a single combined-pedal input. Leave separate for modern sims.", category: Pedals, kind: Kind::Enum(&["separate", "gas + brake", "gas + clutch"]), access: ReadWrite, mode_req: Any },
+];
+
 /// A trivially-valid raw string for each kind, used by the registry coherence
 /// test to prove every spec can round-trip.
 #[cfg(test)]
@@ -215,5 +241,90 @@ mod tests {
         let s = REGISTRY.iter().find(|s| s.attr == "wheel_brake_force").unwrap();
         assert!(matches!(s.mode_req, super::super::setting::ModeReq::OnboardOnly));
         let _ = Category::Pedals;
+    }
+}
+
+#[cfg(test)]
+mod classic_registry_tests {
+    use super::*;
+    use crate::setting::Access;
+
+    #[test]
+    fn classic_registry_has_no_duplicate_attrs() {
+        let mut seen = std::collections::HashSet::new();
+        for s in CLASSIC_REGISTRY {
+            assert!(seen.insert(s.attr), "duplicate attr {}", s.attr);
+        }
+    }
+
+    #[test]
+    fn classic_attrs_never_collide_with_the_dd_registry() {
+        for s in CLASSIC_REGISTRY {
+            assert!(
+                !REGISTRY.iter().any(|r| r.attr == s.attr),
+                "{} exists in both registries",
+                s.attr
+            );
+        }
+    }
+
+    #[test]
+    fn every_classic_kind_roundtrips_a_sample() {
+        for s in CLASSIC_REGISTRY {
+            let raw = super::sample_raw(s);
+            let v = s.kind.parse(&raw).unwrap_or_else(|e| panic!("{}: {e}", s.attr));
+            let back = s.kind.format(&v).unwrap();
+            assert!(!back.is_empty(), "{}: empty format", s.attr);
+        }
+    }
+
+    #[test]
+    fn classic_attrs_are_all_read_write_and_mode_agnostic() {
+        // The classic engine has no desktop/onboard split; every setting
+        // must stay writable in any mode.
+        for s in CLASSIC_REGISTRY {
+            assert_eq!(s.access, Access::ReadWrite, "{}", s.attr);
+            assert!(matches!(s.mode_req, super::super::setting::ModeReq::Any), "{}", s.attr);
+        }
+    }
+
+    #[test]
+    fn range_clamps_to_the_g923s_40_900_span() {
+        let s = CLASSIC_REGISTRY.iter().find(|s| s.attr == "range").unwrap();
+        assert!(matches!(s.kind, Kind::IntRange { min: 40, max: 900, .. }));
+        assert!(s.kind.parse("39").is_err());
+        assert!(s.kind.parse("901").is_err());
+        assert!(s.kind.parse("40").is_ok());
+        assert!(s.kind.parse("900").is_ok());
+    }
+
+    #[test]
+    fn gain_and_autocenter_span_the_full_u16_range() {
+        for attr in ["gain", "autocenter"] {
+            let s = CLASSIC_REGISTRY.iter().find(|s| s.attr == attr).unwrap();
+            assert!(matches!(s.kind, Kind::IntRange { min: 0, max: 65535, .. }), "{attr}");
+            assert!(s.kind.parse("65535").is_ok(), "{attr}");
+            assert!(s.kind.parse("65536").is_err(), "{attr}");
+            assert!(s.kind.parse("-1").is_err(), "{attr}");
+        }
+    }
+
+    #[test]
+    fn combine_pedals_is_a_three_way_enum() {
+        let s = CLASSIC_REGISTRY.iter().find(|s| s.attr == "combine_pedals").unwrap();
+        let Kind::Enum(variants) = s.kind else { panic!("expected Enum") };
+        assert_eq!(variants, ["separate", "gas + brake", "gas + clutch"]);
+        assert!(s.kind.parse("0").is_ok());
+        assert!(s.kind.parse("2").is_ok());
+        assert!(s.kind.parse("3").is_err());
+    }
+
+    #[test]
+    fn classic_categories_place_each_attr_sensibly() {
+        let cat = |attr: &str| CLASSIC_REGISTRY.iter().find(|s| s.attr == attr).unwrap().category;
+        assert_eq!(cat("range"), Category::Steering);
+        assert_eq!(cat("gain"), Category::Ffb);
+        assert_eq!(cat("autocenter"), Category::Ffb);
+        assert_eq!(cat("combine_pedals"), Category::Pedals);
     }
 }
