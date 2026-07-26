@@ -44,7 +44,8 @@ added.
 config: ~/.config/logi-dd/tf-sim.conf (key=value)
   enabled=0|1, intensity=0-100, leds=0|1, port.codemasters=, port.pcars=,
   port.beamng=, port.relay=, game.<id>.enabled=0|1, game.<id>.intensity=0-100,
-  g923.ffb_invert=0|1 (G923 FFB-mirror sign; unverified default off)
+  g923.ffb_invert=0|1 (G923 FFB-mirror sign, hardware-calibrated; default
+  1/inverted, set 0 only if your unit pushes the wrong way)
   (game ids: dirt-rally-2, codemasters, ams2-pcars2, f1, beamng, ea-wrc,
   relay)";
 

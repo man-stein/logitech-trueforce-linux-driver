@@ -113,7 +113,7 @@ protocol, not the RS50/G PRO's endpoint-based one.
   telemetry-driven haptics used on the other wheels to the G923 instead, over
   the interface this driver claims for it, mirroring live force feedback into
   the same stream so the two agree. Hardware-confirmed as vibration; the feel
-  and sign check under real game telemetry is still pending.
+  check under real game telemetry is still pending.
 - **Xbox edition** (`046d:c26e` PC mode): force feedback routes through the
   same HID++ 0x8123 path as the G920. It boots into a console-only mode
   (`046d:c26d`) with no input node at all; installing `usb_modeswitch` (a

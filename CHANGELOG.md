@@ -20,7 +20,7 @@ the contract is "it works on RS50 and G Pro as listed here".
   no-op toggle. Rev lights (5 LED classdevs, one per mirrored pair) use the
   same command as the RS50/G PRO strip. Hardware-verified on a c266:
   constant force and autocenter feel correct in Assetto Corsa Competizione,
-  and the LED sweep lights the innermost pair blue.
+  and the LED sweep lights the innermost pair.
 - **Simulated TrueForce for the G923.** The wheel speaks the same
   TrueForce stream protocol as the RS50/G PRO - confirmed against TF4ALL
   (Mhytee's Windows SimHub plugin, issue #20) - on its third USB interface,
@@ -30,8 +30,7 @@ the contract is "it works on RS50 and G Pro as listed here".
   stream's force field so force feedback and TrueForce agree instead of
   fighting (an active stream otherwise makes the wheel ignore the classic
   path entirely). Hardware-confirmed: a driven tone reaches the wheel as
-  vibration; the feel and sign check under real game telemetry is still
-  pending.
+  vibration; the feel check under real game telemetry is still pending.
 - **G923 support, Xbox edition (`046d:c26e`), routed through the existing
   HID++ 0x8123 path** used by the other direct-drive wheels. The
   console-boot mode (`046d:c26d`, no input node at all) now switches to PC

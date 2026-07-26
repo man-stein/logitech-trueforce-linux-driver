@@ -66,12 +66,13 @@
 //!
 //! # Sign flag
 //!
-//! `ffb_output`'s sign relative to the wheel's felt push direction is
-//! *unverified* on the classic FFB engine (TF4ALL's own HID++-family path
-//! negates it; the classic path is a different engine entirely). See
-//! [`Sign::resolve`]. The default is non-inverted; flipping it is a
-//! config/env change, not a code change, pending the hardware sign test
-//! (Task 17 Step 4).
+//! `ffb_output`'s sign relative to the wheel's felt push direction was
+//! calibrated on a c266 on hardware (2026-07-26): the classic engine
+//! needs the same negation TF4ALL's own HID++-family path uses, even
+//! though it is a different engine entirely, so the config default is
+//! inverted. See [`Sign::resolve`]. A unit that turns out to push the
+//! wrong way can flip this back with a config/env change, no code
+//! change required.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -86,7 +87,8 @@ pub const VID: u16 = 0x046D;
 /// G923, PlayStation/PC edition.
 pub const PID_PS: u16 = 0xC266;
 /// G923, Xbox/PC edition (same transport once it lands on interface 2;
-/// recognized here so Task 18's mode switch has nothing left to do here).
+/// recognized here so the Xbox-edition PC-mode switch has nothing left
+/// to do here).
 pub const PID_XBOX: u16 = 0xC26E;
 
 /// USB interface number of the TrueForce (vendor page 0xFFFD) transport.
@@ -285,7 +287,9 @@ impl Sign {
     /// including unset, falls through) overrides `cfg_invert` (the
     /// persisted `g923.ffb_invert` config key) when the variable is set at
     /// all, so a one-off hardware check does not require editing the
-    /// config file. Both ultimately default to [`Sign::Normal`].
+    /// config file. The config's own default is inverted (hardware-
+    /// calibrated); the env var, when set, wins over whatever the config
+    /// says.
     pub fn resolve(cfg_invert: bool) -> Sign {
         match std::env::var("LOGI_TF_SIM_G923_FFB_SIGN") {
             Ok(v) if matches!(v.as_str(), "invert" | "inverted" | "1") => Sign::Inverted,
@@ -930,7 +934,7 @@ mod tests {
     #[test]
     fn missing_ffb_output_still_discovers_the_hidraw() {
         // Interface-0 present but without the attribute (older driver, or
-        // a wheel plugged into a kernel predating Task 16).
+        // a wheel plugged into a kernel predating the ffb_output attribute).
         let fs = FakeSysfs::build("046d", "c266", &vendor_page_descriptor());
         std::fs::remove_file(fs.root.join("devices/usb1/1-1/1-1:1.0/0003:046D:C266.0003").join(FFB_OUTPUT_ATTR))
             .unwrap();
@@ -1361,7 +1365,7 @@ mod tests {
         assert_eq!(after_drop.len(), after_stop.len(), "stop()/Drop after the writer already stopped must not double-send");
     }
 
-    // -- load-shedding (Finding B) ----------------------------------------
+    // -- load-shedding ------------------------------------------------------
 
     #[test]
     fn push_does_not_block_when_the_channel_is_full_and_counts_the_drop() {
@@ -1399,7 +1403,7 @@ mod tests {
         handle.join().expect("helper thread panicked");
     }
 
-    // -- fatal write error still sends a stop (Finding A) ------------------
+    // -- fatal write error still sends a stop --------------------------------
 
     /// Test-only [`HidrawSink`] that fails exactly its `fail_at`-th call
     /// (0-indexed) and forwards every other call through to a real

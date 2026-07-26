@@ -15,9 +15,10 @@
 //!   `port.pcars`, `port.beamng`, `port.relay`: UDP listen ports
 //! - `game.<id>.enabled` (0/1), `game.<id>.intensity` (0-100)
 //! - `g923.ffb_invert` (0/1): sign flag for the G923 FFB mirror (see
-//!   [`crate::g923::Sign`]); unverified on hardware, defaults off. The
-//!   `LOGI_TF_SIM_G923_FFB_SIGN` environment variable overrides this for a
-//!   one-off check without editing the file.
+//!   [`crate::g923::Sign`]); hardware-calibrated on a c266, defaults to 1
+//!   (inverted). Set to 0 only if a given unit turns out to push the
+//!   wrong way. The `LOGI_TF_SIM_G923_FFB_SIGN` environment variable
+//!   overrides this for a one-off check without editing the file.
 
 use std::collections::BTreeMap;
 use std::fs;
