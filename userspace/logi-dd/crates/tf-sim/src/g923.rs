@@ -27,23 +27,39 @@
 //! # State machine
 //!
 //! ```text
-//! Streaming --(no audio AND ffb_output == 0, for IDLE_TIMEOUT)--> Idle
-//! Idle --(audio or ffb_output become nonzero)--> Streaming
+//! Streaming --(a tick's samples are all exactly 0.0 AND ffb_output == 0,
+//!              for IDLE_TIMEOUT)--> Idle
+//! Idle --(a nonzero sample or a nonzero ffb_output)--> Streaming
 //! ```
 //!
-//! While `Streaming`, [`G923Stream::push`] merges each new sample with the
-//! freshly read `ffb_output` and emits one sample packet per
-//! [`NEW_PER_PACKET`]-sample chunk. Crossing into `Idle` sends the
-//! type-0x04 stop template exactly once (handing the wheel back to its
-//! native interface-0 FFB) and then withholds packets entirely: any
-//! further type-0x01 traffic would immediately re-arm the follow behavior
-//! above. Leaving `Idle` re-runs the full two-pass init sequence (the same
-//! one [`G923Stream::open`] sends) before resuming samples, since the
-//! wheel's stream-side state cannot be trusted to have survived the gap.
-//! [`Drop`] (which also runs during panic unwinding) sends the stop
-//! template unconditionally, best-effort, as a last-resort safety net:
-//! TF4ALL issue #13 documents a stream left following a stale `cur`
-//! walking the wheel to its force limit.
+//! "Silence" here is literal: every sample in the tick's chunk reads
+//! exactly `0.0`, not merely quiet. [`crate::synth::EngineSynth`] keeps a
+//! nonzero idle floor whenever the engine is nominally running, so in
+//! practice this only happens when the synthesizer itself is producing
+//! exact zero (engine stopped, i.e. `rpm == 0`, or master/per-game
+//! intensity == 0) at the same time `ffb_output` reads zero.
+//!
+//! A dedicated writer thread (spawned by [`G923Stream::open`], after the
+//! initial init sequence) owns the hidraw handle and paces outgoing
+//! packets on a steady [`TICK_INTERVAL`], the same cadence libtrueforce's
+//! own DD-wheel stream thread runs at. [`G923Stream::push`] only queues
+//! samples for it over a channel; each tick the writer takes up to
+//! [`NEW_PER_PACKET`] of them (padding any shortfall by repeating the
+//! last sample, or zero if none arrived at all, so a tick never skips a
+//! packet while waiting on the producer), merges in a freshly-read
+//! `ffb_output`, and either builds+writes one sample packet or, per the
+//! state machine above, withholds it or re-inits. Crossing into `Idle`
+//! sends the type-0x04 stop template exactly once (handing the wheel back
+//! to its native interface-0 FFB) and then withholds packets entirely:
+//! any further type-0x01 traffic would immediately re-arm the follow
+//! behavior above. Leaving `Idle` re-runs the full two-pass init sequence
+//! (the same one [`G923Stream::open`] sends) before resuming samples,
+//! since the wheel's stream-side state cannot be trusted to have survived
+//! the gap. [`G923Stream::stop`] sends that same stop template at most
+//! once, even if called more than once or followed by [`Drop`] (which
+//! calls it too, and which also runs during panic unwinding): TF4ALL
+//! issue #13 documents a stream left following a stale `cur` walking the
+//! wheel to its force limit.
 //!
 //! # Sign flag
 //!
@@ -58,6 +74,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Logitech's USB vendor id.
@@ -88,13 +106,26 @@ pub const CENTER: u16 = 0x8000;
 /// Wire packet length.
 pub const PACKET_LEN: usize = 64;
 
-/// How long audio-and-force silence must persist before [`G923Stream`]
-/// sends the stop template and stops streaming (see module docs).
+/// How long a tick's samples must all read exactly zero, together with a
+/// zero `ffb_output`, before [`G923Stream`] sends the stop template and
+/// stops streaming (see module docs).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Spacing between init packets, matching libtrueforce's `session.c`
 /// (the capture this was extracted from showed ~2-4 ms; below that risks
 /// overrunning the device's interrupt-OUT processing on slower firmware).
-const INIT_INTERPACKET: Duration = Duration::from_micros(2000);
+/// Kept mid-range rather than at the bottom of that window for margin.
+const INIT_INTERPACKET: Duration = Duration::from_micros(3000);
+/// The writer thread's steady per-packet cadence: [`NEW_PER_PACKET`] new
+/// samples every tick at the synthesizer's 1 kHz output rate works out to
+/// 250 packets/sec, matching libtrueforce's own DD-wheel stream thread
+/// (`stream.c`, 250 Hz).
+const TICK_INTERVAL: Duration = Duration::from_millis(4);
+/// Capacity of the channel [`G923Stream::push`] feeds the writer thread
+/// through. Bounded so a wedged hidraw write cannot grow the backlog
+/// without limit; sized well above one daemon poll's worth of `push`
+/// calls (the daemon calls `push` roughly once per ~50 ms iteration, and
+/// the writer drains the channel every tick).
+const CMD_CHANNEL_CAPACITY: usize = 16;
 
 include!(concat!(env!("OUT_DIR"), "/g923_init_data.rs"));
 
@@ -444,43 +475,73 @@ impl IdlePolicy {
 }
 
 // ---------------------------------------------------------------------
+// Writer-thread pacing
+// ---------------------------------------------------------------------
+
+/// Supplies the writer thread's per-tick timing signal, decoupled from
+/// the writer's own logic so tests can drive ticks deterministically
+/// (see `ManualPacer` in the tests module below) instead of racing a real
+/// sleep or a real multi-second idle timeout. Each tick also carries the
+/// `Instant` to treat as "now", so tests can jump the clock forward (past
+/// [`IDLE_TIMEOUT`], for instance) without actually waiting.
+trait Pacer: Send {
+    /// Block until the next tick is due, returning the `Instant` to treat
+    /// as "now" for it. `None` once no further ticks will ever arrive (a
+    /// test's manual sender was dropped without an explicit stop), telling
+    /// the writer thread to send the safety-net stop and exit.
+    fn wait(&mut self) -> Option<Instant>;
+
+    /// Called once per full tick cycle, after the writer thread has acted
+    /// on it (packet written, packet withheld, or stop sent). Production's
+    /// [`SteadyPacer`] no-ops; the test pacer uses it to hand the test
+    /// thread a synchronization point so assertions never race the write.
+    fn ack(&mut self) {}
+}
+
+/// Real-time pacing: a plain sleep loop at [`TICK_INTERVAL`], matching the
+/// DD-wheel path's dedicated 250 Hz stream thread.
+struct SteadyPacer;
+
+impl Pacer for SteadyPacer {
+    fn wait(&mut self) -> Option<Instant> {
+        thread::sleep(TICK_INTERVAL);
+        Some(Instant::now())
+    }
+}
+
+/// A command sent from [`G923Stream`] (the caller-facing handle) to the
+/// writer thread that owns the hidraw file descriptor.
+enum Cmd {
+    /// New samples to append to the writer's pending queue.
+    Push(Vec<f32>),
+    /// Send the stop template once and exit the thread.
+    Stop,
+}
+
+// ---------------------------------------------------------------------
 // The stream
 // ---------------------------------------------------------------------
 
-/// An open G923 TrueForce session: the interface-2 hidraw node, plus the
-/// interface-0 `ffb_output` mirror. Created by [`G923Stream::open`], which
-/// sends the two-pass init sequence before returning; dropped, it always
-/// sends the stop template (best-effort) so the wheel is never left
-/// following a stale `cur`.
-pub struct G923Stream {
+/// The writer thread's private state: the interface-2 hidraw node, the
+/// interface-0 `ffb_output` mirror, and everything [`Writer::tick`] needs
+/// to build the next packet. Lives entirely on the background thread
+/// spawned by [`G923Stream::open`]; the caller-facing [`G923Stream`] only
+/// talks to it over a channel.
+struct Writer {
     hidraw: File,
     ffb: FfbMirror,
     sign: Sign,
     seq: u8,
     window: [u16; WINDOW],
-    /// Samples accumulated by [`push`](Self::push) between whole
+    /// Samples queued by [`Cmd::Push`] between whole
     /// [`NEW_PER_PACKET`]-sized chunks.
     pending: Vec<f32>,
     idle: IdlePolicy,
 }
 
-impl G923Stream {
-    /// Open `paths.hidraw`, send the two-pass init sequence (blocks for
-    /// roughly `2 * 68 * INIT_INTERPACKET`, a bit over a quarter second),
-    /// and return a stream ready for [`push`](Self::push).
-    pub fn open(paths: &G923Paths, sign: Sign) -> io::Result<G923Stream> {
-        let hidraw = OpenOptions::new().read(true).write(true).open(&paths.hidraw)?;
-        let mut stream = G923Stream {
-            hidraw,
-            ffb: FfbMirror::open(paths.ffb_output.as_deref()),
-            sign,
-            seq: 0,
-            window: [CENTER; WINDOW],
-            pending: Vec::with_capacity(NEW_PER_PACKET * 4),
-            idle: IdlePolicy::new(),
-        };
-        stream.send_init()?;
-        Ok(stream)
+impl Writer {
+    fn new(hidraw: File, ffb: FfbMirror, sign: Sign) -> Writer {
+        Writer { hidraw, ffb, sign, seq: 0, window: [CENTER; WINDOW], pending: Vec::new(), idle: IdlePolicy::new() }
     }
 
     /// Send the embedded 68-packet sequence twice, sequence byte
@@ -491,7 +552,7 @@ impl G923Stream {
                 let mut pkt = *packet;
                 pkt[5] = ((i + 1) & 0xff) as u8;
                 self.hidraw.write_all(&pkt)?;
-                std::thread::sleep(INIT_INTERPACKET);
+                thread::sleep(INIT_INTERPACKET);
             }
         }
         self.seq = ((TF_INIT_PACKET_COUNT + 1) & 0xff) as u8;
@@ -510,24 +571,34 @@ impl G923Stream {
         self.hidraw.write_all(&stop_packet(seq))
     }
 
-    /// Queue `samples` (each -1.0..1.0, tf-sim's usual synthesized-audio
-    /// rate) and emit one packet per complete [`NEW_PER_PACKET`]-sample
-    /// chunk, merging the wheel's live `ffb_output` into each. Leftover
-    /// samples shorter than a full chunk carry over to the next call.
-    pub fn push(&mut self, samples: &[f32]) -> io::Result<()> {
-        self.pending.extend_from_slice(samples);
-        while self.pending.len() >= NEW_PER_PACKET {
-            let chunk: Vec<f32> = self.pending.drain(..NEW_PER_PACKET).collect();
-            self.emit(&chunk)?;
+    /// Take up to [`NEW_PER_PACKET`] samples FIFO off `pending`, padding
+    /// any shortfall by repeating the last sample taken (or zero, if none
+    /// were available at all). Steady packet cadence means a tick can
+    /// come due before the producer has delivered a full chunk; padding
+    /// keeps every tick emitting a packet on schedule instead of skipping
+    /// it or blocking, at the cost of repeating the most recent sample
+    /// into the remaining slot(s).
+    fn take_chunk(&mut self) -> [f32; NEW_PER_PACKET] {
+        let mut chunk = [0.0f32; NEW_PER_PACKET];
+        let n = self.pending.len().min(NEW_PER_PACKET);
+        chunk[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.drain(..n);
+        let fill = if n > 0 { chunk[n - 1] } else { 0.0 };
+        for slot in &mut chunk[n..] {
+            *slot = fill;
         }
-        Ok(())
+        chunk
     }
 
-    fn emit(&mut self, chunk: &[f32]) -> io::Result<()> {
+    /// One packet tick: read the live `ffb_output`, take this tick's
+    /// sample chunk, run the idle policy, and either withhold, re-init, or
+    /// build+write one sample packet. See the module docs' state machine.
+    fn tick(&mut self, now: Instant) -> io::Result<()> {
         let ffb_raw = self.ffb.read_raw();
+        let chunk = self.take_chunk();
         let silent = ffb_raw == 0 && chunk.iter().all(|&s| s == 0.0);
 
-        match self.idle.tick(Instant::now(), silent, IDLE_TIMEOUT) {
+        match self.idle.tick(now, silent, IDLE_TIMEOUT) {
             IdleAction::Stream => {}
             IdleAction::EnterIdle => return self.send_stop(),
             IdleAction::StayIdle => return Ok(()),
@@ -542,11 +613,105 @@ impl G923Stream {
         let seq = self.next_seq();
         self.hidraw.write_all(&build_sample_packet(seq, &self.window))
     }
+}
 
-    /// Best-effort stop; safe to call repeatedly (e.g. once from explicit
-    /// teardown and again from [`Drop`]).
+/// The writer thread's body: wait for each tick, drain whatever commands
+/// arrived since the last one, and either stop or perform the tick.
+/// Exits (after a best-effort stop write) on an explicit [`Cmd::Stop`], a
+/// fatal write error, or `pacer` running out of ticks.
+fn run_writer(mut writer: Writer, cmd_rx: mpsc::Receiver<Cmd>, mut pacer: impl Pacer) {
+    while let Some(now) = pacer.wait() {
+        let mut stop_requested = false;
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(Cmd::Push(samples)) => writer.pending.extend(samples),
+                Ok(Cmd::Stop) => stop_requested = true,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    stop_requested = true;
+                    break;
+                }
+            }
+        }
+        if stop_requested {
+            let _ = writer.send_stop();
+            pacer.ack();
+            return;
+        }
+        // A write failure (e.g. the wheel was unplugged) is fatal: stop
+        // trying and exit, which drops `cmd_rx` so the next `push()` call
+        // fails and the daemon notices and tears the stream down.
+        let fatal = writer.tick(now).is_err();
+        pacer.ack();
+        if fatal {
+            return;
+        }
+    }
+    // The pacer ran out of ticks without an explicit Stop (production:
+    // never happens, `SteadyPacer` never returns `None`). Still send the
+    // safety-net stop before exiting.
+    let _ = writer.send_stop();
+}
+
+/// An open G923 TrueForce session. [`G923Stream::open`] sends the
+/// two-pass init sequence on the calling thread, then hands the hidraw
+/// file and the `ffb_output` mirror off to a dedicated writer thread
+/// ([`run_writer`]) that paces outgoing packets on [`TICK_INTERVAL`];
+/// [`push`](Self::push) only queues samples for it. [`stop`](Self::stop)
+/// (and [`Drop`], which calls it too) sends the stop template exactly
+/// once so the wheel is never left following a stale `cur`.
+pub struct G923Stream {
+    cmd_tx: mpsc::SyncSender<Cmd>,
+    handle: Option<thread::JoinHandle<()>>,
+    stopped: bool,
+}
+
+impl G923Stream {
+    /// Open `paths.hidraw`, send the two-pass init sequence (blocks for
+    /// roughly `2 * 68 * INIT_INTERPACKET`, a bit under half a second),
+    /// spawn the writer thread, and return a stream ready for
+    /// [`push`](Self::push).
+    pub fn open(paths: &G923Paths, sign: Sign) -> io::Result<G923Stream> {
+        Self::open_with_pacer(paths, sign, SteadyPacer)
+    }
+
+    fn open_with_pacer(paths: &G923Paths, sign: Sign, pacer: impl Pacer + 'static) -> io::Result<G923Stream> {
+        let hidraw = OpenOptions::new().read(true).write(true).open(&paths.hidraw)?;
+        let mut writer = Writer::new(hidraw, FfbMirror::open(paths.ffb_output.as_deref()), sign);
+        writer.send_init()?;
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(CMD_CHANNEL_CAPACITY);
+        let handle = thread::Builder::new().name("g923-tf-writer".into()).spawn(move || run_writer(writer, cmd_rx, pacer))?;
+        Ok(G923Stream { cmd_tx, handle: Some(handle), stopped: false })
+    }
+
+    /// Queue `samples` (each -1.0..1.0, tf-sim's usual synthesized-audio
+    /// rate) for the writer thread; it takes them off in
+    /// [`NEW_PER_PACKET`]-sample chunks at its own steady pace (see the
+    /// module docs). Fails if the writer thread has already stopped
+    /// (explicit [`stop`](Self::stop) or a fatal write error).
+    pub fn push(&mut self, samples: &[f32]) -> io::Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        self.cmd_tx
+            .send(Cmd::Push(samples.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "G923 TrueForce writer thread has stopped"))
+    }
+
+    /// Best-effort stop: tells the writer thread to send the stop template
+    /// and waits for it to actually do so before returning. Idempotent:
+    /// a second call (including the one from [`Drop`]) is a no-op, so the
+    /// stop template is written at most once per stream regardless of how
+    /// many times `stop` runs.
     pub fn stop(&mut self) {
-        let _ = self.send_stop();
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        let _ = self.cmd_tx.send(Cmd::Stop);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -554,7 +719,8 @@ impl Drop for G923Stream {
     fn drop(&mut self) {
         // Runs during panic unwinding too: the last-resort guard against
         // TF4ALL issue #13 (a stream left following a stale `cur` walks
-        // the wheel to its force limit).
+        // the wheel to its force limit). `stop`'s idempotence means this
+        // is a no-op if the caller already stopped the stream explicitly.
         self.stop();
     }
 }
@@ -896,5 +1062,196 @@ mod tests {
         assert_eq!(policy.tick(t0 + Duration::from_secs(3), false, timeout), IdleAction::Stream, "not idle yet, no resume needed");
         // Silence again: the 3s of prior silence must not carry over.
         assert_eq!(policy.tick(t0 + Duration::from_secs(3) + Duration::from_secs(4), true, timeout), IdleAction::Stream);
+    }
+
+    // -- end-to-end G923Stream (writer thread, against a temp file) ------
+    //
+    // These drive the real `G923Stream` public API (`open`/`push`/`stop`/
+    // `Drop`) with its hidraw handle pointed at a plain temp file standing
+    // in for the device node. The writer thread's pacing is swapped for
+    // `ManualPacer`, a rendezvous-channel pacer the test drives one tick
+    // at a time (each tick carrying whatever `Instant` the test chooses,
+    // so idle-timeout crossings never require an actual multi-second
+    // sleep): tests are event-driven, not sleep-based.
+
+    /// Test-only [`Pacer`]: `tick_rx` supplies each tick's `Instant` on
+    /// demand (nothing happens until the test sends one), and `ack_tx`
+    /// hands the test a synchronization point once the writer thread has
+    /// finished acting on it, so assertions never race the write.
+    struct ManualPacer {
+        tick_rx: mpsc::Receiver<Instant>,
+        ack_tx: mpsc::SyncSender<()>,
+    }
+
+    impl Pacer for ManualPacer {
+        fn wait(&mut self) -> Option<Instant> {
+            self.tick_rx.recv().ok()
+        }
+        fn ack(&mut self) {
+            let _ = self.ack_tx.send(());
+        }
+    }
+
+    /// Open a [`G923Stream`] against `paths` paced by [`ManualPacer`]
+    /// instead of the real [`SteadyPacer`]. Returns the stream, a sender
+    /// for driving one tick at a time, and the matching ack receiver.
+    fn open_test(paths: &G923Paths, sign: Sign) -> io::Result<(G923Stream, mpsc::SyncSender<Instant>, mpsc::Receiver<()>)> {
+        let (tick_tx, tick_rx) = mpsc::sync_channel(0);
+        let (ack_tx, ack_rx) = mpsc::sync_channel(0);
+        let stream = G923Stream::open_with_pacer(paths, sign, ManualPacer { tick_rx, ack_tx })?;
+        Ok((stream, tick_tx, ack_rx))
+    }
+
+    /// A `G923Paths` pointing at a fresh, empty temp file standing in for
+    /// the hidraw node, with no `ffb_output` (mirror reads as a constant
+    /// zero, keeping the merge math trivial for these tests).
+    fn temp_hidraw_paths() -> (PathBuf, G923Paths) {
+        let dir = tempdir();
+        let hidraw = dir.join("hidraw");
+        std::fs::write(&hidraw, []).unwrap();
+        let paths = G923Paths { hidraw: hidraw.clone(), ffb_output: None };
+        (hidraw, paths)
+    }
+
+    const INIT_LEN: usize = 2 * TF_INIT_PACKET_COUNT * PACKET_LEN;
+
+    #[test]
+    fn open_writes_the_full_two_pass_init_sequence() {
+        let (hidraw_path, paths) = temp_hidraw_paths();
+        let (stream, tick_tx, _ack_rx) = open_test(&paths, Sign::Normal).expect("open");
+
+        // send_init() runs synchronously on the calling thread before
+        // open() returns, so the full sequence is already on disk with no
+        // ticks needed.
+        let bytes = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(bytes.len(), INIT_LEN, "136 packets, 64 bytes each");
+
+        let packet = |i: usize| &bytes[i * PACKET_LEN..(i + 1) * PACKET_LEN];
+        for pass in 0..2 {
+            let base = pass * TF_INIT_PACKET_COUNT;
+            assert_eq!(packet(base)[5], 1, "pass {pass}: seq restarts at 1");
+            assert_eq!(packet(base + TF_INIT_PACKET_COUNT - 2)[4], 0x04, "pass {pass}: second-to-last is the stop template");
+            assert_eq!(packet(base + TF_INIT_PACKET_COUNT - 1)[4], 0x03, "pass {pass}: last is the start template");
+        }
+
+        drop(tick_tx);
+        drop(stream);
+    }
+
+    #[test]
+    fn streaming_ticks_emit_correctly_paced_and_sequenced_sample_packets() {
+        let (hidraw_path, paths) = temp_hidraw_paths();
+        let (mut stream, tick_tx, ack_rx) = open_test(&paths, Sign::Normal).expect("open");
+
+        // Two ticks' worth of distinct, nonzero samples, delivered in one
+        // push (mirroring the daemon's batched poll-loop calls).
+        stream.push(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]).unwrap();
+
+        let t0 = Instant::now();
+        tick_tx.send(t0).unwrap();
+        ack_rx.recv().unwrap();
+        tick_tx.send(t0 + TICK_INTERVAL).unwrap();
+        ack_rx.recv().unwrap();
+
+        let bytes = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(bytes.len(), INIT_LEN + 2 * PACKET_LEN, "exactly two sample packets, back to back");
+        let pkt1 = &bytes[INIT_LEN..INIT_LEN + PACKET_LEN];
+        let pkt2 = &bytes[INIT_LEN + PACKET_LEN..INIT_LEN + 2 * PACKET_LEN];
+
+        // No ffb_output, so the merge is a plain pass-through; window
+        // starts centered (reset by send_init) and slides by 4 each tick.
+        let seq0 = (TF_INIT_PACKET_COUNT as u16 + 1) as u8;
+        let mut window1 = [CENTER; WINDOW];
+        slide_window(&mut window1, &[0.1f32, 0.2, 0.3, 0.4].map(float_to_wire));
+        assert_eq!(pkt1, &build_sample_packet(seq0, &window1)[..], "first tick's window and sequence byte");
+
+        let mut window2 = window1;
+        slide_window(&mut window2, &[0.5f32, 0.6, 0.7, 0.8].map(float_to_wire));
+        assert_eq!(pkt2, &build_sample_packet(seq0.wrapping_add(1), &window2)[..], "second tick slides the window again");
+
+        drop(tick_tx);
+    }
+
+    #[test]
+    fn idle_after_timeout_sends_exactly_one_stop_and_resume_reinits() {
+        let (hidraw_path, paths) = temp_hidraw_paths();
+        let (mut stream, tick_tx, ack_rx) = open_test(&paths, Sign::Normal).expect("open");
+        let t0 = Instant::now();
+
+        // Genuine silence (all-zero samples, no ffb): starts the idle
+        // clock, but one tick under the timeout still streams normally.
+        stream.push(&[0.0; NEW_PER_PACKET]).unwrap();
+        tick_tx.send(t0).unwrap();
+        ack_rx.recv().unwrap();
+        let after_first = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(after_first.len(), INIT_LEN + PACKET_LEN, "still streaming, not idle yet");
+
+        // Jump straight to the timeout - no real waiting.
+        tick_tx.send(t0 + IDLE_TIMEOUT).unwrap();
+        ack_rx.recv().unwrap();
+        let after_idle = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(after_idle.len(), INIT_LEN + 2 * PACKET_LEN, "idle transition wrote exactly one extra packet");
+        let stop_pkt = &after_idle[after_idle.len() - PACKET_LEN..];
+        assert_eq!(stop_pkt[4], 0x04, "the idle-entry packet is the stop template");
+
+        // Further silent ticks while idle withhold packets entirely.
+        tick_tx.send(t0 + IDLE_TIMEOUT + Duration::from_secs(1)).unwrap();
+        ack_rx.recv().unwrap();
+        assert_eq!(std::fs::read(&hidraw_path).unwrap().len(), after_idle.len(), "stayed idle: no new packet");
+
+        // Activity resumes: the tick re-sends the full init sequence,
+        // then emits one sample packet in the same tick.
+        stream.push(&[0.5; NEW_PER_PACKET]).unwrap();
+        tick_tx.send(t0 + IDLE_TIMEOUT + Duration::from_secs(2)).unwrap();
+        ack_rx.recv().unwrap();
+        let after_resume = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(
+            after_resume.len(),
+            after_idle.len() + INIT_LEN + PACKET_LEN,
+            "resume re-sent the full init sequence plus one sample packet"
+        );
+
+        drop(tick_tx);
+    }
+
+    #[test]
+    fn explicit_stop_then_drop_does_not_double_send_the_stop_packet() {
+        let (hidraw_path, paths) = temp_hidraw_paths();
+        let (mut stream, tick_tx, ack_rx) = open_test(&paths, Sign::Normal).expect("open");
+
+        // `stop()` sends Cmd::Stop and then blocks joining the writer
+        // thread, which is parked waiting for a tick - so driving that
+        // tick from another thread races the writer's drain loop against
+        // the `send` (whichever thread the scheduler runs first), and the
+        // writer losing that race is the common case in practice (the
+        // rendezvous tick, sent to an already-parked receiver, tends to
+        // land before a freshly spawned thread gets its first timeslice).
+        // So the request is issued here directly, on this thread, in the
+        // same order `stop()` uses internally, which is what guarantees
+        // the writer's drain loop is guaranteed to observe it: the
+        // properties under test - exactly one stop write, and `stop`
+        // being a no-op afterward - hold regardless of which code path
+        // set `stopped`.
+        stream.cmd_tx.send(Cmd::Stop).unwrap();
+        stream.stopped = true;
+        tick_tx.send(Instant::now()).unwrap();
+        ack_rx.recv().unwrap();
+        if let Some(handle) = stream.handle.take() {
+            handle.join().expect("writer thread panicked");
+        }
+
+        let after_stop = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(after_stop.len(), INIT_LEN + PACKET_LEN, "exactly one stop packet after the init sequence");
+        assert_eq!(after_stop[after_stop.len() - PACKET_LEN + 4], 0x04, "it is the stop template");
+
+        // Now exercise the real public API: with `stopped` already true
+        // (as it would be after any prior `stop()` call), a further
+        // explicit `stop()` and the subsequent `Drop` must both be
+        // no-ops - the double-send this test guards against.
+        stream.stop();
+        drop(tick_tx);
+        drop(stream);
+        let after_drop = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(after_drop.len(), after_stop.len(), "stop()/Drop after the writer already stopped must not double-send");
     }
 }
