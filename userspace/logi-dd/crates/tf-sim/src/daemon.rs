@@ -104,9 +104,10 @@ struct Active {
     last_telemetry: Instant,
     last_gen: Instant,
     samples: Vec<f32>,
-    /// The wheel's rev display, when the config enables it and a wheel
-    /// exposing `wheel_rev_level` was found at stream start; `None`
-    /// otherwise. Stopped (blank + idle-pattern restore) with the stream.
+    /// The wheel's rev display, when the config enables it and a rev
+    /// display (either the DD wheels' `wheel_rev_level` attribute or the
+    /// G923's LED classdevs) was found at stream start; `None` otherwise.
+    /// Stopped (blanked) with the stream.
     leds: Option<RevLeds>,
 }
 

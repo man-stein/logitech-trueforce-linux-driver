@@ -33,6 +33,10 @@ the contract is "it works on RS50 and G Pro as listed here".
   fighting (an active stream otherwise makes the wheel ignore the classic
   path entirely). Hardware-confirmed: a driven tone reaches the wheel as
   vibration; the feel check under real game telemetry is still pending.
+  The rev-display feeder now drives the G923's strip too: since the
+  wheel has no `wheel_rev_level` attribute, it lights the 5 `::RPM1`-`::RPM5`
+  classdevs directly, mapping the same 0-10 telemetry level onto the 5
+  mirrored pairs.
 - **G923 support, Xbox edition (`046d:c26e`), routed through the driver's
   existing HID++ 0x8123 (G920-style) force-feedback path.** The
   console-boot mode (`046d:c26d`, no input node at all) now switches to PC
