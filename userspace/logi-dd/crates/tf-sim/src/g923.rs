@@ -90,7 +90,8 @@ pub const PID_PS: u16 = 0xC266;
 pub const PID_XBOX: u16 = 0xC26E;
 
 /// USB interface number of the TrueForce (vendor page 0xFFFD) transport.
-const TF_IFACE: &str = "2";
+/// The kernel zero-pads the sysfs value ("02"), so compare numerically.
+const TF_IFACE: u8 = 2;
 /// First three bytes of a report descriptor opening with
 /// `Usage Page (0xFFFD)` (tag 0x06, 2-byte little-endian data FD FF).
 const VENDOR_PAGE_PREFIX: [u8; 3] = [0x06, 0xFD, 0xFF];
@@ -223,8 +224,8 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
 fn is_g923_tf_interface(hid_device_dir: &Path) -> bool {
     let Some(iface_dir) = hid_device_dir.parent() else { return false };
     let Some(usb_dir) = iface_dir.parent() else { return false };
-    let ifnum = read_trim(&iface_dir.join("bInterfaceNumber"));
-    if ifnum.as_deref() != Some(TF_IFACE) {
+    let ifnum = read_trim(&iface_dir.join("bInterfaceNumber")).and_then(|s| s.parse::<u8>().ok());
+    if ifnum != Some(TF_IFACE) {
         return false;
     }
     let vid = read_trim(&usb_dir.join("idVendor")).and_then(|s| parse_hex_u16(&s));
@@ -268,7 +269,10 @@ fn find_ffb_output(hid_device_dir: &Path, hid_bus_root: &Path) -> Option<PathBuf
 // ---------------------------------------------------------------------
 
 /// The classic engine's mirror sign relative to the wire's offset-binary
-/// convention. Unverified on hardware; see the module docs.
+/// convention. Hardware-calibrated on a c266 (2026-07-26): the wheel
+/// interprets cur with the OPPOSITE sign from the native classic force,
+/// matching TF4ALL's finding on the HID++ path, so the config defaults
+/// to inverted. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sign {
     Normal,
@@ -863,13 +867,13 @@ mod tests {
             let if0 = usb_dev.join("1-1:1.0");
             let hid0 = if0.join("0003:046D:C266.0003");
             std::fs::create_dir_all(&hid0).unwrap();
-            std::fs::write(if0.join("bInterfaceNumber"), "0\n").unwrap();
+            std::fs::write(if0.join("bInterfaceNumber"), "00\n").unwrap();
             std::fs::write(hid0.join(FFB_OUTPUT_ATTR), "0\n").unwrap();
 
             let if2 = usb_dev.join("1-1:1.2");
             let hid2 = if2.join("0003:046D:C266.0005");
             std::fs::create_dir_all(&hid2).unwrap();
-            std::fs::write(if2.join("bInterfaceNumber"), "2\n").unwrap();
+            std::fs::write(if2.join("bInterfaceNumber"), "02\n").unwrap();
             std::fs::write(hid2.join("report_descriptor"), report_descriptor).unwrap();
 
             let hidraw_root = root.join("class/hidraw");

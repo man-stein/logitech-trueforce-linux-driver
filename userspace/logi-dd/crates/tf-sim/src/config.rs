@@ -94,7 +94,7 @@ impl Default for Config {
             pcars_port: pcars::DEFAULT_PORT,
             beamng_port: beamng::DEFAULT_PORT,
             relay_port: relay::DEFAULT_PORT,
-            g923_ffb_invert: false,
+            g923_ffb_invert: true,
             games: BTreeMap::new(),
         }
     }
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(cfg.pcars_port, 5606);
         assert_eq!(cfg.beamng_port, 4444);
         assert_eq!(cfg.relay_port, 20780);
-        assert!(!cfg.g923_ffb_invert, "the FFB mirror sign defaults non-inverted");
+        assert!(cfg.g923_ffb_invert, "the FFB mirror sign defaults inverted (hardware-calibrated on a c266)");
     }
 
     #[test]
@@ -349,8 +349,11 @@ mod tests {
         fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=1\n")).unwrap();
         assert!(Config::load_from(&path).g923_ffb_invert);
 
+        fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=0\n")).unwrap();
+        assert!(!Config::load_from(&path).g923_ffb_invert, "explicit 0 overrides the inverted default");
+
         fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=maybe\n")).unwrap();
-        assert!(!Config::load_from(&path).g923_ffb_invert, "unparsable bool keeps the default");
+        assert!(Config::load_from(&path).g923_ffb_invert, "unparsable bool keeps the (inverted) default");
     }
 
     #[test]

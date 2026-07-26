@@ -9,9 +9,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::{Config, DEFAULT_INTENSITY};
+use crate::daemon::open_wheel_stream;
 use crate::error::Result;
 use crate::synth::EngineSynth;
-use crate::tf::TfStream;
 
 /// Total sweep duration: idle -> redline -> idle.
 pub const SWEEP_SECS: f32 = 6.0;
@@ -30,8 +30,9 @@ pub fn sweep_at(t: f32) -> (f32, f32) {
     (IDLE_RPM + (REDLINE_RPM - IDLE_RPM) * frac, frac)
 }
 
-/// Play the sweep on controller 0 at the config's master intensity
-/// (falling back to the default if it is set to 0, so the test is always
+/// Play the sweep on the detected wheel (DD family or G923, same
+/// selection as the daemon) at the config's master intensity (falling
+/// back to the default if it is set to 0, so the test is always
 /// feelable), then exit. `stop` aborts early; the stream teardown clears
 /// any queued force either way.
 pub fn run(cfg: &Config, pitch_override_pct: Option<u8>, stop: &AtomicBool) -> Result<()> {
@@ -50,7 +51,7 @@ pub fn run(cfg: &Config, pitch_override_pct: Option<u8>, stop: &AtomicBool) -> R
         thread::sleep(Duration::from_secs(1));
     }
 
-    let mut stream = TfStream::open(0)?;
+    let mut stream = open_wheel_stream(cfg)?;
     let mut synth = EngineSynth::new();
     let mut samples = Vec::with_capacity(CHUNK_MS);
 

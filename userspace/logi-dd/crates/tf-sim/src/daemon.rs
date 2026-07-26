@@ -65,13 +65,13 @@ pub fn install_signal_handlers() -> Result<()> {
 /// have to care which one it holds. libtrueforce's own discovery only
 /// recognizes the RS50-family PIDs, so a G923 never reaches [`TfStream`];
 /// [`open_wheel_stream`] tries the G923 path first and falls back to it.
-enum WheelStream {
+pub(crate) enum WheelStream {
     Dd(TfStream),
     G923(g923::G923Stream),
 }
 
 impl WheelStream {
-    fn push(&mut self, samples: &[f32]) -> Result<()> {
+    pub(crate) fn push(&mut self, samples: &[f32]) -> Result<()> {
         match self {
             WheelStream::Dd(s) => s.push(samples),
             WheelStream::G923(s) => {
@@ -85,7 +85,7 @@ impl WheelStream {
 /// libtrueforce cannot see) takes priority since a G923 never answers
 /// libtrueforce's own RS50-family discovery; otherwise fall back to the DD
 /// wheels' libtrueforce-backed [`TfStream`].
-fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
+pub(crate) fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
     if let Some(paths) = g923::discover() {
         let sign = g923::Sign::resolve(cfg.g923_ffb_invert);
         let stream = g923::G923Stream::open(&paths, sign)
