@@ -1134,6 +1134,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         app.set_no_wheel(false);
                         app.set_no_wheel_message("".into());
                         app.set_mode_onboard(matches!(info.mode, Mode::Onboard));
+                        app.set_test_wheel_kind(bridge::wheel_image_index(info.model));
                     }
                     Response::NoWheel(message) => {
                         app.set_no_wheel(true);

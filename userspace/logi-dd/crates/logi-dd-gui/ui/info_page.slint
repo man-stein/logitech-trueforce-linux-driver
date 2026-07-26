@@ -92,8 +92,15 @@ export component InfoPage inherits Rectangle {
     in property <string> hat: "centered";
     in property <[TestAxis]> axes: [];
     // The layout image's callout boxes, tinted while pressed; see
-    // `TestCallout`.
+    // `TestCallout`. Only meaningful over the RS50's numbered layout photo
+    // (`wheel-kind` 0): the G PRO/G923 photos are plain product shots with
+    // no numbered boxes for these fractions to land on, so the overlay is
+    // hidden for those (see `img-area`'s `Image` below).
     in property <[TestCallout]> callouts: [];
+    // Which product photo to show below: 0 RS50 (the numbered layout used
+    // for the button-callout overlay), 1 G PRO, 2 G923. See
+    // `bridge::wheel_image_index` for how a frontend picks this.
+    in property <int> wheel-kind: 0;
     // True while a simulation plays; disables both sim buttons and shows
     // the Stop button.
     in property <bool> sim-running: false;
@@ -314,8 +321,10 @@ export component InfoPage inherits Rectangle {
                                 // must match the drawn image exactly, so the
                                 // callout children can position themselves
                                 // as fractions of ITS size (= fractions of
-                                // the source image).
-                                property <float> aspect: 2500 / 2160;
+                                // the source image). Each photo keeps its
+                                // own native aspect ratio rather than being
+                                // squeezed into the RS50 layout's.
+                                property <float> aspect: root.wheel-kind == 2 ? 1384.0 / 1038.0 : 2500.0 / 2160.0;
                                 property <length> img-w: min(self.width, self.height * self.aspect);
 
                                 // Turned by the live steering angle
@@ -337,14 +346,26 @@ export component InfoPage inherits Rectangle {
                                     Image {
                                         width: 100%;
                                         height: 100%;
-                                        source: @image-url("assets/rs-wheel-hub-button-layout.png");
+                                        // RS50 (0): the numbered layout photo
+                                        // the callout overlay below is drawn
+                                        // against. G PRO (1) / G923 (2): a
+                                        // plain product photo, no numbers.
+                                        source: root.wheel-kind == 2
+                                            ? @image-url("assets/g923-wheel.png")
+                                            : root.wheel-kind == 1
+                                                ? @image-url("assets/g-pro-wheel.png")
+                                                : @image-url("assets/rs-wheel-hub-button-layout.png");
                                         image-fit: contain;
                                     }
-                                    // Pressed-button tints over the numbered
-                                    // callout boxes; children of `rotator`,
-                                    // so they turn with the artwork. Semi-
-                                    // transparent green keeps the number
-                                    // readable underneath.
+                                    // Pressed-button tints over the RS50
+                                    // layout's numbered callout boxes;
+                                    // children of `rotator`, so they turn
+                                    // with the artwork. Semi-transparent
+                                    // green keeps the number readable
+                                    // underneath. Only drawn over the RS50
+                                    // photo (wheel-kind 0): the G PRO/G923
+                                    // photos have no numbered boxes for
+                                    // these fractions to land on.
                                     for c in root.callouts: Rectangle {
                                         x: (c.cx - c.w / 2) * rotator.width;
                                         y: (c.cy - c.h / 2) * rotator.height;
@@ -352,7 +373,7 @@ export component InfoPage inherits Rectangle {
                                         height: c.h * rotator.height;
                                         border-radius: 4px;
                                         background: #00c8538c;
-                                        visible: c.pressed;
+                                        visible: c.pressed && root.wheel-kind == 0;
                                     }
                                 }
                             }

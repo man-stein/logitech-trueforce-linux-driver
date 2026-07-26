@@ -6,7 +6,7 @@
 
 use logi_dd_core::curve::{Curve, FULL};
 use logi_dd_core::shaping::{self, ShapingRole};
-use logi_dd_core::{lightsync, Access, Category, Color, Error, Kind, Value, REGISTRY};
+use logi_dd_core::{lightsync, Access, Category, Color, Error, Kind, Value, WheelModel, REGISTRY};
 
 use logi_dd_core::games::{self, SetupAction};
 use logi_dd_core::launchers::DiscoveredGame;
@@ -66,6 +66,31 @@ pub const KIND_SHAPING: i32 = 14;
 /// exists so the row can be found in the model (`update_row`'s
 /// find-by-attr) and so its button callback has something to report.
 pub const LIGHT_EDIT_SLOT_ATTR: &str = "lightsync_edit_slot";
+
+// --- Info/Testing page wheel photo ---
+//
+// `InfoPage`'s `wheel-kind` property (`ui/info_page.slint`) selects between
+// the three product photos embedded as Slint assets; the numbering must
+// match that Slint `if`/`else` chain exactly.
+
+/// The RS50 (`046d:c276`), and the fallback for any wheel `wheel_image_index`
+/// cannot pin to a specific product (an `Unknown` model): the photo already
+/// embedded before per-wheel images existed.
+pub const WHEEL_IMAGE_RS50: i32 = 0;
+/// The G PRO Racing Wheel (`046d:c268`/`046d:c272`).
+pub const WHEEL_IMAGE_GPRO: i32 = 1;
+/// The G923 (`046d:c266`/`046d:c26e`, any edition).
+pub const WHEEL_IMAGE_G923: i32 = 2;
+
+/// The Info/Testing page's product photo for `model`, one of the
+/// `WHEEL_IMAGE_*` constants above.
+pub fn wheel_image_index(model: WheelModel) -> i32 {
+    match model {
+        WheelModel::GPro => WHEEL_IMAGE_GPRO,
+        WheelModel::G923 => WHEEL_IMAGE_G923,
+        WheelModel::Rs50 | WheelModel::Unknown => WHEEL_IMAGE_RS50,
+    }
+}
 
 fn is_read_only(attr: &str) -> bool {
     REGISTRY.iter().any(|s| s.attr == attr && s.access == Access::ReadOnly)
@@ -2101,6 +2126,16 @@ mod tests {
         for s in logi_dd_core::CLASSIC_REGISTRY {
             assert!(!attr_group(s.attr).is_empty(), "no group for {}", s.attr);
         }
+    }
+
+    #[test]
+    fn wheel_image_index_selects_by_model() {
+        assert_eq!(wheel_image_index(WheelModel::Rs50), WHEEL_IMAGE_RS50);
+        assert_eq!(wheel_image_index(WheelModel::GPro), WHEEL_IMAGE_GPRO);
+        assert_eq!(wheel_image_index(WheelModel::G923), WHEEL_IMAGE_G923);
+        // An unrecognised wheel falls back to the photo shown before
+        // per-wheel images existed, rather than guessing.
+        assert_eq!(wheel_image_index(WheelModel::Unknown), WHEEL_IMAGE_RS50);
     }
 
     #[test]

@@ -136,6 +136,10 @@ export component App inherits Window {
     in property <float> test-degrees: 0;
     in property <string> test-degrees-text: "0.0 deg";
     in property <int> test-range: 900;
+    // Which product photo the Info/Testing page shows: 0 RS50, 1 G PRO, 2
+    // G923 (see `bridge::wheel_image_index`); set from `Response::Info`'s
+    // `model` whenever discovery identifies the connected wheel.
+    in property <int> test-wheel-kind: 0;
     in property <[TestButton]> test-buttons: [];
     in property <string> test-hat: "centered";
     in property <[TestAxis]> test-axes: [];
@@ -479,6 +483,7 @@ export component App inherits Window {
                     degrees: root.test-degrees;
                     degrees-text: root.test-degrees-text;
                     range: root.test-range;
+                    wheel-kind: root.test-wheel-kind;
                     buttons: root.test-buttons;
                     hat: root.test-hat;
                     axes: root.test-axes;
