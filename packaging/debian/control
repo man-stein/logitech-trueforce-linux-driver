@@ -14,8 +14,8 @@ Depends: ${misc:Depends}, dkms
 # The pre-split logitech-trueforce-dkms shipped the userspace tools too;
 # recommending logi-dd keeps upgrades (and "install the driver, get the
 # ecosystem") whole while still allowing a lean module-only install.
-Recommends: logi-dd
-Suggests: oversteer, usb-modeswitch
+Recommends: logi-dd, usb-modeswitch
+Suggests: oversteer
 Description: DKMS kernel driver for Logitech TrueForce direct-drive wheels
  Force feedback, TrueForce texture routing, and G HUB-equivalent settings
  exposed through sysfs for the Logitech RS50 and G PRO direct-drive racing
