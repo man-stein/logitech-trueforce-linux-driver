@@ -100,8 +100,9 @@ protocol, not the RS50/G PRO's endpoint-based one.
   effects, and autocenter, with an automatic PlayStation-to-PC mode switch.
   Settings use the classic `range`/`gain`/`autocenter`/`combine_pedals` sysfs
   names (Oversteer-compatible, not the `wheel_*` names above, since it is a
-  different FFB engine), plus a read-only `ffb_output`. Rev lights (5 LED
-  pairs) work the same way as the RS50/G PRO strip. Hardware-verified:
+  different FFB engine), plus a read-only `ffb_output`. Rev lights (5
+  mirrored LED pairs) are exposed as standard Linux LED devices
+  (`::RPM1` to `::RPM5` under `/sys/class/leds`). Hardware-verified:
   constant force and autocenter feel correct in Assetto Corsa Competizione,
   and the LED sweep.
 - **No launch options needed for force feedback**: unlike the SDK-aware
@@ -111,7 +112,8 @@ protocol, not the RS50/G PRO's endpoint-based one.
   for the PlayStation G923 on Linux (the SDK DLL just delegates the haptics
   to G HUB, which Proton does not provide). `logi-tf-sim` streams the same
   telemetry-driven haptics used on the other wheels to the G923 instead, over
-  the interface this driver claims for it, mirroring live force feedback into
+  the wheel's TrueForce interface (which this driver exposes as a hidraw
+  node), mirroring live force feedback into
   the same stream so the two agree. Hardware-confirmed as vibration; the feel
   check under real game telemetry is still pending.
 - **Xbox edition** (`046d:c26e` PC mode): force feedback routes through the
@@ -159,7 +161,9 @@ installed (it needs no group membership).
   prefix, plus `PROTON_ENABLE_HIDRAW=1`. The one-time recipe is on the
   [Force feedback in games](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games)
   wiki page. Verified end to end on **Assetto Corsa Competizione** and
-  **Assetto Corsa EVO**.
+  **Assetto Corsa EVO**. This recipe is for the RS50 and G PRO only: on the
+  G923 the SDK path does not work and `PROTON_ENABLE_HIDRAW` must stay
+  unset - see [G923 support](#g923-support).
 
 - **DirectInput sims** (Le Mans Ultimate, for example) lose force feedback with
   `PROTON_ENABLE_HIDRAW=1` because the real wheel advertises no PID collection.
@@ -227,7 +231,8 @@ keeping hands clear during AC EVO map loads) are covered under
 
 ## Troubleshooting
 
-- **No force feedback / no `wheel_*` files (wheel stuck on `hid-generic`):** the
+- **No force feedback / no `wheel_*` files (`range`/`gain` on a G923; wheel
+  stuck on `hid-generic`):** the
   module did not bind. Confirm it is loaded (`lsmod | grep hid_logitech_dd`),
   replug the wheel, and check `dmesg`. `./tools/setup.sh doctor` diagnoses this.
 - **Force feedback pulls the wrong way** (a native game and a Wine/Proton game can

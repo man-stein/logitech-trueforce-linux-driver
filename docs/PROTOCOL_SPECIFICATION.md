@@ -930,8 +930,14 @@ re-enumerate it.
 > `c267`) is a different case: this driver now supports it directly via a
 > ported classic force-feedback engine (plain HID output reports, the same
 > wire format as G29/G920's in-kernel `hid-logitech` driver) - neither
-> 0x8123 nor the RS50/G PRO TrueForce-stream path documented below. See the
-> G923 section in the README and CHANGELOG.
+> 0x8123 nor the RS50/G PRO TrueForce-stream path documented below drives
+> its force feedback. The PS G923 does still carry the same interface-2
+> TrueForce stream transport as the DD wheels (confirmed by TF4ALL's
+> Windows captures, issue #20, and on hardware 2026-07-26): the driver
+> exposes that interface as a hidraw node and `logi-tf-sim` streams
+> simulated TrueForce over it. See the G923 section in the README and
+> CHANGELOG, and the coverage note in
+> [`TRUEFORCE_PROTOCOL.md`](TRUEFORCE_PROTOCOL.md).
 
 | Feature | G920/G923 | RS50 |
 |---------|-----------|------|

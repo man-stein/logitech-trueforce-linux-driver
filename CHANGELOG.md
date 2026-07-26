@@ -17,8 +17,10 @@ the contract is "it works on RS50 and G Pro as listed here".
   sysfs names (Oversteer-compatible, distinct from this driver's usual
   `wheel_*` surface, since it is a different FFB engine) plus a read-only
   `ffb_output`; `combine_pedals` rewrites the input report, not just a
-  no-op toggle. Rev lights (5 LED classdevs, one per mirrored pair) use the
-  same command as the RS50/G PRO strip. Hardware-verified on a c266:
+  no-op toggle. Rev lights are standard Linux LED devices (5 classdevs,
+  `::RPM1` to `::RPM5`, one per mirrored pair), driven by the classic
+  G29-family LED command, not the DD wheels' HID++ feature.
+  Hardware-verified on a c266:
   constant force and autocenter feel correct in Assetto Corsa Competizione,
   and the LED sweep lights the innermost pair.
 - **Simulated TrueForce for the G923.** The wheel speaks the same
@@ -31,8 +33,8 @@ the contract is "it works on RS50 and G Pro as listed here".
   fighting (an active stream otherwise makes the wheel ignore the classic
   path entirely). Hardware-confirmed: a driven tone reaches the wheel as
   vibration; the feel check under real game telemetry is still pending.
-- **G923 support, Xbox edition (`046d:c26e`), routed through the existing
-  HID++ 0x8123 path** used by the other direct-drive wheels. The
+- **G923 support, Xbox edition (`046d:c26e`), routed through the driver's
+  existing HID++ 0x8123 (G920-style) force-feedback path.** The
   console-boot mode (`046d:c26d`, no input node at all) now switches to PC
   mode automatically on plug-in via a udev rule and `usb_modeswitch` (a
   recommended, not required, package); the out-of-tree `xone` driver can

@@ -6,7 +6,9 @@ DirectInput, so bindings stay consistent across platforms.
 
 This is the reference for binding controls in a game. The wire-level bitmask
 (which report bit encodes which button) is in
-[PROTOCOL_SPECIFICATION.md](PROTOCOL_SPECIFICATION.md).
+[PROTOCOL_SPECIFICATION.md](PROTOCOL_SPECIFICATION.md). The G923 is not
+covered here: it reports its own classic button layout straight from its HID
+descriptor.
 
 ![RS50 button layout](images/rs-wheel-hub-button-layout.png)
 

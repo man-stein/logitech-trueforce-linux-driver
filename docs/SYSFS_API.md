@@ -4,10 +4,13 @@
 **Devices**:
 - Logitech RS50 Direct Drive Wheel Base (USB `046d:c276`)
 - Logitech G Pro Racing Wheel (USB `046d:c272` Xbox/PC, `046d:c268` PS/PC)
+- Logitech G923 (USB `046d:c266`/`c267` PlayStation edition, `046d:c26e` Xbox edition)
 
 **Applies to**: the `hid-logitech-dd` driver in this repository.
 
 Most of the attributes documented here are shared between the RS50 and G Pro (the two wheels share the settings code path). Attributes that are currently G Pro-only or RS50-only are called out inline.
+
+The **G923 is different**: none of the `wheel_*` attributes below exist on it. Its classic force-feedback engine has its own, smaller attribute set (`range`, `gain`, `autocenter`, `combine_pedals`, `ffb_output`) plus rev-LED devices under `/sys/class/leds/`; see [G923 Attributes](#g923-attributes-playstation-edition-c266c267) below.
 
 ---
 
@@ -865,10 +868,12 @@ no driver change. By its mode switch:
 These attributes provide compatibility with existing wheel management tools (e.g., Oversteer).
 The sysfs filenames use standard Oversteer names (without the `wheel_` prefix).
 
-**Note:** These aliases are created for every wheel this driver binds (RS50 and
-G PRO). They exist so Oversteer, which looks for the new-lg4ff attribute names,
-can drive the wheel; the same settings are also available under their `wheel_*`
-names documented above.
+**Note:** These aliases are created for every direct-drive wheel this driver
+binds (RS50 and G PRO). They exist so Oversteer, which looks for the new-lg4ff
+attribute names, can drive the wheel; the same settings are also available
+under their `wheel_*` names documented above. On the **G923** the classic names
+are not aliases but the primary (and only) attributes, with classic semantics
+and scales - see the next section.
 
 These attributes follow the de-facto Linux wheel convention (the
 new-lg4ff attribute names and scales) that Oversteer and similar tools
@@ -914,6 +919,96 @@ Global output scales for the emulated `FF_SPRING` / `FF_DAMPER` /
 effects play as the game commanded, lower values tame that effect
 class across all games, 0 mutes it. `damper_level` scales DAMPER
 effects from games; the wheel's own firmware damping is `wheel_damping`.
+
+---
+
+## G923 Attributes (PlayStation edition, c266/c267)
+
+The G923 PlayStation edition runs a classic force-feedback engine ported from
+berarma's new-lg4ff, not the direct-drive `hidpp_dd_ff_*` path, so it exposes
+the classic lg4ff attribute names as its primary attributes (Oversteer speaks
+them natively). None of the `wheel_*` attributes above exist on this wheel.
+The attributes live on the wheel's interface-0 HID device:
+
+```bash
+find /sys/bus/hid/devices -name "*046D*C266*" 2>/dev/null   # G923 PS (after mode switch)
+```
+
+The wheel enumerates as `046d:c267` in PlayStation mode; the driver switches it
+to classic mode (`046d:c266`) automatically, so `c266` is the device you
+configure. All attributes are hardware-verified on a c266 except where noted.
+
+### range
+**Access**: Read/Write
+**Values**: `40` to `900` (degrees)
+
+Steering rotation range. Writing `0` selects the maximum (900). Out-of-range
+values are ignored (the write succeeds but changes nothing).
+
+```bash
+echo 540 > range
+```
+
+### gain
+**Access**: Read/Write
+**Values**: `0` to `65535`
+**Default**: `65535`
+
+Master gain applied to all effects the classic engine plays, multiplied with
+the per-application `FF_GAIN` from evdev.
+
+### autocenter
+**Access**: Read/Write
+**Values**: `0` to `65535` (spring strength; `0` = off)
+**Default**: `0`
+
+Hardware autocenter spring. Writes go through the same `FF_AUTOCENTER`
+callback games use, so a game that disables autocenter before taking over
+force feedback behaves correctly.
+
+### combine_pedals
+**Access**: Read/Write
+**Values**: `0`, `1`, `2`
+
+Merges two pedals into one centred axis for legacy games, by rewriting the
+wheel's input report in the driver:
+
+- `0` - separate pedals (default)
+- `1` - throttle and brake combined into the throttle axis
+- `2` - throttle and clutch combined into the throttle axis
+
+Values above `2` are clamped to `2`.
+
+### ffb_output
+**Access**: Read-only
+**Values**: roughly `-32768` to `32767` (`0` = no force)
+
+The classic engine's current net force output (post-gain), updated once per
+effect-loop tick. `logi-tf-sim` polls this to mirror live force feedback into
+the G923's TrueForce stream while simulated TrueForce is running (an active
+stream makes the wheel follow the stream's force field instead of the classic
+path, so the mirror is what keeps force feedback alive during streaming).
+
+### Rev LEDs
+
+The five rev-light pairs are standard Linux LED class devices, one per
+mirrored pair, innermost first:
+
+```
+/sys/class/leds/<hid-device>::RPM1 .. ::RPM5
+# e.g. /sys/class/leds/0003:046D:C266.0005::RPM1/brightness
+```
+
+Write `1`/`0` to each `brightness` file to switch a pair on or off. Any LED
+tool (or a telemetry feeder) that speaks the standard `leds` class works. This
+is the classic G29-family LED command under the hood, not the DD wheels'
+HID++ feature, so `wheel_rev_level` does not exist here.
+
+### Xbox edition (c26e)
+
+The G923 Xbox edition routes through the driver's HID++ 0x8123 (G920-style)
+force-feedback path instead of the classic engine and exposes only `range`
+(clamped to `180`-`900` there). Unverified pending a tester.
 
 ---
 

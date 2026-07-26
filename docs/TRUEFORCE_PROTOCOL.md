@@ -15,14 +15,17 @@ The protocol runs entirely on **USB Interface 2** (endpoints `0x03 OUT` / `0x83 
 
 ## Wheel Coverage
 
-Verified against two wheels:
+Verified against three wheels:
 
-| Wheel | PID | Capture | Date |
-|-------|-----|---------|------|
+| Wheel | PID | Capture / verification | Date |
+|-------|-----|------------------------|------|
 | RS50 (PlayStation/PC) | `046d:c276` | ACC gameplay | 2026-04-21 |
 | G Pro Racing Wheel | `046d:c272` / `046d:c268` | BeamNG.drive gameplay | 2026-04-19 |
+| G923 (PlayStation/PC) | `046d:c266` | `logi-tf-sim` driven tone on hardware | 2026-07-26 |
 
-The 68-packet init sequence is identical across the two, byte-for-byte. The streaming packet layout (type 0x01) is also identical. Treat TRUEFORCE as a single protocol across the direct-drive wheel family.
+The 68-packet init sequence is identical across the RS50 and G Pro, byte-for-byte. The streaming packet layout (type 0x01) is also identical. Treat TRUEFORCE as a single protocol across the direct-drive wheel family.
+
+The belt-driven **G923** carries the same interface-2 transport and stream protocol (first established by the TF4ALL project's Windows captures, issue #20; hardware-confirmed on a c266 by `logi-tf-sim`'s synthetic sweep). One G923-specific caveat: while a type-0x01 stream runs, the wheel's motor follows the stream's `cur` field and stops reacting to its classic interface-0 force-feedback commands, so a G923 streamer must mirror the live FFB into `cur` for the stream's duration - `logi-tf-sim` reads the kernel driver's `ffb_output` sysfs attribute for exactly this (see `SYSFS_API.md`). Feel under real game telemetry is not yet verified on the G923.
 
 ## Traffic Characterisation
 
