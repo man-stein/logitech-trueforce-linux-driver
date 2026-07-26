@@ -92,6 +92,23 @@ pub fn wheel_image_index(model: WheelModel) -> i32 {
     }
 }
 
+/// Resolve the Info page's firmware string when a `Response::Info` arrives
+/// after `Response::Rows` already set `current` (the row path keeps a DD
+/// wheel's multi-line base/motor text; `Response::Info`'s own `candidate`
+/// is always `Device::info`'s "/"-joined single line, the only source a
+/// G923 has since it carries no `wheel_firmware` sysfs at all). Keep
+/// `current` when Rows already supplied something, so the joined form
+/// never flattens the DD wheels' two-line display; fall back to
+/// `candidate` only when Rows left the field empty (a G923, or a DD wheel
+/// whose sysfs read itself came back empty).
+pub fn merge_info_firmware(current: &str, candidate: &str) -> String {
+    if current.is_empty() {
+        candidate.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
 fn is_read_only(attr: &str) -> bool {
     REGISTRY.iter().any(|s| s.attr == attr && s.access == Access::ReadOnly)
 }
@@ -1214,6 +1231,25 @@ mod tests {
         let sr = to_setting_row(&row);
         assert_eq!(sr.kind, KIND_READONLY);
         assert_eq!(sr.display, "base: U1 65.04.B0039\nmotor: SC 02.01.B0042");
+    }
+
+    #[test]
+    fn merge_info_firmware_keeps_a_dd_wheels_multiline_value() {
+        // Regression test: `Response::Info` used to always overwrite the
+        // Info page's firmware field with the "/"-joined single line, even
+        // after `Response::Rows` had already set a DD wheel's multi-line
+        // base/motor text. The joined candidate must lose here.
+        let current = "base: U1 65.04.B0039\nmotor: SC 02.01.B0042";
+        let candidate = "base: U1 65.04.B0039 / motor: SC 02.01.B0042";
+        assert_eq!(merge_info_firmware(current, candidate), current);
+    }
+
+    #[test]
+    fn merge_info_firmware_falls_back_when_rows_left_it_empty() {
+        // A G923 has no wheel_firmware sysfs at all, so Rows never sets
+        // anything: Response::Info's HID++-sourced string is then the only
+        // source and must win.
+        assert_eq!(merge_info_firmware("", "U1 65.03.B0038"), "U1 65.03.B0038");
     }
 
     #[test]

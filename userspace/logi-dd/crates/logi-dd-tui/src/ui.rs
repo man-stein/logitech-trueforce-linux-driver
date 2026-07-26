@@ -21,8 +21,10 @@ pub fn draw<S: SysfsIo>(f: &mut Frame, app: &App<S>) {
         .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
         .split(f.area());
 
-    // header: device identity + current mode (mode coloured green/yellow)
-    let info = app.device.info().ok();
+    // header: device identity + current mode (mode coloured green/yellow),
+    // from the cached snapshot `reload()` keeps fresh, not a fresh sysfs
+    // read every draw (this runs at ~30 Hz while the live monitor polls).
+    let info = app.info();
     let header = match &info {
         Some(i) => {
             let (mode_str, mode_col) = match i.mode {
@@ -466,16 +468,18 @@ fn draw_settings<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
             // Which wheel was detected, first thing on the page: the
             // evdev node's own name when found, else "No wheel detected"
             // (a `no_wheel` device, or a fresh connect evdev has not
-            // caught up with yet - `info()` errors either way).
-            let info = app.device.info().ok();
-            let wheel_name = info.as_ref().map(|i| i.name.clone()).filter(|n| !n.is_empty());
+            // caught up with yet - `info()` errors either way). Cached by
+            // `reload()`, not read fresh here (this draws at ~30 Hz while
+            // the live monitor polls).
+            let info = app.info();
+            let wheel_name = info.map(|i| i.name.clone()).filter(|n| !n.is_empty());
             rows.insert(0, display_row("Wheel", wheel_name.unwrap_or_else(|| "No wheel detected".to_string())));
             // A G923 has no wheel_serial/wheel_firmware sysfs at all (its
             // registry rows above are empty for this category): show the
             // same identity here instead, sourced from the HID uniq string
             // and the cached HID++ query (see `App::g923_firmware`).
             if app.device.model() == logi_dd_core::WheelModel::G923 {
-                let serial = info.as_ref().map(|i| i.serial.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "-".to_string());
+                let serial = info.map(|i| i.serial.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "-".to_string());
                 rows.insert(1, display_row("Serial", serial));
                 rows.insert(2, display_row("Firmware", app.g923_firmware.clone().unwrap_or_else(|| "unavailable".to_string())));
             }

@@ -11,7 +11,7 @@ use logi_dd_core::lightsync;
 use logi_dd_core::steam;
 use logi_dd_core::sysfs::SysfsIo;
 use logi_dd_core::tfsim;
-use logi_dd_core::{Category, Device, Error, Kind, Mode, ModeReq, Value, WheelModel};
+use logi_dd_core::{Category, Device, DeviceInfo, Error, Kind, Mode, ModeReq, Value, WheelModel};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -326,6 +326,14 @@ pub struct App<S: SysfsIo> {
     /// false, so a drift-triggered or category-switch reload never repeats
     /// it; the Info page's own `r` resets it to force a fresh read.
     g923_firmware_queried: bool,
+    /// Cached `Device::info()` snapshot (wheel name/serial/firmware/mode),
+    /// refreshed by `reload()` (view entry, drift-triggered reload, the
+    /// Info view's `r`) rather than read fresh on every draw: the header
+    /// and the Info page's Wheel row used to call `device.info()` straight
+    /// from `ui::draw`, which re-scans `/sys/class/input` for the wheel
+    /// name on every frame while the live monitor keeps the draw loop
+    /// running at ~30 Hz. `None` when the last read failed (no wheel).
+    device_info: Option<DeviceInfo>,
     /// The Info/Testing view's viewport scroll offset, in lines: the two
     /// composed views (Info/Testing and Setup) render more content than a
     /// small terminal can show, so PgUp/PgDn (plus Up/Down on Info, which
@@ -407,6 +415,7 @@ impl<S: SysfsIo> App<S> {
             driver_version_path: PathBuf::from(logi_dd_core::driver::MODULE_VERSION_PATH),
             g923_firmware: None,
             g923_firmware_queried: false,
+            device_info: None,
             info_scroll: 0,
             setup_scroll: 0,
             body_height: std::cell::Cell::new(0),
@@ -534,7 +543,18 @@ impl<S: SysfsIo> App<S> {
         }
     }
 
+    /// The cached `Device::info()` snapshot the header and the Info page's
+    /// Wheel row render from; see `device_info`'s doc comment for why this
+    /// is cached instead of read straight from the draw path.
+    pub fn info(&self) -> Option<&DeviceInfo> {
+        self.device_info.as_ref()
+    }
+
     pub fn reload(&mut self) {
+        // Refresh the cached info snapshot every reload (view entry, `r`,
+        // drift-triggered reload): draws in between reuse it via `info()`
+        // instead of re-reading sysfs themselves.
+        self.device_info = self.device.info().ok();
         // Every reload resyncs the drift baseline: the values on screen are
         // (about to be) exactly what the device reports now, so only a LATER
         // external write should count as drift.

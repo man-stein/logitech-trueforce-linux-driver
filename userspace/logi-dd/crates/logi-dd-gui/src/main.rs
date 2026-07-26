@@ -1137,14 +1137,23 @@ fn main() -> Result<(), slint::PlatformError> {
                         app.set_test_wheel_kind(bridge::wheel_image_index(info.model));
                         // The Wheel row, and (for a classic G923, which has
                         // no wheel_serial/wheel_firmware sysfs at all) the
-                        // Serial/Firmware rows too: `Response::Rows` for
-                        // Info already set these for a DD wheel from the
-                        // registry, but this is the only source for a
-                        // G923's, and it arrives after Rows on every path
-                        // that sends both, so it wins.
+                        // Serial row too: `Response::Rows` for Info already
+                        // set these for a DD wheel from the registry, but
+                        // this is the only source for a G923's, and it
+                        // arrives after Rows on every path that sends both,
+                        // so it wins (firmware is handled separately below,
+                        // since a DD wheel's registry value must not lose
+                        // to this one).
                         app.set_info_wheel_name(info.name.clone().into());
                         app.set_info_serial(info.serial.clone().into());
-                        app.set_info_firmware(info.firmware.clone().into());
+                        // `info.firmware` is always the "/"-joined single
+                        // line (`Device::info` folds the DD wheels' base/
+                        // motor pair onto one line); `merge_info_firmware`
+                        // keeps the multi-line value Rows already set for a
+                        // DD wheel instead of flattening it here.
+                        let firmware =
+                            bridge::merge_info_firmware(&app.get_info_firmware(), &info.firmware);
+                        app.set_info_firmware(firmware.into());
                         // The classic engine (G923) has no onboard profile
                         // store and no LIGHTSYNC strip at all: gate the two
                         // DD-only panels that are not built from registry

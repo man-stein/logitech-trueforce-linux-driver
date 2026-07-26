@@ -992,7 +992,7 @@ path, so the mirror is what keeps force feedback alive during streaming).
 ### Rev LEDs
 
 The five rev-light pairs are standard Linux LED class devices, one per
-mirrored pair, innermost first:
+mirrored pair, outermost first:
 
 ```
 /sys/class/leds/<hid-device>::RPM1 .. ::RPM5
