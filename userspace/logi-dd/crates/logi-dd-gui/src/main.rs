@@ -1135,6 +1135,16 @@ fn main() -> Result<(), slint::PlatformError> {
                         app.set_no_wheel_message("".into());
                         app.set_mode_onboard(matches!(info.mode, Mode::Onboard));
                         app.set_test_wheel_kind(bridge::wheel_image_index(info.model));
+                        // The Wheel row, and (for a classic G923, which has
+                        // no wheel_serial/wheel_firmware sysfs at all) the
+                        // Serial/Firmware rows too: `Response::Rows` for
+                        // Info already set these for a DD wheel from the
+                        // registry, but this is the only source for a
+                        // G923's, and it arrives after Rows on every path
+                        // that sends both, so it wins.
+                        app.set_info_wheel_name(info.name.clone().into());
+                        app.set_info_serial(info.serial.clone().into());
+                        app.set_info_firmware(info.firmware.clone().into());
                         // The classic engine (G923) has no onboard profile
                         // store and no LIGHTSYNC strip at all: gate the two
                         // DD-only panels that are not built from registry
@@ -1147,7 +1157,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         app.set_no_wheel(true);
                         app.set_no_wheel_message(message.into());
                         // No sysfs identity to show; the Info page falls
-                        // back to its "-" placeholders.
+                        // back to its "-"/"No wheel detected" placeholders.
+                        app.set_info_wheel_name("".into());
                         app.set_info_serial("".into());
                         app.set_info_firmware("".into());
                         // No model known any more either: fall back to the

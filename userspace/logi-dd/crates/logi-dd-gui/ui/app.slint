@@ -120,6 +120,11 @@ export component App inherits Window {
     // rows; the live values below are pushed by the evdev reader thread
     // `main.rs` runs while this page is open (throttled to ~30 Hz).
     in property <int> info-index: -1;
+    // Which wheel was detected, human-readable (e.g. "Logitech G923 Racing
+    // Wheel for PlayStation 4 and PC"), or "" while no wheel is bound - the
+    // Wheel row shows a "No wheel detected" state for that itself. Pushed
+    // from `Response::Info` (`bridge`/`main.rs`), same as serial/firmware.
+    in property <string> info-wheel-name: "";
     in property <string> info-serial: "";
     in property <string> info-firmware: "";
     // Software identity under the device rows: the running front-end's
@@ -481,6 +486,7 @@ export component App inherits Window {
                 // the shell rather than behind the no-wheel banner.
                 if root.selected-category == root.info-index: InfoPage {
                     vertical-stretch: 1;
+                    wheel-name: root.info-wheel-name;
                     serial: root.info-serial;
                     firmware: root.info-firmware;
                     app-version: root.info-app-version;

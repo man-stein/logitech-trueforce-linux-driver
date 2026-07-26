@@ -157,6 +157,14 @@ impl<S: SysfsIo> ViewModel<S> {
         self.device.info()
     }
 
+    /// Best-effort HID++ firmware string for a classic (G923) wheel; see
+    /// `Device::classic_firmware`. A real, timed USB round trip - the
+    /// worker calls this only at explicit refresh points (page load,
+    /// rescan, mode/profile changes), never per frame.
+    pub fn classic_firmware(&self) -> Option<String> {
+        self.device.classic_firmware()
+    }
+
     // Not called yet: nothing reads the mode outside of `rows_for`'s own
     // per-row gating until the mode-switch control is wired.
     #[allow(dead_code)]
@@ -267,6 +275,17 @@ mod tests {
         fs.set("autocenter", "0");
         fs.set("combine_pedals", "0");
         ViewModel::new(logi_dd_core::Device::with_io_and_model(fs, logi_dd_core::WheelModel::G923))
+    }
+
+    #[test]
+    fn classic_firmware_is_none_without_a_real_hid_dir() {
+        // `with_io_and_model` has no real sysfs directory behind it (only
+        // `Device::discover` populates that): the HID++ round trip has
+        // nothing to anchor to, so this must return `None` rather than
+        // panic. Exercised end to end against a live G923 in
+        // `logi-dd-core`'s own `device`/`hidpp` tests.
+        assert!(g923_vm().classic_firmware().is_none());
+        assert!(vm().classic_firmware().is_none(), "a non-G923 model is always None too");
     }
 
     #[test]

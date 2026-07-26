@@ -384,7 +384,13 @@ mod tests {
         fs.set("wheel_strength", "62");
         fs.set("wheel_range", "900");
         fs.set("wheel_mode", "desktop");
-        App::new(logi_dd_core::Device::with_io(fs))
+        let mut a = App::new(logi_dd_core::Device::with_io(fs));
+        // A plain settings category with an editable row (the default,
+        // index 0, is Info, which has none): this suite exercises the
+        // inline editor's key handling, not the Info page's own.
+        a.cat_idx = logi_dd_core::Category::ALL.iter().position(|c| *c == logi_dd_core::Category::Ffb).unwrap();
+        a.reload();
+        a
     }
 
     /// Every footer entry must come from the same table the overlay

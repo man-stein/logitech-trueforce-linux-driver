@@ -58,6 +58,11 @@ component AxisBar inherits Rectangle {
 // round-trip through a confirm dialog before their callbacks ever fire
 // (the wheel physically moves).
 export component InfoPage inherits Rectangle {
+    // Which wheel was detected: the evdev node's own human-readable name
+    // when found, else a generic label for the known model. Empty while no
+    // wheel is bound at all, shown as its own "No wheel detected" state
+    // (not the plain "-" placeholder every other identity row uses).
+    in property <string> wheel-name: "";
     // Device identity, read through the driver's sysfs attrs (the registry
     // Info rows); empty strings while no wheel is bound.
     in property <string> serial: "";
@@ -141,6 +146,23 @@ export component InfoPage inherits Rectangle {
                         spacing: 8px;
                         Text {
                             width: 90px;
+                            text: "Wheel";
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            color: Theme.muted-text-color;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.wheel-name == "" ? "No wheel detected" : root.wheel-name;
+                            vertical-alignment: center;
+                            color: Theme.text-color;
+                            overflow: elide;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 90px;
                             text: "Serial";
                             font-weight: 600;
                             vertical-alignment: center;
@@ -170,7 +192,12 @@ export component InfoPage inherits Rectangle {
                         }
                         Text {
                             horizontal-stretch: 1;
-                            text: root.firmware == "" ? "-" : root.firmware;
+                            // A blank firmware string on a classic (G923)
+                            // wheel means the HID++ query itself came up
+                            // empty (unsupported, timed out, permissions) -
+                            // "Unavailable" says so, rather than the bare
+                            // "-" every other blank identity row uses.
+                            text: root.firmware == "" ? "Unavailable" : root.firmware;
                             vertical-alignment: center;
                             color: Theme.text-color;
                             wrap: word-wrap;

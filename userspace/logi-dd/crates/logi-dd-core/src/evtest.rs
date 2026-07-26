@@ -277,8 +277,10 @@ fn event_index(file_name: &str) -> u32 {
 
 /// Scan `sysfs_input` (normally `/sys/class/input`) for `event*` entries
 /// whose `device/name` passes [`is_wheel_name`], returning the first
-/// match in ascending `eventN` order.
-fn scan_wheel_input(sysfs_input: &Path) -> Option<WheelInput> {
+/// match in ascending `eventN` order. `pub` (not just `discover_wheel_input`'s
+/// hardcoded real path) so `device::wheel_display_name_at` can exercise the
+/// same scan against a test fixture directory.
+pub fn scan_wheel_input(sysfs_input: &Path) -> Option<WheelInput> {
     let mut entries: Vec<_> = fs::read_dir(sysfs_input)
         .ok()?
         .filter_map(|e| e.ok())

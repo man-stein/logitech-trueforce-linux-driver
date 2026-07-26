@@ -2,22 +2,28 @@ use crate::kind::Kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
+    Info,
     Ffb,
     Steering,
     Pedals,
     Leds,
     Profiles,
-    Info,
 }
 
 impl Category {
+    // Info first and default on startup: the app should open by showing
+    // what was detected (or that nothing was) before the user moves on to
+    // settings. Every consumer (sidebar order, digit-jump numbering, the
+    // TUI's `cat_idx: 0` default) derives from this order rather than a
+    // literal index, so putting Info first here is the one change that
+    // moves it everywhere at once.
     pub const ALL: &'static [Category] = &[
+        Category::Info,
         Category::Ffb,
         Category::Steering,
         Category::Pedals,
         Category::Leds,
         Category::Profiles,
-        Category::Info,
     ];
     pub fn label(&self) -> &'static str {
         match self {

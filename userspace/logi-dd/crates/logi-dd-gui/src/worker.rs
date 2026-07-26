@@ -28,7 +28,7 @@ use std::thread;
 use std::time::Duration;
 
 use logi_dd_core::sysfs::SysfsIo;
-use logi_dd_core::{Category, Device, DeviceInfo, Error, Mode, Value};
+use logi_dd_core::{Category, Device, DeviceInfo, Error, Mode, Value, WheelModel};
 
 use crate::viewmodel::{Row, ViewModel, WidgetInput};
 
@@ -195,7 +195,10 @@ fn discover_outcome<S: SysfsIo>(result: Result<Device<S>, Error>) -> (Option<Vie
         Ok(device) => {
             let vm = ViewModel::new(device);
             match vm.info() {
-                Ok(info) => (Some(vm), Response::Info(info)),
+                Ok(mut info) => {
+                    fill_classic_firmware(&vm, &mut info);
+                    (Some(vm), Response::Info(info))
+                }
                 // Discovery itself succeeded but the info read failed
                 // (e.g. serial unreadable); treat it the same as no wheel
                 // rather than show a header with blank fields. Discard the vm
@@ -204,6 +207,23 @@ fn discover_outcome<S: SysfsIo>(result: Result<Device<S>, Error>) -> (Option<Vie
             }
         }
         Err(e) => (None, Response::NoWheel(e.to_string())),
+    }
+}
+
+/// Fold a G923's HID++ firmware string into an already-read `DeviceInfo`
+/// (a no-op for every other model: `info().firmware` already covers them
+/// from sysfs). `Device::info()` deliberately leaves this blank for a
+/// classic wheel, since unlike every other identity field it takes a real,
+/// timed USB round trip rather than a sysfs read; every call site below is
+/// a discrete request the worker answers once (discovery, an explicit
+/// page load/refresh, a mode/profile change), never a per-frame poll, so
+/// paying for that round trip here matches "once per refresh, not every
+/// draw".
+fn fill_classic_firmware<S: SysfsIo>(vm: &ViewModel<S>, info: &mut DeviceInfo) {
+    if info.model == WheelModel::G923 {
+        if let Some(fw) = vm.classic_firmware() {
+            info.firmware = fw;
+        }
     }
 }
 
@@ -341,7 +361,8 @@ fn check_drift<S: SysfsIo>(
             if category == Category::Profiles {
                 on_response(profiles_state(v));
             }
-            if let Ok(info) = v.info() {
+            if let Ok(mut info) = v.info() {
+                fill_classic_firmware(v, &mut info);
                 on_response(Response::Info(info));
             }
         }
@@ -385,13 +406,25 @@ fn handle<S: SysfsIo>(vm: &ViewModel<S>, req: Request, on_response: &dyn Fn(Resp
             if category == Category::Profiles {
                 on_response(profiles_state(vm));
             }
+            // The Info page's identity rows (serial/firmware/wheel name)
+            // are pushed via `Response::Info`, not the registry rows list
+            // (a G923 has no `wheel_serial`/`wheel_firmware` sysfs at all
+            // for the Rows response to carry): a plain category switch
+            // onto Info needs this too, not just an explicit Refresh.
+            if category == Category::Info {
+                if let Ok(mut info) = vm.info() {
+                    fill_classic_firmware(vm, &mut info);
+                    on_response(Response::Info(info));
+                }
+            }
         }
         Request::Refresh(category) => {
             on_response(Response::Rows { category, rows: vm.rows_for(category) });
             if category == Category::Profiles {
                 on_response(profiles_state(vm));
             }
-            if let Ok(info) = vm.info() {
+            if let Ok(mut info) = vm.info() {
+                fill_classic_firmware(vm, &mut info);
                 on_response(Response::Info(info));
             }
         }
@@ -437,14 +470,16 @@ fn handle<S: SysfsIo>(vm: &ViewModel<S>, req: Request, on_response: &dyn Fn(Resp
             // above just attached.
             if device_wide {
                 on_response(Response::Rows { category, rows: vm.rows_for(category) });
-                if let Ok(info) = vm.info() {
+                if let Ok(mut info) = vm.info() {
+                    fill_classic_firmware(vm, &mut info);
                     on_response(Response::Info(info));
                 }
             }
         }
         Request::SetMode(mode) => {
             let _ = vm.set_mode(mode);
-            if let Ok(info) = vm.info() {
+            if let Ok(mut info) = vm.info() {
+                fill_classic_firmware(vm, &mut info);
                 on_response(Response::Info(info));
             }
         }
@@ -484,7 +519,8 @@ fn handle<S: SysfsIo>(vm: &ViewModel<S>, req: Request, on_response: &dyn Fn(Resp
                 category: Category::Profiles,
                 rows: vm.rows_for(Category::Profiles),
             });
-            if let Ok(info) = vm.info() {
+            if let Ok(mut info) = vm.info() {
+                fill_classic_firmware(vm, &mut info);
                 on_response(Response::Info(info));
             }
         }
@@ -505,6 +541,30 @@ mod tests {
         let out = RefCell::new(Vec::new());
         f(&|r| out.borrow_mut().push(r));
         out.into_inner()
+    }
+
+    #[test]
+    fn fill_classic_firmware_only_touches_a_g923_and_never_panics() {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        let dd_vm = ViewModel::with_io(fs);
+        let mut info = dd_vm.info().unwrap();
+        info.firmware = "base: U1 65.03.B0038".to_string();
+        fill_classic_firmware(&dd_vm, &mut info);
+        assert_eq!(info.firmware, "base: U1 65.03.B0038", "left alone for a non-G923 model");
+
+        let g923_fs = FakeSysfs::new();
+        g923_fs.set("range", "900");
+        let g923_vm = ViewModel::new(logi_dd_core::Device::with_io_and_model(
+            g923_fs,
+            logi_dd_core::WheelModel::G923,
+        ));
+        let mut info = g923_vm.info().unwrap();
+        // `with_io_and_model` has no real hidraw sibling to query (see
+        // `classic_firmware_is_none_without_a_real_hid_dir`), so this is a
+        // no-op here too - the point is that it does not panic.
+        fill_classic_firmware(&g923_vm, &mut info);
+        assert_eq!(info.firmware, "");
     }
 
     #[test]
@@ -607,6 +667,36 @@ mod tests {
             }
             _ => panic!("expected Rows"),
         }
+    }
+
+    #[test]
+    fn loading_the_info_category_also_sends_info() {
+        // Unlike every other category, a plain LoadCategory(Info) (a
+        // sidebar click, not a Refresh) also carries Response::Info: it is
+        // the only source of a G923's serial/firmware (see
+        // `fill_classic_firmware`), which the Rows response cannot supply
+        // (no wheel_serial/wheel_firmware sysfs at all).
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        let vm = ViewModel::with_io(fs);
+
+        let responses =
+            responses(|on_response| handle(&vm, Request::LoadCategory(Category::Info), on_response));
+        assert_eq!(responses.len(), 2);
+        assert!(matches!(&responses[0], Response::Rows { category: Category::Info, .. }));
+        assert!(matches!(&responses[1], Response::Info(_)));
+    }
+
+    #[test]
+    fn loading_a_non_info_category_does_not_send_info() {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_strength", "80");
+        let vm = ViewModel::with_io(fs);
+
+        let responses =
+            responses(|on_response| handle(&vm, Request::LoadCategory(Category::Ffb), on_response));
+        assert_eq!(responses.len(), 1, "no Info response for a plain Ffb load");
     }
 
     #[test]

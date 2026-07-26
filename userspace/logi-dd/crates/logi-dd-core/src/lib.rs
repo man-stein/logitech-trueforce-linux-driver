@@ -12,6 +12,7 @@ pub use kind::Kind;
 pub mod curve;
 pub mod driver;
 pub mod evtest;
+pub mod hidpp;
 pub mod lightsync;
 pub mod setting;
 pub use setting::{Access, Category, ModeReq, SettingSpec};

@@ -4,6 +4,7 @@ use crate::registry::{CLASSIC_REGISTRY, REGISTRY};
 use crate::setting::{Access, Category, ModeReq, SettingSpec};
 use crate::sysfs::{RealSysfs, SysfsIo};
 use crate::value::Value;
+use std::path::{Path, PathBuf};
 
 /// Which physical wheel is connected, for frontends that need to brand the
 /// UI (the Info/Testing page's product photo) rather than just render
@@ -25,7 +26,19 @@ pub enum WheelModel {
 }
 
 pub struct DeviceInfo {
+    /// Human-readable identity for the Info page's "Wheel" row (e.g.
+    /// "Logitech G923 Racing Wheel for PlayStation 4 and PC"), or empty
+    /// when nothing could be resolved at all. See
+    /// [`Device::info`]/[`wheel_display_name`].
+    pub name: String,
     pub serial: String,
+    /// The DD wheels' active-firmware string, read straight off
+    /// `wheel_firmware` sysfs. A G923 has no such attribute, so this stays
+    /// empty here even when the wheel's firmware IS known: that value
+    /// takes a live HID++ round trip a plain `info()` read must not pay
+    /// for on every call (draw loops call `info()` freely). Callers that
+    /// want it explicitly opt in via [`Device::classic_firmware`], once
+    /// per page load/refresh.
     pub firmware: String,
     pub mode: Mode,
     pub model: WheelModel,
@@ -34,6 +47,61 @@ pub struct DeviceInfo {
 pub struct Device<S: SysfsIo> {
     io: S,
     model: WheelModel,
+    /// The interface-0 HID device directory a classic (G923) wheel's
+    /// identity is anchored to: the sysfs `uniq` string lives in this same
+    /// directory's `uevent` (see [`read_hid_uniq`]), and the HID++ vendor
+    /// interface used for [`Device::classic_firmware`] is a sibling of it
+    /// (see `hidpp::find_hidpp_sibling`). `None` for a DD wheel (identity
+    /// comes from `wheel_serial`/`wheel_firmware` sysfs instead) and for
+    /// every `Device` built via `with_io`/`with_io_and_model` (tests, and
+    /// any caller with no real sysfs directory to anchor to).
+    hid_dir: Option<PathBuf>,
+}
+
+/// The generic label used for the Info page's "Wheel" row when the wheel's
+/// own evdev node cannot be found (a fresh connect can lag sysfs briefly,
+/// or a dev-override fixture has no evdev at all): the model this crate
+/// already knows, worded the same way the real device names itself.
+fn generic_wheel_name(model: WheelModel) -> &'static str {
+    match model {
+        WheelModel::Rs50 => "Logitech RS50 Racing Wheel",
+        WheelModel::GPro => "Logitech G PRO Racing Wheel",
+        WheelModel::G923 => "Logitech G923 Racing Wheel",
+        WheelModel::Unknown => "Logitech Racing Wheel",
+    }
+}
+
+/// Human-readable wheel name for the Info page's "Wheel" row: the evdev
+/// node's own name when the wheel is enumerated there (already fully
+/// descriptive, e.g. "Logitech G923 Racing Wheel for PlayStation 4 and
+/// PC"), else the generic label for `model` (evdev can lag sysfs briefly
+/// right after a (re)connect, and a dev-override fixture has no evdev node
+/// at all). Takes the scan directory explicitly so tests can point it at a
+/// fixture instead of the real `/sys/class/input`.
+pub fn wheel_display_name_at(sysfs_input: &Path, model: WheelModel) -> String {
+    if let Some(input) = crate::evtest::scan_wheel_input(sysfs_input) {
+        if !input.name.trim().is_empty() {
+            return input.name;
+        }
+    }
+    generic_wheel_name(model).to_string()
+}
+
+/// [`wheel_display_name_at`] against the real `/sys/class/input`.
+pub fn wheel_display_name(model: WheelModel) -> String {
+    wheel_display_name_at(Path::new("/sys/class/input"), model)
+}
+
+/// Parse `HID_UNIQ=` out of a HID device directory's `uevent`: there is no
+/// dedicated `uniq` sysfs file on this kernel (checked live against a
+/// G923), only this uevent key/value line. `None` when absent, empty, or
+/// the directory has no `uevent` at all (a dev-override test fixture).
+fn read_hid_uniq(dir: &Path) -> Option<String> {
+    let uevent = std::fs::read_to_string(dir.join("uevent")).ok()?;
+    uevent.lines().find_map(|line| {
+        let v = line.strip_prefix("HID_UNIQ=")?.trim();
+        (!v.is_empty()).then(|| v.to_string())
+    })
 }
 
 /// USB product ids this crate can identify, mapped to their [`WheelModel`].
@@ -89,10 +157,18 @@ impl Device<RealSysfs> {
         if let Ok(dir) = std::env::var("LOGI_DD_SYSFS_DIR") {
             let dir = std::path::PathBuf::from(dir);
             if dir.join("wheel_range").exists() {
-                return Ok(Device { io: RealSysfs::new(dir), model: WheelModel::Unknown });
+                return Ok(Device { io: RealSysfs::new(dir), model: WheelModel::Unknown, hid_dir: None });
             }
             if classic_attrs_present(&dir) {
-                return Ok(Device { io: RealSysfs::new(dir), model: WheelModel::G923 });
+                // Not a real HID device directory (no `uevent`/USB parent
+                // structure), so the uniq/HID++ lookups this enables just
+                // fail cleanly and the fixture shows "-"/"unavailable" -
+                // exactly the fake-sysfs dev-aid's existing no-hidraw story.
+                return Ok(Device {
+                    io: RealSysfs::new(dir.clone()),
+                    model: WheelModel::G923,
+                    hid_dir: Some(dir),
+                });
             }
             return Err(Error::NoWheel);
         }
@@ -102,7 +178,7 @@ impl Device<RealSysfs> {
             let dir = e.path().join("device");
             if dir.join("wheel_range").exists() {
                 let model = pid_from_hid_dir(&dir).map(model_from_pid).unwrap_or_default();
-                return Ok(Device { io: RealSysfs::new(dir), model });
+                return Ok(Device { io: RealSysfs::new(dir), model, hid_dir: None });
             }
             // Only trust the classic attr set when the PID confirms a real
             // G923: an unrelated device coincidentally exposing similarly-
@@ -110,7 +186,11 @@ impl Device<RealSysfs> {
             if classic_attrs_present(&dir)
                 && pid_from_hid_dir(&dir).map(model_from_pid) == Some(WheelModel::G923)
             {
-                return Ok(Device { io: RealSysfs::new(dir), model: WheelModel::G923 });
+                return Ok(Device {
+                    io: RealSysfs::new(dir.clone()),
+                    model: WheelModel::G923,
+                    hid_dir: Some(dir),
+                });
             }
         }
         Err(Error::NoWheel)
@@ -119,14 +199,14 @@ impl Device<RealSysfs> {
 
 impl<S: SysfsIo> Device<S> {
     pub fn with_io(io: S) -> Device<S> {
-        Device { io, model: WheelModel::default() }
+        Device { io, model: WheelModel::default(), hid_dir: None }
     }
 
     /// Same as `with_io`, but with an explicit `WheelModel` (tests, and any
     /// caller building a `Device` for a known-model classic wheel without
     /// going through `discover()`'s PID sniffing).
     pub fn with_io_and_model(io: S, model: WheelModel) -> Device<S> {
-        Device { io, model }
+        Device { io, model, hid_dir: None }
     }
 
     pub fn model(&self) -> WheelModel {
@@ -191,13 +271,38 @@ impl<S: SysfsIo> Device<S> {
         let read = |a: &str| {
             self.io.read(a).map(|s| s.trim().to_string()).unwrap_or_default()
         };
+        // A G923 has no `wheel_serial` sysfs at all; its serial is the HID
+        // `uniq` string off the same interface-0 directory `hid_dir`
+        // anchors to instead (cheap: one small file read, safe to do on
+        // every `info()` call, unlike `classic_firmware`'s live HID++
+        // round trip).
+        let serial = if self.model == WheelModel::G923 {
+            self.hid_dir.as_deref().and_then(read_hid_uniq).unwrap_or_default()
+        } else {
+            read("wheel_serial")
+        };
         Ok(DeviceInfo {
-            serial: read("wheel_serial"),
+            name: wheel_display_name(self.model),
+            serial,
             // The driver returns "base: ...\nmotor: ..."; keep it on one line.
             firmware: read("wheel_firmware").replace('\n', " / "),
             mode: self.current_mode()?,
             model: self.model,
         })
+    }
+
+    /// Best-effort HID++ firmware string for a classic (G923) wheel: `None`
+    /// immediately for any other model (nothing to query; `info().firmware`
+    /// already covers them from sysfs), and `None` when the HID++ sibling
+    /// node or the query itself failed (unavailable permissions, timeout,
+    /// unplugged). This is a real USB round trip with its own timeout, not
+    /// a sysfs read: callers must call it once per Info-page load/refresh,
+    /// never per frame/draw (see `hidpp::query_g923_firmware`).
+    pub fn classic_firmware(&self) -> Option<String> {
+        if self.model != WheelModel::G923 {
+            return None;
+        }
+        crate::hidpp::query_g923_firmware(self.hid_dir.as_deref()?)
     }
 
     pub fn read(&self, attr: &str) -> Result<Value, Error> {
@@ -560,5 +665,142 @@ mod tests {
 
         std::env::remove_var("LOGI_DD_SYSFS_DIR");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // --- Wheel row identity: name, and the G923's uniq-based serial ---
+
+    #[test]
+    fn generic_wheel_name_covers_every_model() {
+        assert_eq!(generic_wheel_name(WheelModel::Rs50), "Logitech RS50 Racing Wheel");
+        assert_eq!(generic_wheel_name(WheelModel::GPro), "Logitech G PRO Racing Wheel");
+        assert_eq!(generic_wheel_name(WheelModel::G923), "Logitech G923 Racing Wheel");
+        assert_eq!(generic_wheel_name(WheelModel::Unknown), "Logitech Racing Wheel");
+    }
+
+    #[test]
+    fn wheel_display_name_at_prefers_the_evdev_name_when_found() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-dd-device-test-wheelname-found-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let event_dir = dir.join("event7").join("device");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        std::fs::write(
+            event_dir.join("name"),
+            "Logitech G923 Racing Wheel for PlayStation 4 and PC\n",
+        )
+        .unwrap();
+        assert_eq!(
+            wheel_display_name_at(&dir, WheelModel::G923),
+            "Logitech G923 Racing Wheel for PlayStation 4 and PC"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wheel_display_name_at_falls_back_to_the_model_when_evdev_has_nothing() {
+        // A directory with no matching event node (evdev lagging a fresh
+        // connect, or simply no wheel plugged in at all).
+        let dir = std::env::temp_dir().join(format!(
+            "logi-dd-device-test-wheelname-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(wheel_display_name_at(&dir, WheelModel::Rs50), "Logitech RS50 Racing Wheel");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_hid_uniq_parses_the_uevent_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-dd-device-test-uniq-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("uevent"),
+            "DRIVER=logitech-dd\nHID_ID=0003:0000046D:0000C266\nHID_UNIQ=FAKE0000SERIAL\nMODALIAS=x\n",
+        )
+        .unwrap();
+        assert_eq!(read_hid_uniq(&dir).as_deref(), Some("FAKE0000SERIAL"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_hid_uniq_is_none_when_absent_or_blank() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-dd-device-test-uniq-blank-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No uevent file at all (a dev-override fixture).
+        assert_eq!(read_hid_uniq(&dir), None);
+        std::fs::write(dir.join("uevent"), "DRIVER=x\nHID_UNIQ=\n").unwrap();
+        assert_eq!(read_hid_uniq(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_g923s_serial_comes_from_hid_uniq_not_wheel_serial() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-dd-device-test-g923-serial-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("uevent"), "HID_UNIQ=FAKESERIAL01\n").unwrap();
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        let d = Device { io: fs, model: WheelModel::G923, hid_dir: Some(dir.clone()) };
+        let info = d.info().unwrap();
+        assert_eq!(info.serial, "FAKESERIAL01");
+        assert_eq!(info.model, WheelModel::G923);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_g923_without_a_hid_dir_has_a_blank_serial_not_a_panic() {
+        // `with_io_and_model` (no real sysfs directory behind it) leaves
+        // `hid_dir` at `None`; `info()` must still succeed.
+        let d = Device::with_io_and_model(FakeSysfs::new(), WheelModel::G923);
+        let info = d.info().unwrap();
+        assert_eq!(info.serial, "");
+    }
+
+    #[test]
+    fn classic_firmware_is_none_for_every_non_g923_model() {
+        for model in [WheelModel::Unknown, WheelModel::Rs50, WheelModel::GPro] {
+            let d = Device::with_io_and_model(FakeSysfs::new(), model);
+            assert!(d.classic_firmware().is_none(), "{model:?}");
+        }
+    }
+
+    #[test]
+    fn classic_firmware_is_none_without_a_hid_dir_to_anchor_to() {
+        let d = Device::with_io_and_model(FakeSysfs::new(), WheelModel::G923);
+        assert!(d.classic_firmware().is_none());
+    }
+
+    #[test]
+    fn classic_firmware_is_none_for_a_dev_override_style_fixture() {
+        // A `hid_dir` with no real USB parent structure at all (matching
+        // `discover()`'s dev-override path): the HID++ sibling walk must
+        // fail cleanly, not panic, and `info()`'s cheap fields stay usable.
+        let dir = std::env::temp_dir().join(format!(
+            "logi-dd-device-test-g923-nohidpp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        let d = Device { io: fs, model: WheelModel::G923, hid_dir: Some(dir.clone()) };
+        assert!(d.classic_firmware().is_none());
+        assert!(d.info().is_ok(), "the cheap identity fields must not be affected");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

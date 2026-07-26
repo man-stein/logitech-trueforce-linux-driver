@@ -109,21 +109,20 @@ pub fn draw<S: SysfsIo>(f: &mut Frame, app: &App<S>) {
         });
     } else if app.is_info() {
         draw_scrolled(f, body[1], info_content_height(app), app.info_scroll, |buf, rect| {
-            if app.no_wheel {
-                // No wheel: the whole body is the monitor's empty state (an
-                // evdev-only wheel input may still exist and rescan finds it).
-                draw_monitor(buf, app, rect);
-            } else {
-                // The Info page: the identity rows (plus the doc link) on
-                // top, the live input monitor below them.
-                let rows_height = settings_height(app);
-                let split = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(rows_height), Constraint::Min(3)])
-                    .split(rect);
-                draw_settings(buf, app, split[0]);
-                draw_monitor(buf, app, split[1]);
-            }
+            // The Info page: the identity rows (plus the doc link) on top,
+            // the live input monitor below them. The identity block shows
+            // regardless of `no_wheel` (see `draw_settings`): a "No wheel
+            // detected" Wheel row plus the software versions, none of which
+            // need a wheel; the monitor below independently shows its own
+            // evdev-availability state (an evdev-only wheel input may still
+            // exist and rescan finds it, even with no sysfs wheel).
+            let rows_height = settings_height(app);
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(rows_height), Constraint::Min(3)])
+                .split(rect);
+            draw_settings(buf, app, split[0]);
+            draw_monitor(buf, app, split[1]);
         });
     } else {
         draw_settings(f.buffer_mut(), app, body[1]);
@@ -168,6 +167,12 @@ fn settings_height<S: SysfsIo>(app: &App<S>) -> u16 {
             lines += s.matches('\n').count();
         }
     }
+    if app.category() == Category::Info {
+        lines += 1; // the Wheel row every wheel (or "no wheel detected") gets
+        if app.device.model() == logi_dd_core::WheelModel::G923 {
+            lines += 2; // the synthetic Serial + Firmware rows
+        }
+    }
     (lines + 2).min(u16::MAX as usize) as u16
 }
 
@@ -197,11 +202,9 @@ pub(crate) fn info_content_height<S: SysfsIo>(app: &App<S>) -> u16 {
         // line, one line per wheel button, and two borders.
         Some(_) => 13 + 3 + logi_dd_core::evtest::WHEEL_BUTTONS.len() as u16,
     };
-    if app.no_wheel {
-        monitor
-    } else {
-        settings_height(app).saturating_add(monitor)
-    }
+    // The identity block renders regardless of `no_wheel` now (see
+    // `draw_settings`), so its height always counts here too.
+    settings_height(app).saturating_add(monitor)
 }
 
 /// Render a composed view that may be taller than its viewport: `render`
@@ -288,8 +291,13 @@ fn draw_scrolled(
 /// so the Info page can compose it inside `draw_scrolled`'s off-screen
 /// pass; the plain categories pass the frame's own buffer.
 fn draw_settings<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
-    // No wheel: a one-line empty state instead of the rows.
-    if app.no_wheel {
+    // No wheel: a one-line empty state instead of the rows, EXCEPT on the
+    // Info page, whose identity block (the Wheel row's own "No wheel
+    // detected", plus App/Driver/Documentation, none of which need a
+    // wheel) is exactly what Request 2 wants visible even with nothing
+    // connected: the app should open showing what was detected, or that
+    // nothing was, not hide that behind a generic placeholder.
+    if app.no_wheel && app.category() != Category::Info {
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -442,11 +450,11 @@ fn draw_settings<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
                 rows.insert(0, ListItem::new(Line::from(spans)));
             }
         }
-        // On the Info category, append the software versions (this app,
-        // and the loaded kernel module's stamp; `c` prints the same pair
-        // on the status line for a manual copy) and the project link so
-        // users know where to find docs and source (a terminal cannot
-        // open it, but it is copyable).
+        // On the Info category, lead with which wheel was detected, append
+        // the software versions (this app, and the loaded kernel module's
+        // stamp; `c` prints the same pair on the status line for a manual
+        // copy) and the project link so users know where to find docs and
+        // source (a terminal cannot open it, but it is copyable).
         if app.category() == Category::Info {
             let display_row = |label: &str, value: String| {
                 ListItem::new(Line::from(vec![
@@ -455,6 +463,22 @@ fn draw_settings<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
                     Span::styled(value, Style::default()),
                 ]))
             };
+            // Which wheel was detected, first thing on the page: the
+            // evdev node's own name when found, else "No wheel detected"
+            // (a `no_wheel` device, or a fresh connect evdev has not
+            // caught up with yet - `info()` errors either way).
+            let info = app.device.info().ok();
+            let wheel_name = info.as_ref().map(|i| i.name.clone()).filter(|n| !n.is_empty());
+            rows.insert(0, display_row("Wheel", wheel_name.unwrap_or_else(|| "No wheel detected".to_string())));
+            // A G923 has no wheel_serial/wheel_firmware sysfs at all (its
+            // registry rows above are empty for this category): show the
+            // same identity here instead, sourced from the HID uniq string
+            // and the cached HID++ query (see `App::g923_firmware`).
+            if app.device.model() == logi_dd_core::WheelModel::G923 {
+                let serial = info.as_ref().map(|i| i.serial.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "-".to_string());
+                rows.insert(1, display_row("Serial", serial));
+                rows.insert(2, display_row("Firmware", app.g923_firmware.clone().unwrap_or_else(|| "unavailable".to_string())));
+            }
             rows.push(display_row("App", app.app_version_text().to_string()));
             rows.push(display_row("Driver", app.driver_version_text()));
             rows.push(ListItem::new(Line::from(vec![
@@ -1427,6 +1451,65 @@ mod tests {
         for label in ["Force feedback", "Steering", "Pedals", "Info / Testing", "Setup"] {
             assert!(text.contains(label), "missing {label}:\n{text}");
         }
+    }
+
+    #[test]
+    fn info_is_the_first_sidebar_entry_and_the_default_view() {
+        // Request 1: Info/Testing is the first sidebar item and what a
+        // freshly built app (index 0, no navigation) shows.
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let a = wheel_app();
+        assert!(a.is_info(), "a fresh App starts on the Info view");
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        let info_pos = text.find("Info / Testing").expect("Info / Testing listed");
+        let ffb_pos = text.find("Force feedback").expect("Force feedback listed");
+        assert!(info_pos < ffb_pos, "Info must lead the sidebar:\n{text}");
+    }
+
+    #[test]
+    fn info_page_leads_with_a_wheel_row() {
+        // Request 2: a "Wheel" row, ahead of Serial/Firmware/App/Driver.
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let a = wheel_app();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        let wheel_pos = text.find("Wheel").expect("Wheel row present");
+        let serial_pos = text.find("Serial").expect("Serial row present");
+        let app_pos = text.find("App").expect("App row present");
+        assert!(wheel_pos < serial_pos && wheel_pos < app_pos, "Wheel must lead the block:\n{text}");
+    }
+
+    #[test]
+    fn info_page_shows_no_wheel_detected_without_a_device() {
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let a = App::new(logi_dd_core::Device::with_io(FakeSysfs::new()));
+        assert!(a.no_wheel);
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(text.contains("No wheel detected"), "{text}");
+    }
+
+    #[test]
+    fn g923_info_page_shows_serial_and_firmware_rows() {
+        // Request 3: a G923 (no wheel_serial/wheel_firmware sysfs at all)
+        // still gets Serial/Firmware rows on the Info page. `g923_app`'s
+        // `with_io_and_model` has no real HID sysfs directory behind it, so
+        // both are deterministically the "no value" state here (a live
+        // device is exercised separately, see `logi-dd-core::hidpp`'s and
+        // `device`'s own tests).
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let a = g923_app();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        let firmware_line = text
+            .lines()
+            .find(|l| l.contains("Firmware"))
+            .expect("a Firmware row is rendered");
+        assert!(firmware_line.contains("unavailable"), "{firmware_line}");
+        let serial_line =
+            text.lines().find(|l| l.contains("Serial")).expect("a Serial row is rendered");
+        assert!(serial_line.contains('-'), "{serial_line}");
     }
 
     #[test]

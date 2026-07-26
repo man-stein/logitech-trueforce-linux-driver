@@ -11,7 +11,7 @@ use logi_dd_core::lightsync;
 use logi_dd_core::steam;
 use logi_dd_core::sysfs::SysfsIo;
 use logi_dd_core::tfsim;
-use logi_dd_core::{Category, Device, Error, Kind, Mode, ModeReq, Value};
+use logi_dd_core::{Category, Device, Error, Kind, Mode, ModeReq, Value, WheelModel};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -315,6 +315,17 @@ pub struct App<S: SysfsIo> {
     /// view's Driver row and the `c` status print read through this, so
     /// they always show the stamp of the module actually loaded right now.
     pub driver_version_path: PathBuf,
+    /// Cached HID++ firmware string for a classic (G923) wheel's Info row
+    /// (`Device::classic_firmware` is a real, timed-out USB round trip, not
+    /// a sysfs read, so it is queried once per Info-page visit/rescan
+    /// rather than on every `reload()`/draw; see `g923_firmware_queried`).
+    /// `None` while unqueried, still unavailable, or on any other model.
+    pub g923_firmware: Option<String>,
+    /// Whether `g923_firmware` has been queried since the last rescan (`r`
+    /// on the Info page): `reload()` only fires the query while this is
+    /// false, so a drift-triggered or category-switch reload never repeats
+    /// it; the Info page's own `r` resets it to force a fresh read.
+    g923_firmware_queried: bool,
     /// The Info/Testing view's viewport scroll offset, in lines: the two
     /// composed views (Info/Testing and Setup) render more content than a
     /// small terminal can show, so PgUp/PgDn (plus Up/Down on Info, which
@@ -394,6 +405,8 @@ impl<S: SysfsIo> App<S> {
             no_wheel: false,
             retry_requested: false,
             driver_version_path: PathBuf::from(logi_dd_core::driver::MODULE_VERSION_PATH),
+            g923_firmware: None,
+            g923_firmware_queried: false,
             info_scroll: 0,
             setup_scroll: 0,
             body_height: std::cell::Cell::new(0),
@@ -538,6 +551,16 @@ impl<S: SysfsIo> App<S> {
             return;
         }
         let cat = self.category();
+        // The classic engine's HID++ firmware string takes a real, timed
+        // USB round trip (`Device::classic_firmware`), unlike every other
+        // Info field: query it once per Info-page visit (`g923_firmware_
+        // queried` guards against a drift-triggered reload repeating it
+        // every couple of seconds while the page just sits open), not on
+        // every reload of every category.
+        if cat == Category::Info && !self.g923_firmware_queried && self.device.model() == WheelModel::G923 {
+            self.g923_firmware = self.device.classic_firmware();
+            self.g923_firmware_queried = true;
+        }
         // `lightsync_rows` hardcodes the wheel_led_* attrs rather than
         // reading them off a registry, so a wheel whose own settings carry
         // no Leds entry at all (the G923's classic engine has no LIGHTSYNC
@@ -1833,6 +1856,11 @@ impl<S: SysfsIo> App<S> {
                     if self.no_wheel {
                         self.retry_requested = true;
                     }
+                    // Force a fresh HID++ firmware read on a classic wheel
+                    // (an explicit rescan is exactly the "refresh" moment
+                    // that query is meant for), rather than trusting a
+                    // possibly-stale cached value.
+                    self.g923_firmware_queried = false;
                     self.rescan_input();
                     self.reload();
                     self.status = match &self.test.dev {
@@ -1847,14 +1875,23 @@ impl<S: SysfsIo> App<S> {
                 // deliberately gains no dependency for one), so the values
                 // are surfaced for a manual terminal copy instead.
                 Char('c') => {
-                    let read = |attr: &str| match self.device.read(attr) {
+                    // A G923 has no wheel_serial/wheel_firmware sysfs at
+                    // all; fall back to the same sources the Info page's
+                    // own Wheel/Serial/Firmware rows use for it (the HID
+                    // uniq string, and the cached HID++ query).
+                    let info = self.device.info().ok();
+                    let serial = match self.device.read("wheel_serial") {
+                        Ok(Value::Text(s)) => s.trim().to_string(),
+                        _ => info.as_ref().map(|i| i.serial.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "-".to_string()),
+                    };
+                    let firmware = match self.device.read("wheel_firmware") {
                         Ok(Value::Text(s)) => s.trim().replace('\n', " / "),
-                        _ => "-".to_string(),
+                        _ => self.g923_firmware.clone().unwrap_or_else(|| "-".to_string()),
                     };
                     self.status = format!(
                         "serial: {}   firmware: {}   app: {}   driver: {}   (shown for manual copy)",
-                        read("wheel_serial"),
-                        read("wheel_firmware"),
+                        serial,
+                        firmware,
                         self.app_version_text(),
                         self.driver_version_text()
                     );
@@ -2181,8 +2218,11 @@ mod tests {
 
     #[test]
     fn rows_follow_selected_category() {
-        let a = app();
-        // first category is Ffb; wheel_strength should be a row
+        let mut a = app();
+        // Category::ALL's default (index 0) is Info now; navigate to Ffb
+        // explicitly since that is what this test is actually about.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
         assert!(a.rows.iter().any(|r| r.attr == "wheel_strength"));
         // absent attrs are marked unavailable, not dropped
         let s = a.rows.iter().find(|r| r.attr == "wheel_ffb_filter").unwrap();
@@ -2260,22 +2300,25 @@ mod tests {
         assert!(a.category_applicable(Category::Pedals));
         assert!(a.category_applicable(Category::Info));
 
-        // Digit 4 (LIGHTSYNC) and 5 (Profiles) are inert: nothing there to
-        // jump to, so the category (and focus) must not change.
+        // Digit 5 (LIGHTSYNC) and 6 (Profiles) are inert: nothing there to
+        // jump to, so the category (and focus) must not change. (Category
+        // order is Info, Ffb, Steering, Pedals, Leds, Profiles: digits 1-6.)
         let mut a = g923_app();
         a.focus = Focus::Sidebar;
         let before = a.category();
-        a.on_key(KeyCode::Char('4'));
+        a.on_key(KeyCode::Char('5'));
         assert_eq!(a.category(), before, "no LIGHTSYNC content to jump to");
         assert_eq!(a.focus, Focus::Sidebar, "an inert digit does not steal focus");
-        a.on_key(KeyCode::Char('5'));
+        a.on_key(KeyCode::Char('6'));
         assert_eq!(a.category(), before, "no Profiles content to jump to");
 
         // Up/Down (move_cat) must skip straight over both instead of
-        // landing on them.
+        // landing on them. Info now sits at the front of the order, not
+        // adjacent to Profiles, so stepping forward past Pedals on a G923
+        // (which hides Leds/Profiles) reaches Setup, not Info.
         a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
         a.move_cat(1);
-        assert_eq!(a.category(), Category::Info, "skips Leds and Profiles going forward");
+        assert!(a.is_setup(), "skips Leds and Profiles going forward, to Setup");
         a.move_cat(-1);
         assert_eq!(a.category(), Category::Pedals, "skips them going backward too");
     }
@@ -2297,16 +2340,18 @@ mod tests {
 
     #[test]
     fn digit_jumps_land_on_the_view_with_content_focus() {
+        // Category order is Info, Ffb, Steering, Pedals, Leds, Profiles:
+        // digit 1 is Info, 5 is LIGHTSYNC, 7 is Setup.
         use crossterm::event::KeyCode;
         let mut a = app();
         a.focus = Focus::Sidebar;
-        a.on_key(KeyCode::Char('4'));
-        assert_eq!(a.category(), Category::Leds, "4 is the LIGHTSYNC entry");
+        a.on_key(KeyCode::Char('5'));
+        assert_eq!(a.category(), Category::Leds, "5 is the LIGHTSYNC entry");
         assert_eq!(a.focus, Focus::Content, "a jump lands ready to work");
         a.on_key(KeyCode::Char('7'));
         assert!(a.is_setup(), "7 is the Setup entry");
         a.on_key(KeyCode::Char('1'));
-        assert_eq!(a.category(), Category::Ffb);
+        assert_eq!(a.category(), Category::Info, "1 is the Info entry");
         // Out-of-range digits do nothing (but never fall through).
         let cat = a.cat_idx;
         a.on_key(KeyCode::Char('9'));
@@ -2340,14 +2385,15 @@ mod tests {
 
     #[test]
     fn sidebar_updown_moves_the_category_and_loads_it_live() {
+        // Default (index 0) is Info; Down steps to Ffb, Up back to Info.
         use crossterm::event::KeyCode;
         let mut a = app();
         a.focus = Focus::Sidebar;
         a.on_key(KeyCode::Down);
-        assert_eq!(a.category(), Category::Steering);
+        assert_eq!(a.category(), Category::Ffb);
         assert_eq!(a.focus, Focus::Sidebar, "browsing stays on the sidebar");
         a.on_key(KeyCode::Up);
-        assert_eq!(a.category(), Category::Ffb, "the content loaded live both ways");
+        assert_eq!(a.category(), Category::Info, "the content loaded live both ways");
         a.on_key(KeyCode::Enter);
         assert_eq!(a.focus, Focus::Content, "Enter steps into the content");
         assert!(a.edit.is_none(), "no editor opened from the sidebar");
@@ -2358,6 +2404,9 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut a = app();
         a.focus = Focus::Content;
+        // Navigate to Ffb: the default category (Info) has no editable rows.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
         a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
         a.on_key(KeyCode::Enter); // the inline editor (topmost)
         assert!(a.edit.is_some());
@@ -2418,8 +2467,8 @@ mod tests {
     fn edit_commit_writes_and_reloads() {
         use crossterm::event::KeyCode;
         let mut a = app();
-        // navigate to wheel_strength row
-        a.cat_idx = 0;
+        // navigate to wheel_strength row (Ffb)
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
         a.reload();
         a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
         a.on_key(KeyCode::Enter); // begin edit
@@ -2488,6 +2537,9 @@ mod tests {
     #[test]
     fn profile_drift_reloads_the_rows_and_reports() {
         let (fs, mut a) = drift_app();
+        // Ffb, where wheel_strength lives (the default category is Info).
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
         // The wheel's profile button fired: the slot AND an effective
         // setting move without any key passing through the app.
         fs.set("wheel_profile", "3");
@@ -2613,6 +2665,9 @@ mod tests {
     fn i_opens_the_info_popup_and_any_key_closes_it() {
         use crossterm::event::KeyCode;
         let mut a = app();
+        // FFB strength lives on Ffb; the default category is Info.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
         a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
         a.on_key(KeyCode::Char('i'));
         let popup = a.info_popup.as_ref().expect("popup opens");
@@ -2716,10 +2771,13 @@ mod tests {
     #[test]
     fn entering_the_info_view_runs_input_discovery() {
         let mut a = app();
+        // Start away from Info (now the default `app()` already sits on)
+        // so switching to it exercises the transition itself, via the same
+        // `set_cat` a digit jump or arrow move would call.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
         let info = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
-        for _ in 0..info {
-            a.move_cat(1);
-        }
+        a.set_cat(info);
         assert!(a.is_info());
         assert!(a.test.scanned, "entering the Info view runs discovery");
         // The identity rows still load like any category's.
@@ -2858,9 +2916,12 @@ mod tests {
     /// simply overwritten).
     fn setup_app() -> App<FakeSysfs> {
         let mut a = app();
-        for _ in 0..Category::ALL.len() {
-            a.move_cat(1);
-        }
+        // `set_cat` (what `move_cat` steps toward anyway) rather than a
+        // step count tied to `Category::ALL`'s current order/length: this
+        // fixture only needs to land in Setup, not exercise how many
+        // presses it takes to get there (see `move_cat_reaches_and_leaves_
+        // setup` for that).
+        a.set_cat(SETUP_INDEX);
         assert!(a.is_setup());
         // Two games with built-in TrueForce (the shim action), so the
         // install/remove keys have something to queue; the sim-TF tests
@@ -4105,6 +4166,8 @@ mod tests {
     #[test]
     fn adopt_device_restores_live_behavior() {
         let mut a = no_wheel_app();
+        // Ffb, where wheel_strength lives (the default category is Info).
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
         assert!(a.rows.is_empty());
         let fs = FakeSysfs::new();
         fs.set("wheel_strength", "62");
@@ -4256,7 +4319,11 @@ mod tests {
     #[test]
     fn scrolling_is_a_noop_on_the_plain_settings_views() {
         use crossterm::event::KeyCode;
-        let mut a = app(); // the Ffb page
+        let mut a = app();
+        // A plain (non-composed) settings page; the default is Info, which
+        // IS composed/scrollable, so this needs an explicit category.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
         a.body_height.set(5);
         a.on_key(KeyCode::PageDown);
         assert_eq!((a.info_scroll, a.setup_scroll), (0, 0));
