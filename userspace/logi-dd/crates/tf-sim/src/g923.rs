@@ -43,7 +43,10 @@
 //! initial init sequence) owns the hidraw handle and paces outgoing
 //! packets on a steady [`TICK_INTERVAL`], the same cadence libtrueforce's
 //! own DD-wheel stream thread runs at. [`G923Stream::push`] only queues
-//! samples for it over a channel; each tick the writer takes up to
+//! samples for it over a bounded channel, load-shedding (dropping the
+//! newest sample and rate-limit-logging it) instead of blocking the
+//! caller if the writer ever falls behind; see [`CMD_CHANNEL_CAPACITY`].
+//! Each tick the writer takes up to
 //! [`NEW_PER_PACKET`] of them (padding any shortfall by repeating the
 //! last sample, or zero if none arrived at all, so a tick never skips a
 //! packet while waiting on the producer), merges in a freshly-read
@@ -125,7 +128,18 @@ const TICK_INTERVAL: Duration = Duration::from_millis(4);
 /// without limit; sized well above one daemon poll's worth of `push`
 /// calls (the daemon calls `push` roughly once per ~50 ms iteration, and
 /// the writer drains the channel every tick).
+///
+/// Load-shedding, deliberately: [`G923Stream::push`] feeds this channel
+/// with `try_send`, never the blocking `send`. If the writer thread ever
+/// falls behind (e.g. a hung hidraw write) and the channel fills, `push`
+/// drops the newest sample and rate-limit-logs it rather than blocking
+/// the daemon thread. The daemon serves every other wheel too, so it
+/// must never wedge on one stalled G923; stale force data delivered late
+/// is worse than a dropped sample.
 const CMD_CHANNEL_CAPACITY: usize = 16;
+/// Minimum spacing between "writer channel full, dropping" warnings, so
+/// a sustained stall logs occasionally instead of once per dropped push.
+const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
 include!(concat!(env!("OUT_DIR"), "/g923_init_data.rs"));
 
@@ -522,13 +536,28 @@ enum Cmd {
 // The stream
 // ---------------------------------------------------------------------
 
+/// Abstraction over the writer thread's device handle. The only
+/// production implementation is [`File`]; tests inject a sink that fails
+/// on a chosen call to get a deterministic write error without needing a
+/// real hidraw node or an OS-level trick (e.g. a pipe with its read end
+/// closed) to force one.
+trait HidrawSink: Send {
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
+}
+
+impl HidrawSink for File {
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        Write::write_all(self, buf)
+    }
+}
+
 /// The writer thread's private state: the interface-2 hidraw node, the
 /// interface-0 `ffb_output` mirror, and everything [`Writer::tick`] needs
 /// to build the next packet. Lives entirely on the background thread
 /// spawned by [`G923Stream::open`]; the caller-facing [`G923Stream`] only
 /// talks to it over a channel.
 struct Writer {
-    hidraw: File,
+    hidraw: Box<dyn HidrawSink>,
     ffb: FfbMirror,
     sign: Sign,
     seq: u8,
@@ -540,8 +569,16 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(hidraw: File, ffb: FfbMirror, sign: Sign) -> Writer {
-        Writer { hidraw, ffb, sign, seq: 0, window: [CENTER; WINDOW], pending: Vec::new(), idle: IdlePolicy::new() }
+    fn new(hidraw: impl HidrawSink + 'static, ffb: FfbMirror, sign: Sign) -> Writer {
+        Writer {
+            hidraw: Box::new(hidraw),
+            ffb,
+            sign,
+            seq: 0,
+            window: [CENTER; WINDOW],
+            pending: Vec::new(),
+            idle: IdlePolicy::new(),
+        }
     }
 
     /// Send the embedded 68-packet sequence twice, sequence byte
@@ -638,14 +675,24 @@ fn run_writer(mut writer: Writer, cmd_rx: mpsc::Receiver<Cmd>, mut pacer: impl P
             pacer.ack();
             return;
         }
-        // A write failure (e.g. the wheel was unplugged) is fatal: stop
-        // trying and exit, which drops `cmd_rx` so the next `push()` call
-        // fails and the daemon notices and tears the stream down.
+        // A write failure (e.g. the wheel was unplugged) is fatal: send a
+        // best-effort stop first (ignoring its error too - if the device
+        // is truly gone this write just fails harmlessly, but if the
+        // failure was transient the wheel is not left following a stale
+        // `cur`, the TF4ALL issue #13 failure this exists to prevent),
+        // then stop trying and exit, which drops `cmd_rx` so the next
+        // `push()` call fails and the daemon notices and tears the
+        // stream down. `ack` is called only once the best-effort stop
+        // write has actually happened (mirroring the `stop_requested`
+        // branch above), so a test driving this via `ManualPacer` never
+        // races the write.
         let fatal = writer.tick(now).is_err();
-        pacer.ack();
         if fatal {
+            let _ = writer.send_stop();
+            pacer.ack();
             return;
         }
+        pacer.ack();
     }
     // The pacer ran out of ticks without an explicit Stop (production:
     // never happens, `SteadyPacer` never returns `None`). Still send the
@@ -664,6 +711,12 @@ pub struct G923Stream {
     cmd_tx: mpsc::SyncSender<Cmd>,
     handle: Option<thread::JoinHandle<()>>,
     stopped: bool,
+    /// Total samples load-shed by [`push`](Self::push) because the
+    /// writer's channel was full. See [`CMD_CHANNEL_CAPACITY`].
+    dropped: u64,
+    /// When [`push`](Self::push) last logged a drop, for
+    /// [`DROP_WARN_INTERVAL`] rate-limiting.
+    last_drop_warn: Option<Instant>,
 }
 
 impl G923Stream {
@@ -677,11 +730,25 @@ impl G923Stream {
 
     fn open_with_pacer(paths: &G923Paths, sign: Sign, pacer: impl Pacer + 'static) -> io::Result<G923Stream> {
         let hidraw = OpenOptions::new().read(true).write(true).open(&paths.hidraw)?;
-        let mut writer = Writer::new(hidraw, FfbMirror::open(paths.ffb_output.as_deref()), sign);
+        Self::open_with_sink(hidraw, FfbMirror::open(paths.ffb_output.as_deref()), sign, pacer)
+    }
+
+    /// Common tail of [`open_with_pacer`](Self::open_with_pacer): build
+    /// the [`Writer`] from an already-open sink, send the init sequence,
+    /// and spawn the writer thread. Split out so tests can supply a
+    /// [`HidrawSink`] other than a real hidraw [`File`] (see
+    /// `FlakyFile` in the tests module) without duplicating any of this.
+    fn open_with_sink(
+        hidraw: impl HidrawSink + 'static,
+        ffb: FfbMirror,
+        sign: Sign,
+        pacer: impl Pacer + 'static,
+    ) -> io::Result<G923Stream> {
+        let mut writer = Writer::new(hidraw, ffb, sign);
         writer.send_init()?;
         let (cmd_tx, cmd_rx) = mpsc::sync_channel(CMD_CHANNEL_CAPACITY);
         let handle = thread::Builder::new().name("g923-tf-writer".into()).spawn(move || run_writer(writer, cmd_rx, pacer))?;
-        Ok(G923Stream { cmd_tx, handle: Some(handle), stopped: false })
+        Ok(G923Stream { cmd_tx, handle: Some(handle), stopped: false, dropped: 0, last_drop_warn: None })
     }
 
     /// Queue `samples` (each -1.0..1.0, tf-sim's usual synthesized-audio
@@ -689,13 +756,41 @@ impl G923Stream {
     /// [`NEW_PER_PACKET`]-sample chunks at its own steady pace (see the
     /// module docs). Fails if the writer thread has already stopped
     /// (explicit [`stop`](Self::stop) or a fatal write error).
+    ///
+    /// Never blocks: if the writer's channel is full (it has fallen
+    /// behind, e.g. a hung hidraw write), this sample is dropped and
+    /// counted instead of blocking the caller (see
+    /// [`CMD_CHANNEL_CAPACITY`]'s docs for why). The caller - the
+    /// daemon's poll loop, which also services every other wheel - is
+    /// never told about the drop via the return value, since it is not
+    /// an error from the caller's point of view, only logged
+    /// (rate-limited by [`DROP_WARN_INTERVAL`]).
     pub fn push(&mut self, samples: &[f32]) -> io::Result<()> {
         if samples.is_empty() {
             return Ok(());
         }
-        self.cmd_tx
-            .send(Cmd::Push(samples.to_vec()))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "G923 TrueForce writer thread has stopped"))
+        match self.cmd_tx.try_send(Cmd::Push(samples.to_vec())) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "G923 TrueForce writer thread has stopped"))
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.dropped += 1;
+                let now = Instant::now();
+                let should_warn = match self.last_drop_warn {
+                    Some(last) => now.duration_since(last) >= DROP_WARN_INTERVAL,
+                    None => true,
+                };
+                if should_warn {
+                    self.last_drop_warn = Some(now);
+                    eprintln!(
+                        "logi-tf-sim: G923 writer channel full, dropped {} sample push(es) so far (hidraw stalled?)",
+                        self.dropped
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Best-effort stop: tells the writer thread to send the stop template
@@ -1220,38 +1315,158 @@ mod tests {
         let (mut stream, tick_tx, ack_rx) = open_test(&paths, Sign::Normal).expect("open");
 
         // `stop()` sends Cmd::Stop and then blocks joining the writer
-        // thread, which is parked waiting for a tick - so driving that
-        // tick from another thread races the writer's drain loop against
-        // the `send` (whichever thread the scheduler runs first), and the
-        // writer losing that race is the common case in practice (the
-        // rendezvous tick, sent to an already-parked receiver, tends to
-        // land before a freshly spawned thread gets its first timeslice).
-        // So the request is issued here directly, on this thread, in the
-        // same order `stop()` uses internally, which is what guarantees
-        // the writer's drain loop is guaranteed to observe it: the
-        // properties under test - exactly one stop write, and `stop`
-        // being a no-op afterward - hold regardless of which code path
-        // set `stopped`.
-        stream.cmd_tx.send(Cmd::Stop).unwrap();
-        stream.stopped = true;
-        tick_tx.send(Instant::now()).unwrap();
-        ack_rx.recv().unwrap();
-        if let Some(handle) = stream.handle.take() {
-            handle.join().expect("writer thread panicked");
-        }
+        // thread, which is parked waiting for its next tick. Drive that
+        // (and, in case one races ahead of the Cmd::Stop send and lands
+        // as an ordinary streaming tick first, any further) tick from a
+        // helper thread so this thread can call the real, public
+        // `stop()` and actually block inside it, instead of poking the
+        // private `cmd_tx`/`stopped` fields to fake the same effect. The
+        // helper stops driving once the writer thread has exited and
+        // dropped its end of the tick channel (`send` then fails).
+        let ticker = thread::spawn(move || loop {
+            if tick_tx.send(Instant::now()).is_err() {
+                return;
+            }
+            if ack_rx.recv().is_err() {
+                return;
+            }
+        });
 
-        let after_stop = std::fs::read(&hidraw_path).unwrap();
-        assert_eq!(after_stop.len(), INIT_LEN + PACKET_LEN, "exactly one stop packet after the init sequence");
-        assert_eq!(after_stop[after_stop.len() - PACKET_LEN + 4], 0x04, "it is the stop template");
-
-        // Now exercise the real public API: with `stopped` already true
-        // (as it would be after any prior `stop()` call), a further
-        // explicit `stop()` and the subsequent `Drop` must both be
-        // no-ops - the double-send this test guards against.
         stream.stop();
-        drop(tick_tx);
+        ticker.join().expect("ticker thread panicked");
+
+        // A possible leading tick (see above) writes one ordinary
+        // (non-stop) sample packet before the stop is observed, so
+        // rather than assert a fixed total length, check the property
+        // that actually matters: exactly one stop packet was ever
+        // written, and it is the last thing in the file.
+        let after_stop = std::fs::read(&hidraw_path).unwrap();
+        let tail = &after_stop[INIT_LEN..];
+        assert_eq!(tail.len() % PACKET_LEN, 0, "only whole packets after init");
+        let stop_packets = tail.chunks(PACKET_LEN).filter(|p| p[4] == 0x04).count();
+        assert_eq!(stop_packets, 1, "exactly one stop packet must ever be written");
+        let last_packet = &after_stop[after_stop.len() - PACKET_LEN..];
+        assert_eq!(last_packet[4], 0x04, "the last packet written is the stop template");
+
+        // Now exercise the real public API further: a further explicit
+        // `stop()` and the subsequent `Drop` must both be no-ops - the
+        // double-send this test guards against.
+        stream.stop();
         drop(stream);
         let after_drop = std::fs::read(&hidraw_path).unwrap();
         assert_eq!(after_drop.len(), after_stop.len(), "stop()/Drop after the writer already stopped must not double-send");
+    }
+
+    // -- load-shedding (Finding B) ----------------------------------------
+
+    #[test]
+    fn push_does_not_block_when_the_channel_is_full_and_counts_the_drop() {
+        let (_hidraw_path, paths) = temp_hidraw_paths();
+        // The pacer never ticks in this test, so the writer thread stays
+        // parked in `Pacer::wait` and never drains `cmd_rx`: fill the
+        // channel to capacity first (these must all succeed, since it is
+        // not full yet).
+        let (mut stream, tick_tx, _ack_rx) = open_test(&paths, Sign::Normal).expect("open");
+        for _ in 0..CMD_CHANNEL_CAPACITY {
+            stream.push(&[0.1]).expect("push into a non-full channel must succeed");
+        }
+
+        // One more push, with the channel now full and nobody draining
+        // it: if `push` ever regresses to the blocking `send`, this call
+        // would hang forever, so drive it from a second thread and give
+        // it a generous timeout instead of wedging the whole test suite
+        // on a regression.
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = stream.push(&[0.2]);
+            let dropped = stream.dropped;
+            let _ = done_tx.send((result.is_ok(), dropped));
+            stream
+        });
+        let (ok, dropped) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("push() blocked instead of load-shedding when the channel was full");
+        assert!(ok, "a full channel must be load-shed silently, not surfaced as an error to the caller");
+        assert_eq!(dropped, 1, "exactly one push was dropped");
+
+        // Clean up: let the writer thread (and the still-running helper
+        // thread, parked in `Drop`'s `stop()`) exit.
+        drop(tick_tx);
+        handle.join().expect("helper thread panicked");
+    }
+
+    // -- fatal write error still sends a stop (Finding A) ------------------
+
+    /// Test-only [`HidrawSink`] that fails exactly its `fail_at`-th call
+    /// (0-indexed) and forwards every other call through to a real
+    /// backing file, so a test can assert exactly which packets did and
+    /// did not make it to "the device" around one injected write
+    /// failure, instead of a real hidraw file or an OS-level trick like
+    /// a pipe with its read end closed (which cannot target one specific
+    /// write deterministically).
+    struct FlakyFile {
+        file: File,
+        call: usize,
+        fail_at: usize,
+    }
+
+    impl HidrawSink for FlakyFile {
+        fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+            let call = self.call;
+            self.call += 1;
+            if call == self.fail_at {
+                return Err(io::Error::other("synthetic write failure"));
+            }
+            Write::write_all(&mut self.file, buf)
+        }
+    }
+
+    #[test]
+    fn a_fatal_write_error_still_sends_a_best_effort_stop_before_exiting() {
+        let dir = tempdir();
+        let hidraw_path = dir.join("hidraw");
+        std::fs::write(&hidraw_path, []).unwrap();
+        let backing = OpenOptions::new().read(true).write(true).open(&hidraw_path).unwrap();
+
+        // Fail exactly the first sample-packet write (call index
+        // TF_INIT_PACKET_COUNT * 2, right after the two init passes)
+        // to simulate one transient hidraw hiccup - not the device
+        // being gone outright, so the following best-effort stop write
+        // (the next call) is expected to succeed and land in the file.
+        let fail_at = 2 * TF_INIT_PACKET_COUNT;
+        let sink = FlakyFile { file: backing, call: 0, fail_at };
+
+        let (tick_tx, tick_rx) = mpsc::sync_channel(0);
+        let (ack_tx, ack_rx) = mpsc::sync_channel(0);
+        let mut stream =
+            G923Stream::open_with_sink(sink, FfbMirror::open(None), Sign::Normal, ManualPacer { tick_rx, ack_tx })
+                .expect("open");
+
+        // Drive one tick: `Writer::tick`'s final sample-packet write is
+        // the injected failure, making the writer thread treat it as
+        // fatal, attempt the best-effort stop (succeeds, since only the
+        // one call was made to fail), and exit. `ack` confirms that tick's
+        // actions (including the best-effort stop write) already
+        // happened, but not that the writer thread's stack has finished
+        // unwinding, so call the real `stop()` next to deterministically
+        // wait for the thread (and its drop of `cmd_rx`) to fully exit
+        // before relying on the channel being disconnected: `stop()` is
+        // documented as safe to call on an already-stopped writer, and
+        // internally does exactly the join needed here.
+        tick_tx.send(Instant::now()).unwrap();
+        ack_rx.recv().unwrap();
+        stream.stop();
+
+        // The writer thread has fully exited, so `push()` now observes
+        // the disconnected channel.
+        let err = stream.push(&[0.5]).expect_err("writer thread should have exited after the fatal error");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+
+        let bytes = std::fs::read(&hidraw_path).unwrap();
+        assert_eq!(bytes.len(), INIT_LEN + PACKET_LEN, "init sequence plus exactly the best-effort stop packet");
+        let last_packet = &bytes[bytes.len() - PACKET_LEN..];
+        assert_eq!(last_packet[4], 0x04, "the last packet written before exit is the stop template");
+
+        drop(tick_tx);
     }
 }
