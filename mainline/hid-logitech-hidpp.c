@@ -14222,18 +14222,21 @@ static int hidpp_raw_event(struct hid_device *hdev, struct hid_report *report,
 
 	/*
 	 * The classic G923 FFB engine (HIDPP_QUIRK_CLASS_LG4FF, PS c266/c267)
-	 * gets here on two interfaces, not just one. Interface 0 fails HID++
-	 * validation (hidpp_probe rejects interface 2 outright with -ENODEV),
-	 * so it takes the minimal-probe path with no_hidpp_reports set and
-	 * a real lg4ff_entry: dd_lg4ff_raw_event() below rewrites combined-
-	 * pedal bytes in place per the combine_pedals sysfs setting. Interface
-	 * 1, however, passes HID++ validation and runs the full HID++ path
-	 * (no_hidpp_reports stays false, so the demux above still applies);
-	 * it has no lg4ff_entry (that is only ever set up for interface 0), so
-	 * dd_lg4ff_raw_event() sees a NULL entry and returns 0 immediately -
-	 * a harmless no-op. Either way dd_lg4ff_raw_event() always returns 0,
-	 * so the (possibly modified) report still reaches the normal
-	 * input-mapping path below/after this function.
+	 * gets here on all three interfaces, not just one. Interface 0 fails
+	 * HID++ validation, so it takes the minimal-probe path with
+	 * no_hidpp_reports set and a real lg4ff_entry: dd_lg4ff_raw_event()
+	 * below rewrites combined-pedal bytes in place per the combine_pedals
+	 * sysfs setting. Interface 1 passes HID++ validation and runs the
+	 * full HID++ path (no_hidpp_reports stays false, so the demux above
+	 * still applies). Interface 2 is the TrueForce stream: it also fails
+	 * HID++ validation and gets a minimal hidraw-only claim with
+	 * no_hidpp_reports set, same as interface 0. Neither interface 1 nor
+	 * interface 2 ever gets a lg4ff_entry (that is only ever set up for
+	 * interface 0), so dd_lg4ff_raw_event() sees a NULL entry there and
+	 * returns 0 immediately - a harmless no-op. Either way
+	 * dd_lg4ff_raw_event() always returns 0, so the (possibly modified)
+	 * report still reaches the normal input-mapping path below/after
+	 * this function.
 	 */
 	if (hidpp->quirks & HIDPP_QUIRK_CLASS_LG4FF)
 		return dd_lg4ff_raw_event(hdev, report, data, size);
@@ -14868,23 +14871,48 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 			struct usb_interface *intf = to_usb_interface(hdev->dev.parent);
 			int ifnum = intf->cur_altsetting->desc.bInterfaceNumber;
 
-			/*
-			 * The classic FFB engine only speaks to interface 0;
-			 * interfaces 1 and 2 carry no HID++ and no FFB, so
-			 * reject them the way new-lg4ff does (hid-lg.c:770-777)
-			 * rather than binding a driver instance with nothing
-			 * to do.
-			 */
-			if (ifnum != 0) {
-				dd_info(hdev, "ignoring ifnum %d for classic FFB\n", ifnum);
-				hid_set_drvdata(hdev, NULL);
-				devm_kfree(&hdev->dev, hidpp);
-				return -ENODEV;
+			if (ifnum == 0) {
+				dd_info(hdev, "Claiming interface 0 for classic FFB\n");
+				hidpp->no_hidpp_reports = true;
+				return hidpp_dd_lg4ff_probe(hdev);
 			}
 
-			dd_info(hdev, "Claiming interface 0 for classic FFB\n");
-			hidpp->no_hidpp_reports = true;
-			return hidpp_dd_lg4ff_probe(hdev);
+			/*
+			 * Interface 2 (vendor page 0xFFFD) is the G923's
+			 * TrueForce stream, separate from the classic FFB
+			 * engine on interface 0. There is no HID++ or FFB
+			 * init to run here, just a hidraw node for userspace
+			 * TrueForce tooling to stream to; hid_parse already
+			 * ran above, so start with HID_CONNECT_HIDRAW only.
+			 * no_hidpp_reports keeps hidpp_raw_event from trying
+			 * to demux TrueForce stream bytes as HID++ reports
+			 * (this interface has no lg4ff_entry either, so
+			 * dd_lg4ff_raw_event is a no-op if it ever runs).
+			 */
+			if (ifnum == 2) {
+				hidpp->no_hidpp_reports = true;
+				ret = hid_hw_start(hdev, HID_CONNECT_HIDRAW);
+				if (ret) {
+					dd_err(hdev, "lg4ff ifnum 2: hid_hw_start failed: %d\n", ret);
+					hid_set_drvdata(hdev, NULL);
+					devm_kfree(&hdev->dev, hidpp);
+					return ret;
+				}
+				hid_info(hdev, "G923: exposing interface 2 (TrueForce stream) via hidraw\n");
+				return 0;
+			}
+
+			/*
+			 * Interface 1 normally carries HID++ and is handled
+			 * by the full probe path below (supported_reports is
+			 * non-zero for it), so this is defensive: reject any
+			 * ifnum we don't otherwise expect rather than binding
+			 * a driver instance with nothing to do.
+			 */
+			dd_info(hdev, "ignoring ifnum %d for classic FFB\n", ifnum);
+			hid_set_drvdata(hdev, NULL);
+			devm_kfree(&hdev->dev, hidpp);
+			return -ENODEV;
 		}
 		hid_set_drvdata(hdev, NULL);
 		devm_kfree(&hdev->dev, hidpp);

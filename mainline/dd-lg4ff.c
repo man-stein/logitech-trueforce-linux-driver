@@ -1882,8 +1882,8 @@ err_init:
 
 void dd_lg4ff_deinit(struct hid_device *hdev)
 {
-	struct hid_input *hidinput = list_entry(hdev->inputs.next, struct hid_input, list);
-	struct input_dev *dev = hidinput->input;
+	struct hid_input *hidinput;
+	struct input_dev *dev;
 	struct dd_lg4ff_device_entry *entry;
 	void **slot;
 
@@ -1896,6 +1896,16 @@ void dd_lg4ff_deinit(struct hid_device *hdev)
 	entry = (struct dd_lg4ff_device_entry *)*slot;
 	if (!entry)
 		return; /* Nothing more to do */
+
+	/*
+	 * Only interface 0 ever gets a real entry, and only it registers a
+	 * hid_input (dd_lg4ff_init runs after HID_CONNECT_HIDINPUT there).
+	 * Interfaces 1 and 2 always bail out above via the entry-NULL check,
+	 * so it is safe to assume hdev->inputs is non-empty from here on;
+	 * list_entry() on an empty list would read past the list head.
+	 */
+	hidinput = list_entry(hdev->inputs.next, struct hid_input, list);
+	dev = hidinput->input;
 
 	device_remove_file(&hdev->dev, &dd_lg4ff_attr_combine_pedals);
 	device_remove_file(&hdev->dev, &dd_lg4ff_attr_range);
