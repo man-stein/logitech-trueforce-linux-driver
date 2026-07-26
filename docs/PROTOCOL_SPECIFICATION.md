@@ -925,6 +925,14 @@ re-enumerate it.
 
 ## 8. Differences from G920/G923
 
+> This section describes the G920 and the G923 Xbox edition, both of which
+> use the HID++ 0x8123 path below. The G923 PlayStation edition (`c266`/
+> `c267`) is a different case: this driver now supports it directly via a
+> ported classic force-feedback engine (plain HID output reports, the same
+> wire format as G29/G920's in-kernel `hid-logitech` driver) - neither
+> 0x8123 nor the RS50/G PRO TrueForce-stream path documented below. See the
+> G923 section in the README and CHANGELOG.
+
 | Feature | G920/G923 | RS50 |
 |---------|-----------|------|
 | FFB Method | HID++ Feature 0x8123 | Dedicated endpoint 0x03 |

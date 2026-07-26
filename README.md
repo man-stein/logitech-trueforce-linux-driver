@@ -12,7 +12,8 @@ all managed from a desktop app (**logi-dd-gui**) or a terminal one
 
 > Not a direct-drive wheel? The belt-driven **G920** is already served by the
 > in-tree `hid-logitech-hidpp` driver and does not need this one. The **G923**
-> (all editions) is supported by this driver instead - see the carve-out below.
+> (all editions) gets its own feature set from this driver instead - see
+> [G923 support](#g923-support) below.
 
 ## What works
 
@@ -38,8 +39,10 @@ to work · 🟡 needs a tester · `-` not applicable.
 | Simulated TrueForce from game telemetry (`logi-tf-sim`) | ✅ (sweep-verified) | 🟢 |
 | Centre calibration, mode / profile switching, computer-side profiles | ✅ | 🟢 |
 
-USB IDs covered: RS50 (`046d:c276` native, `046d:c272` compatibility mode) and
-G PRO Racing Wheel (`046d:c272` Xbox/PC, `046d:c268` PS/PC).
+USB IDs covered: RS50 (`046d:c276` native, `046d:c272` compatibility mode),
+G PRO Racing Wheel (`046d:c272` Xbox/PC, `046d:c268` PS/PC), and the G923
+(`046d:c266`/`c267` PlayStation edition, `046d:c26d`/`c26e` Xbox edition -
+see [G923 support](#g923-support)).
 
 ## What's included
 
@@ -47,18 +50,10 @@ Six pieces, all built from this repository:
 
 - **The kernel driver** (`hid-logitech-dd`) is the core. It exposes force
   feedback through the standard Linux evdev interface and every wheel setting
-  under `/sys/.../wheel_*`. It is scoped to the direct-drive wheels plus the
-  G923's classic FFB (`c266`/`c267`/`c26e`), and coexists with the in-tree
-  Logitech driver everywhere else - no blanket module blacklisting. For those
-  three G923 PIDs specifically, a udev rule pre-empts the in-tree driver if it
-  wins the initial bind race (unbind, then bind this driver); every other
-  Logitech device it serves - G29/G27/DFGT/G920, mice, keyboards, receivers -
-  is untouched. The G923 **Xbox edition** also boots into a console-only USB
-  mode (`046d:c26d`) with no input node at all; install `usb_modeswitch`
-  (a recommended, not required, package) and a udev rule switches it into
-  PC mode (`046d:c26e`) automatically on every plug-in. If it never
-  switches, the out-of-tree `xone` Xbox-controller driver may have claimed
-  the device first and blocked it.
+  under `/sys/.../wheel_*`, and coexists with the in-tree Logitech driver
+  everywhere else - no blanket module blacklisting. It also covers the G923
+  (`c266`/`c267`/`c26e`) with a separate feature set; see
+  [G923 support](#g923-support) below for how that differs.
 
 - **logi-dd**, a terminal settings app: a native-Linux stand-in for the parts of
   G HUB that configure the wheel, with typed, validated edits and a G HUB-style
@@ -92,6 +87,47 @@ Six pieces, all built from this repository:
 The distribution packages install the driver plus the `logi-dd`, `logi-dd-gui`,
 `logi-ffb` and `logi-tf-sim` tools; `libtrueforce` has its own build under
 `userspace/libtrueforce/`.
+
+## G923 support
+
+The **G923** gets a separate feature set from this driver, distinct from the
+direct-drive wheels above: it is belt-driven and speaks a different classic
+protocol, not the RS50/G PRO's endpoint-based one.
+
+- **PlayStation edition** (`046d:c266`/`c267`): a classic force-feedback
+  engine ported from berarma's [new-lg4ff](https://github.com/berarma/new-lg4ff)
+  drives constant force, spring/damper/friction/inertia, periodic and ramp
+  effects, and autocenter, with an automatic PlayStation-to-PC mode switch.
+  Settings use the classic `range`/`gain`/`autocenter`/`combine_pedals` sysfs
+  names (Oversteer-compatible, not the `wheel_*` names above, since it is a
+  different FFB engine), plus a read-only `ffb_output`. Rev lights (5 LED
+  pairs) work the same way as the RS50/G PRO strip. Hardware-verified:
+  constant force and autocenter feel correct in Assetto Corsa Competizione,
+  and the LED sweep.
+- **No launch options needed for force feedback**: unlike the SDK-aware
+  recipe below, the G923 needs no `PROTON_ENABLE_HIDRAW` - just turn off
+  Steam Input.
+- **TrueForce is simulated, not native**: Logitech's SDK path does not work
+  for the PlayStation G923 on Linux (the SDK DLL just delegates the haptics
+  to G HUB, which Proton does not provide). `logi-tf-sim` streams the same
+  telemetry-driven haptics used on the other wheels to the G923 instead, over
+  the interface this driver claims for it, mirroring live force feedback into
+  the same stream so the two agree. Hardware-confirmed as vibration; the feel
+  and sign check under real game telemetry is still pending.
+- **Xbox edition** (`046d:c26e` PC mode): force feedback routes through the
+  same HID++ 0x8123 path as the G920. It boots into a console-only mode
+  (`046d:c26d`) with no input node at all; installing `usb_modeswitch` (a
+  recommended, not required, package) lets a udev rule switch it into PC mode
+  automatically on plug-in. If it never switches, the out-of-tree `xone`
+  driver may have claimed the device first. Unverified pending an
+  Xbox-edition tester.
+- A PID-scoped udev rule pre-empts a competing driver that wins the initial
+  bind race for these three PIDs only (unbind, then bind this driver); every
+  other Logitech device - G29/G27/DFGT/G920, mice, keyboards, receivers - is
+  untouched. The one exception is berarma's new-lg4ff (`hid-logitech-new`),
+  blacklisted outright since it otherwise races us for `c266`/`c267`.
+- `logi-dd` and `logi-dd-gui` recognise the G923 and expose its four classic
+  settings, with its own wheel image on the Info/Testing page.
 
 ## Install
 
@@ -249,3 +285,9 @@ redistributed here; you supply them from your own G HUB installation.
 - [Oversteer](https://github.com/berarma/oversteer) by Bernat Arlandis, prior art
   for Linux wheel configuration; this driver exposes Oversteer-compatible
   attribute names.
+- [new-lg4ff](https://github.com/berarma/new-lg4ff), also by Bernat Arlandis:
+  source of the classic force-feedback engine ported into this driver's G923
+  PlayStation-edition support.
+- [TF4ALL](https://github.com/Mhytee/Trueforce-For-All) by Mhytee, a Windows
+  SimHub plugin whose protocol analysis (issue #20) confirmed the G923 shares
+  the RS50/G PRO TrueForce stream protocol.

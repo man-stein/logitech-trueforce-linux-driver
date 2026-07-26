@@ -8,26 +8,57 @@ the contract is "it works on RS50 and G Pro as listed here".
 ## Unreleased
 
 ### Added
-- **G923 support (PlayStation, c266/c267).** A classic force feedback engine
-  ported from berarma's new-lg4ff (GPL-2.0-or-later, credited in the source
-  along with the original lg4ff authors) drives the wheel: constant, spring,
-  damper, friction, inertia, periodic and ramp effects, an automatic
-  PlayStation-to-PC mode switch, and range/gain/autocenter/combine_pedals
-  sysfs settings. Hardware-verified on a c266.
-- **G923 support (Xbox, c26e), routed through the existing HID++ 0x8123
-  path** used by the other direct-drive wheels. Unverified pending an
+- **G923 support, PlayStation edition (`046d:c266`/`c267`).** A classic
+  force-feedback engine ported from berarma's new-lg4ff (GPL-2.0-or-later,
+  credited in the source along with the original lg4ff authors) drives the
+  wheel: constant, spring, damper, friction, inertia, periodic and ramp
+  effects plus autocenter, with an automatic PlayStation-to-PC mode switch.
+  Settings use the classic `range`/`gain`/`autocenter`/`combine_pedals`
+  sysfs names (Oversteer-compatible, distinct from this driver's usual
+  `wheel_*` surface, since it is a different FFB engine) plus a read-only
+  `ffb_output`; `combine_pedals` rewrites the input report, not just a
+  no-op toggle. Rev lights (5 LED classdevs, one per mirrored pair) use the
+  same command as the RS50/G PRO strip. Hardware-verified on a c266:
+  constant force and autocenter feel correct in Assetto Corsa Competizione,
+  and the LED sweep lights the innermost pair blue.
+- **Simulated TrueForce for the G923.** The wheel speaks the same
+  TrueForce stream protocol as the RS50/G PRO - confirmed against TF4ALL
+  (Mhytee's Windows SimHub plugin, issue #20) - on its third USB interface,
+  which the driver now claims as a hidraw-only node. `logi-tf-sim` streams
+  the same telemetry-driven haptics used on the other wheels to it, while
+  mirroring the classic engine's live output (`ffb_output`) into the
+  stream's force field so force feedback and TrueForce agree instead of
+  fighting (an active stream otherwise makes the wheel ignore the classic
+  path entirely). Hardware-confirmed: a driven tone reaches the wheel as
+  vibration; the feel and sign check under real game telemetry is still
+  pending.
+- **G923 support, Xbox edition (`046d:c26e`), routed through the existing
+  HID++ 0x8123 path** used by the other direct-drive wheels. The
+  console-boot mode (`046d:c26d`, no input node at all) now switches to PC
+  mode automatically on plug-in via a udev rule and `usb_modeswitch` (a
+  recommended, not required, package); the out-of-tree `xone` driver can
+  claim `c26d` first and block the switch. Unverified pending an
   Xbox-edition tester.
-- **PID-scoped driver pre-emption** for c266/c267/c26e: a new udev rule
-  reclaims the wheel from a competing driver that wins the bind race, with
-  no blanket blacklisting, so every other Logitech device stays on its
-  usual driver. The one exception is berarma's new-lg4ff (`hid-logitech-new`),
-  which we blacklist outright to stop it racing us for c266/c267 - if you
-  run it for a different Logitech wheel (G29, G27, DFGT, ...) that wheel
-  now falls back to the in-tree `hid-logitech` driver instead.
+- **PID-scoped driver pre-emption** for c266/c267/c26e: a udev rule
+  reclaims the wheel from a competing driver that wins the bind race
+  (unbind, then bind this driver), restoring the previous driver if the
+  rebind itself fails, with no blanket blacklisting, so every other
+  Logitech device stays on its usual driver. The one exception is
+  berarma's new-lg4ff (`hid-logitech-new`), which we blacklist outright to
+  stop it racing us for c266/c267 - if you run it for a different
+  Logitech wheel (G29, G27, DFGT, ...) that wheel now falls back to the
+  in-tree `hid-logitech` driver instead.
+- **logi-dd G923 support**: the TUI and GUI recognise the G923 and expose
+  its four classic settings, with its own wheel image on the Info/Testing
+  page alongside the RS50 and G PRO.
 
 ### Notes
-- TrueForce for the G923 in SDK games still comes through the existing SDK
-  DLL shim; simulated TrueForce for the G923 is future work.
+- **G923 force feedback needs no Proton launch options**: no
+  `PROTON_ENABLE_HIDRAW`, just Steam Input off. TrueForce through
+  Logitech's own SDK does not work for the PlayStation G923 on Linux (the
+  SDK DLL delegates the actual haptics to G HUB, which Proton does not
+  provide); simulated TrueForce via `logi-tf-sim` is the supported path
+  for TrueForce on this wheel.
 
 ## 0.19.1 - 2026-07-23
 
