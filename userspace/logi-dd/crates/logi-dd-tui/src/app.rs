@@ -74,7 +74,7 @@ pub struct AddGamePicker {
 /// info popup.
 fn kind_detail(kind: &Kind) -> String {
     match kind {
-        Kind::Percent => "Range: 0-100 %".to_string(),
+        Kind::Percent | Kind::ScaledPercent { .. } => "Range: 0-100 %".to_string(),
         Kind::IntRange { min, max, unit, .. } => {
             if unit.is_empty() {
                 format!("Range: {min}-{max}")
@@ -436,6 +436,14 @@ impl<S: SysfsIo> App<S> {
 
     pub fn category(&self) -> Category {
         Category::ALL[self.cat_idx]
+    }
+
+    /// Whether the sidebar should show `cat` at all for the connected
+    /// device: a G923 has no LIGHTSYNC strip or onboard profile slots, so
+    /// those entries would only ever open onto a blank page. See
+    /// `Device::category_has_content`.
+    pub fn category_applicable(&self, cat: Category) -> bool {
+        self.device.category_has_content(cat)
     }
 
     /// Whether the synthetic "Setup" sidebar entry is selected.
@@ -912,7 +920,18 @@ impl<S: SysfsIo> App<S> {
     pub fn move_cat(&mut self, d: i32) {
         // +1 for the trailing Setup entry, past the last real category.
         let n = (Category::ALL.len() + 1) as i32;
-        self.set_cat(((self.cat_idx as i32 + d).rem_euclid(n)) as usize);
+        let mut idx = self.cat_idx as i32;
+        // Step past any category the connected device has nothing to show
+        // for (e.g. LIGHTSYNC/Profiles on a G923), same as the sidebar
+        // simply not listing it. Bounded by `n`: Setup is always applicable,
+        // so this always lands somewhere within one full lap.
+        for _ in 0..n {
+            idx = (idx + d).rem_euclid(n);
+            if idx as usize == SETUP_INDEX || self.category_applicable(Category::ALL[idx as usize]) {
+                break;
+            }
+        }
+        self.set_cat(idx as usize);
     }
 
     /// Switch straight to sidebar entry `idx` (a digit jump, or one
@@ -1628,8 +1647,14 @@ impl<S: SysfsIo> App<S> {
             Char(c) if c.is_ascii_digit() => {
                 let n = c.to_digit(10).unwrap_or(0) as usize;
                 if (1..=SETUP_INDEX + 1).contains(&n) {
-                    self.set_cat(n - 1);
-                    self.focus = Focus::Content;
+                    let idx = n - 1;
+                    // A digit whose category the sidebar does not list (no
+                    // applicable content on this device) is simply inert,
+                    // same as there being nothing there to jump to.
+                    if idx == SETUP_INDEX || self.category_applicable(Category::ALL[idx]) {
+                        self.set_cat(idx);
+                        self.focus = Focus::Content;
+                    }
                 }
                 true
             }
@@ -2222,6 +2247,37 @@ mod tests {
         a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
         a.reload();
         assert!(a.rows.is_empty(), "expected no Profiles rows for a G923: {:?}", a.rows.iter().map(|r| &r.attr).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn g923_hides_leds_and_profiles_from_the_sidebar_and_digit_jumps() {
+        use crossterm::event::KeyCode;
+        let a = g923_app();
+        assert!(!a.category_applicable(Category::Leds));
+        assert!(!a.category_applicable(Category::Profiles));
+        assert!(a.category_applicable(Category::Ffb));
+        assert!(a.category_applicable(Category::Steering));
+        assert!(a.category_applicable(Category::Pedals));
+        assert!(a.category_applicable(Category::Info));
+
+        // Digit 4 (LIGHTSYNC) and 5 (Profiles) are inert: nothing there to
+        // jump to, so the category (and focus) must not change.
+        let mut a = g923_app();
+        a.focus = Focus::Sidebar;
+        let before = a.category();
+        a.on_key(KeyCode::Char('4'));
+        assert_eq!(a.category(), before, "no LIGHTSYNC content to jump to");
+        assert_eq!(a.focus, Focus::Sidebar, "an inert digit does not steal focus");
+        a.on_key(KeyCode::Char('5'));
+        assert_eq!(a.category(), before, "no Profiles content to jump to");
+
+        // Up/Down (move_cat) must skip straight over both instead of
+        // landing on them.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        a.move_cat(1);
+        assert_eq!(a.category(), Category::Info, "skips Leds and Profiles going forward");
+        a.move_cat(-1);
+        assert_eq!(a.category(), Category::Pedals, "skips them going backward too");
     }
 
     #[test]

@@ -190,7 +190,7 @@ fn kind_tag(attr: &str, kind: &Kind) -> i32 {
         return KIND_READONLY;
     }
     match kind {
-        Kind::Percent => KIND_PERCENT,
+        Kind::Percent | Kind::ScaledPercent { .. } => KIND_PERCENT,
         Kind::IntRange { .. } => KIND_INT_RANGE,
         Kind::Enum(_) => KIND_ENUM,
         Kind::Toggle { .. } => KIND_TOGGLE,
@@ -219,7 +219,7 @@ pub fn to_setting_row(row: &Row) -> SettingRow {
     }
 
     let (min, max, step, unit) = match kind {
-        Kind::Percent => (0, 100, 1, "%"),
+        Kind::Percent | Kind::ScaledPercent { .. } => (0, 100, 1, "%"),
         Kind::IntRange { min, max, step, unit } => (min, max, step, unit),
         Kind::Pair { max } => (0, i32::from(max), 1, "%"),
         _ => (0, 0, 0, ""),
@@ -231,7 +231,7 @@ pub fn to_setting_row(row: &Row) -> SettingRow {
     };
 
     let int_value = match (&kind, &row.value) {
-        (Kind::Percent, Some(Value::Percent(n))) => i32::from(*n),
+        (Kind::Percent | Kind::ScaledPercent { .. }, Some(Value::Percent(n))) => i32::from(*n),
         (Kind::IntRange { .. }, Some(Value::Int(n))) => *n,
         (Kind::Enum(_), Some(Value::Enum(n))) => i32::from(*n),
         (Kind::Pair { .. }, Some(Value::Pair(lo, _))) => i32::from(*lo),

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use logi_dd_core::curve::Curve;
 use logi_dd_core::evtest;
 use logi_dd_core::{lightsync, shaping};
-use logi_dd_core::{Category, Color, Mode, Value, REGISTRY};
+use logi_dd_core::{Category, Color, Mode, Value, WheelModel, REGISTRY};
 use slint::Model as _;
 use viewmodel::WidgetInput;
 use worker::{Request, Response, Worker};
@@ -1135,6 +1135,13 @@ fn main() -> Result<(), slint::PlatformError> {
                         app.set_no_wheel_message("".into());
                         app.set_mode_onboard(matches!(info.mode, Mode::Onboard));
                         app.set_test_wheel_kind(bridge::wheel_image_index(info.model));
+                        // The classic engine (G923) has no onboard profile
+                        // store and no LIGHTSYNC strip at all: gate the two
+                        // DD-only panels that are not built from registry
+                        // rows (`ComputerProfiles`, the LIGHTSYNC preview),
+                        // so they hide instead of rendering onto a wheel
+                        // that cannot back them.
+                        app.set_classic_wheel(matches!(info.model, WheelModel::G923));
                     }
                     Response::NoWheel(message) => {
                         app.set_no_wheel(true);
@@ -1143,6 +1150,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         // back to its "-" placeholders.
                         app.set_info_serial("".into());
                         app.set_info_firmware("".into());
+                        // No model known any more either: fall back to the
+                        // DD-wheel-shaped panels rather than keep whatever
+                        // the last connected wheel happened to be.
+                        app.set_classic_wheel(false);
                     }
                     Response::Profiles { names, status, error } => {
                         let items: Vec<slint::SharedString> =

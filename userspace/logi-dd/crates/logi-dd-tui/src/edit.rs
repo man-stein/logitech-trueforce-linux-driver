@@ -46,7 +46,7 @@ impl EditState {
             return;
         }
         self.draft = match (self.kind, &self.draft) {
-            (Kind::Percent, Value::Percent(n)) => {
+            (Kind::Percent | Kind::ScaledPercent { .. }, Value::Percent(n)) => {
                 Value::Percent((*n as i32 + d).clamp(0, 100) as u8)
             }
             (Kind::IntRange { min, max, step, .. }, Value::Int(n)) => {

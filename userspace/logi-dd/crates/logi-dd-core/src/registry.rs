@@ -103,8 +103,11 @@ pub const CLASSIC_REGISTRY: &[SettingSpec] = &[
     // table, min/max 40/900); the store clamps rather than rejecting, but
     // this app validates up front like every other IntRange.
     SettingSpec { attr: "range", label: "Rotation range", help: "How far the wheel turns lock to lock (40-900 degrees).", category: Steering, kind: Kind::IntRange { min: 40, max: 900, step: 10, unit: "deg" }, access: ReadWrite, mode_req: Any },
-    SettingSpec { attr: "gain", label: "Overall gain", help: "Global force feedback strength, independent of any game's own gain setting (0-65535).", category: Ffb, kind: Kind::IntRange { min: 0, max: 65535, step: 1, unit: "" }, access: ReadWrite, mode_req: Any },
-    SettingSpec { attr: "autocenter", label: "Autocenter", help: "Strength of the wheel's self-centring spring (0-65535, 0 turns it off).", category: Ffb, kind: Kind::IntRange { min: 0, max: 65535, step: 1, unit: "" }, access: ReadWrite, mode_req: Any },
+    // Shown and edited as a percent (0-100%); the sysfs attr itself stays
+    // the driver's raw 0-65535 range for Oversteer compatibility. See
+    // `Kind::ScaledPercent`.
+    SettingSpec { attr: "gain", label: "Overall gain", help: "Global force feedback strength, independent of any game's own gain setting (0-100%).", category: Ffb, kind: Kind::ScaledPercent { raw_max: 65535 }, access: ReadWrite, mode_req: Any },
+    SettingSpec { attr: "autocenter", label: "Autocenter", help: "Strength of the wheel's self-centring spring (0-100%, 0 turns it off).", category: Ffb, kind: Kind::ScaledPercent { raw_max: 65535 }, access: ReadWrite, mode_req: Any },
     // Semantics per new-lg4ff's README (combine_pedals section): 1 merges
     // the accelerator with the brake, 2 with the clutch, onto the
     // accelerator's own axis; 0 leaves every pedal on its own axis.
@@ -117,6 +120,7 @@ pub const CLASSIC_REGISTRY: &[SettingSpec] = &[
 pub(crate) fn sample_raw(s: &SettingSpec) -> String {
     match s.kind {
         Kind::Percent => "50".into(),
+        Kind::ScaledPercent { .. } => "0".into(),
         Kind::IntRange { min, .. } => min.to_string(),
         Kind::Enum(_) => "0".into(),
         Kind::Toggle { .. } => "0".into(),
@@ -299,13 +303,28 @@ mod classic_registry_tests {
     }
 
     #[test]
-    fn gain_and_autocenter_span_the_full_u16_range() {
+    fn gain_and_autocenter_are_scaled_percent_over_the_full_u16_range() {
         for attr in ["gain", "autocenter"] {
             let s = CLASSIC_REGISTRY.iter().find(|s| s.attr == attr).unwrap();
-            assert!(matches!(s.kind, Kind::IntRange { min: 0, max: 65535, .. }), "{attr}");
-            assert!(s.kind.parse("65535").is_ok(), "{attr}");
+            assert!(matches!(s.kind, Kind::ScaledPercent { raw_max: 65535 }), "{attr}");
+            assert_eq!(s.kind.parse("65535").unwrap(), crate::Value::Percent(100), "{attr}");
+            assert_eq!(s.kind.parse("0").unwrap(), crate::Value::Percent(0), "{attr}");
             assert!(s.kind.parse("65536").is_err(), "{attr}");
             assert!(s.kind.parse("-1").is_err(), "{attr}");
+        }
+    }
+
+    #[test]
+    fn gain_and_autocenter_roundtrip_every_key_percent() {
+        // Writing 0/1/50/99/100% and reading the resulting raw value back
+        // must show the same percent again (the app's round-trip contract).
+        for attr in ["gain", "autocenter"] {
+            let s = CLASSIC_REGISTRY.iter().find(|s| s.attr == attr).unwrap();
+            for pct in [0u8, 1, 50, 99, 100] {
+                let raw = s.kind.format(&crate::Value::Percent(pct)).unwrap();
+                let back = s.kind.parse(&raw).unwrap();
+                assert_eq!(back, crate::Value::Percent(pct), "{attr} at {pct}% via raw {raw}");
+            }
         }
     }
 

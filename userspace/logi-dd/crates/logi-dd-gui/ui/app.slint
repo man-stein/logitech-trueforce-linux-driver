@@ -140,6 +140,13 @@ export component App inherits Window {
     // G923 (see `bridge::wheel_image_index`); set from `Response::Info`'s
     // `model` whenever discovery identifies the connected wheel.
     in property <int> test-wheel-kind: 0;
+    // Whether the connected wheel is a G923 (the classic lg4ff-style
+    // engine): it has no onboard profile store and no LIGHTSYNC strip at
+    // all, so the computer-profiles panel and the LIGHTSYNC preview strip
+    // (neither built from registry rows, so nothing else hides them
+    // automatically) are gated on this instead. Set from `Response::Info`'s
+    // `model`; resets to false while no wheel is known.
+    in property <bool> classic-wheel: false;
     in property <[TestButton]> test-buttons: [];
     in property <string> test-hat: "centered";
     in property <[TestAxis]> test-axes: [];
@@ -174,8 +181,10 @@ export component App inherits Window {
     callback profile-delete(string);
     callback profile-save(string);
     // Whether the desktop-mode Profiles layout (Mode row + computer
-    // profiles) replaces the plain settings list.
-    property <bool> show-computer-profiles: selected-category == profiles-index && !mode-onboard;
+    // profiles) replaces the plain settings list. Never for a G923: it has
+    // no onboard profile store to snapshot into or out of, so offering the
+    // save/apply UI would just fail every action against it.
+    property <bool> show-computer-profiles: selected-category == profiles-index && !mode-onboard && !classic-wheel;
 
     // LIGHTSYNC page extras: the sidebar index of the Leds category (set
     // once from Rust; -1 until then, same guard as `setup-index`) and the
@@ -549,11 +558,13 @@ export component App inherits Window {
 
                 // The LIGHTSYNC page: the preview strip panel above the
                 // composed settings list (Effect, Brightness, Edit slot).
+                // The preview itself never shows for a G923: it has no
+                // LIGHTSYNC strip, so there is nothing for it to preview.
                 if root.selected-category == root.leds-index && !root.no-wheel: VerticalLayout {
                     vertical-stretch: 1;
                     spacing: Theme.gutter;
 
-                    LedPreview {
+                    if !root.classic-wheel: LedPreview {
                         // Natural height only: the settings list below is
                         // the page's one stretching child, so the panel's
                         // rows never drift apart on a tall window.

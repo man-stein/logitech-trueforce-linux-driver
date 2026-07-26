@@ -6,6 +6,20 @@ pub enum Kind {
     Percent,
     IntRange { min: i32, max: i32, step: i32, unit: &'static str },
     Enum(&'static [&'static str]),
+    /// A raw sysfs integer 0..=`raw_max` that is shown and edited as a
+    /// rounded percent 0-100, using the same slider widget and "N%" display
+    /// as [`Kind::Percent`] (see `bridge::kind_tag`/`to_setting_row`, whose
+    /// `Kind::Percent` branches already cover this variant). The sysfs unit
+    /// itself stays raw: the G923's classic `gain`/`autocenter` attrs (0-
+    /// 65535) keep that wire format for Oversteer compatibility, but nobody
+    /// wants to type "42848" when "65%" means the same thing.
+    ///
+    /// Rounding is integer round-half-up both ways
+    /// (`raw = round(pct * raw_max / 100)`, `pct = round(raw * 100 /
+    /// raw_max)`), which round-trips exactly for every percent 0-100 at
+    /// `raw_max = 65535` (the only value in use): writing a given percent
+    /// and reading it back always shows the same percent again.
+    ScaledPercent { raw_max: u32 },
     Toggle { off: &'static str, on: &'static str },
     TextField { max_len: usize },
     RgbStrip { leds: usize },
@@ -44,6 +58,17 @@ impl Kind {
                     return Err(Error::OutOfRange);
                 }
                 Ok(Value::Enum(n as u8))
+            }
+            Kind::ScaledPercent { raw_max } => {
+                if *raw_max == 0 {
+                    return Err(Error::Invalid);
+                }
+                let n: i64 = raw.parse().map_err(|_| Error::Parse(raw.into()))?;
+                if n < 0 || n > i64::from(*raw_max) {
+                    return Err(Error::OutOfRange);
+                }
+                let pct = (n as u64 * 100 + u64::from(*raw_max / 2)) / u64::from(*raw_max);
+                Ok(Value::Percent(pct as u8))
             }
             Kind::Toggle { .. } => match raw {
                 "0" => Ok(Value::Bool(false)),
@@ -119,6 +144,10 @@ impl Kind {
     pub fn format(&self, v: &Value) -> Result<String, Error> {
         Ok(match (self, v) {
             (Kind::Percent, Value::Percent(n)) => n.to_string(),
+            (Kind::ScaledPercent { raw_max }, Value::Percent(n)) => {
+                let raw = (u64::from(*n) * u64::from(*raw_max) + 50) / 100;
+                raw.to_string()
+            }
             (Kind::IntRange { .. }, Value::Int(n)) => n.to_string(),
             (Kind::Enum(_), Value::Enum(n)) => n.to_string(),
             (Kind::Toggle { .. }, Value::Bool(b)) => (if *b { "1" } else { "0" }).into(),
@@ -170,7 +199,9 @@ impl Kind {
     /// Human-readable rendering of a value for display.
     pub fn display(&self, v: &Value) -> String {
         match (self, v) {
-            (Kind::Percent, Value::Percent(n)) => format!("{n}%"),
+            (Kind::Percent, Value::Percent(n)) | (Kind::ScaledPercent { .. }, Value::Percent(n)) => {
+                format!("{n}%")
+            }
             (Kind::IntRange { unit, .. }, Value::Int(n)) => format!("{n} {unit}"),
             (Kind::Enum(variants), Value::Enum(n)) => variants
                 .get(*n as usize)
@@ -212,6 +243,48 @@ mod tests {
         assert_eq!(k.format(&Value::Percent(50)).unwrap(), "50");
         assert!(k.validate(&Value::Percent(100)).is_ok());
         assert!(matches!(k.parse("250"), Err(Error::OutOfRange)));
+    }
+
+    #[test]
+    fn scaled_percent_roundtrips_key_percents_at_the_g923s_span() {
+        // raw = round(pct * 65535 / 100), pct = round(raw * 100 / 65535):
+        // writing any of these percents and reading the resulting raw value
+        // back must show the same percent again.
+        let k = Kind::ScaledPercent { raw_max: 65535 };
+        for pct in [0u8, 1, 50, 99, 100] {
+            let raw = k.format(&Value::Percent(pct)).unwrap();
+            let back = k.parse(&raw).unwrap();
+            assert_eq!(back, Value::Percent(pct), "percent {pct} round-trips via raw {raw}");
+        }
+        // The exact raw values at each end and the midpoint.
+        assert_eq!(k.format(&Value::Percent(0)).unwrap(), "0");
+        assert_eq!(k.format(&Value::Percent(100)).unwrap(), "65535");
+        assert_eq!(k.parse("65535").unwrap(), Value::Percent(100));
+        assert_eq!(k.parse("0").unwrap(), Value::Percent(0));
+    }
+
+    #[test]
+    fn scaled_percent_rounds_raw_values_that_fall_between_percents() {
+        let k = Kind::ScaledPercent { raw_max: 65535 };
+        // 327 is just under the 1% boundary (655.35 raw per percent), 328 is
+        // just over it into 1%.
+        assert_eq!(k.parse("327").unwrap(), Value::Percent(0));
+        assert_eq!(k.parse("328").unwrap(), Value::Percent(1));
+        // Either side of the exact midpoint (32767.5) rounds to 50%.
+        assert_eq!(k.parse("32767").unwrap(), Value::Percent(50));
+        assert_eq!(k.parse("32768").unwrap(), Value::Percent(50));
+        // One below the top raw value still reads back as 100%.
+        assert_eq!(k.parse("65534").unwrap(), Value::Percent(100));
+    }
+
+    #[test]
+    fn scaled_percent_bounds_and_display() {
+        let k = Kind::ScaledPercent { raw_max: 65535 };
+        assert!(matches!(k.parse("65536"), Err(Error::OutOfRange)));
+        assert!(matches!(k.parse("-1"), Err(Error::OutOfRange)));
+        assert!(matches!(k.parse("nope"), Err(Error::Parse(_))));
+        assert_eq!(k.display(&Value::Percent(65)), "65%");
+        assert!(k.validate(&Value::Percent(42)).is_ok());
     }
 
     #[test]

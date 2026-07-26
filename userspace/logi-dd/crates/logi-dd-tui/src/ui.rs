@@ -68,9 +68,15 @@ pub fn draw<S: SysfsIo>(f: &mut Frame, app: &App<S>) {
     // `Category`: it shows the game helpers (logi-ffb, the TrueForce SDK
     // shim) instead of a settings list. Every entry wears its digit-jump
     // number: pressing that digit lands there from anywhere.
+    // A category the connected device has nothing to show for (e.g. a
+    // G923 has no LIGHTSYNC/Profiles rows at all) is left out entirely
+    // rather than listed as an empty page; its digit (i + 1) simply is not
+    // shown, matching `nav_key`'s digit-jump and `move_cat`'s stepping,
+    // which both skip it the same way.
     let mut cats: Vec<ListItem> = Category::ALL
         .iter()
         .enumerate()
+        .filter(|(_, c)| app.category_applicable(**c))
         .map(|(i, c)| {
             let style = if i == app.cat_idx {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
@@ -1391,6 +1397,36 @@ mod tests {
         a.games_scanned = true;
         a.reload();
         a
+    }
+
+    fn g923_app() -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        fs.set("gain", "65535");
+        fs.set("autocenter", "0");
+        fs.set("combine_pedals", "0");
+        let device =
+            logi_dd_core::Device::with_io_and_model(fs, logi_dd_core::WheelModel::G923);
+        let mut a = App::new(device);
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn g923_sidebar_omits_leds_and_profiles() {
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let a = g923_app();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(!text.contains("LIGHTSYNC"), "LIGHTSYNC must be hidden for a G923:\n{text}");
+        assert!(
+            !text.contains("Profiles / mode"),
+            "Profiles / mode must be hidden for a G923:\n{text}"
+        );
+        // The categories with real content, plus Setup, are all still there.
+        for label in ["Force feedback", "Steering", "Pedals", "Info / Testing", "Setup"] {
+            assert!(text.contains(label), "missing {label}:\n{text}");
+        }
     }
 
     #[test]

@@ -223,7 +223,9 @@ impl<S: SysfsIo> ViewModel<S> {
 /// per the spec's own union of widget-shape and kind.
 fn to_value(kind: Kind, input: WidgetInput) -> Result<Value, Error> {
     match (kind, input) {
-        (Kind::Percent, WidgetInput::Slider(n)) => Ok(Value::Percent(u8::try_from(n).map_err(|_| Error::Invalid)?)),
+        (Kind::Percent | Kind::ScaledPercent { .. }, WidgetInput::Slider(n)) => {
+            Ok(Value::Percent(u8::try_from(n).map_err(|_| Error::Invalid)?))
+        }
         (Kind::IntRange { .. }, WidgetInput::Slider(n)) => Ok(Value::Int(i32::try_from(n).map_err(|_| Error::Invalid)?)),
         (Kind::Enum(_), WidgetInput::Choice(i)) => Ok(Value::Enum(i as u8)),
         (Kind::Toggle { .. }, WidgetInput::Switch(b)) => Ok(Value::Bool(b)),

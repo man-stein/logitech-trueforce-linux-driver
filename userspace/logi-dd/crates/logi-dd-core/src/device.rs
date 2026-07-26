@@ -1,7 +1,7 @@
 use crate::error::{map_io_error, Error, Mode};
 use crate::kind::Kind;
 use crate::registry::{CLASSIC_REGISTRY, REGISTRY};
-use crate::setting::{Access, ModeReq, SettingSpec};
+use crate::setting::{Access, Category, ModeReq, SettingSpec};
 use crate::sysfs::{RealSysfs, SysfsIo};
 use crate::value::Value;
 
@@ -155,6 +155,16 @@ impl<S: SysfsIo> Device<S> {
 
     pub fn available(&self, attr: &str) -> bool {
         self.io.exists(attr)
+    }
+
+    /// Whether `cat` has anything to show for this device: at least one row
+    /// in `self.settings()`, or `Info` (its identity rows can be empty on a
+    /// classic wheel, but the page also carries the live input monitor and
+    /// force-feedback test sims, which work off evdev regardless of model).
+    /// Frontends use this to hide a sidebar entry that would otherwise open
+    /// onto a blank page, e.g. a G923 has no `Leds`/`Profiles` rows at all.
+    pub fn category_has_content(&self, cat: Category) -> bool {
+        cat == Category::Info || self.settings().iter().any(|s| s.category == cat)
     }
 
     /// The classic engine (a G923) has no desktop/onboard split at all, so
@@ -375,7 +385,9 @@ mod tests {
         let d = Device::with_io_and_model(fs, WheelModel::G923);
         assert!(same_registry(d.settings(), CLASSIC_REGISTRY));
         assert_eq!(d.read("range").unwrap(), Value::Int(900));
-        assert_eq!(d.read("gain").unwrap(), Value::Int(65535));
+        // gain/autocenter read back as a percent (Kind::ScaledPercent), not
+        // the raw sysfs 0-65535 integer.
+        assert_eq!(d.read("gain").unwrap(), Value::Percent(100));
         assert_eq!(d.read("combine_pedals").unwrap(), Value::Enum(0));
     }
 
@@ -393,6 +405,10 @@ mod tests {
         assert!(matches!(d.write("range", &Value::Int(901)), Err(Error::OutOfRange)));
         d.write("combine_pedals", &Value::Enum(2)).unwrap();
         assert_eq!(d.read("combine_pedals").unwrap(), Value::Enum(2));
+        // gain is written as a percent; the raw sysfs attr underneath still
+        // takes the scaled 0-65535 value (Oversteer compatibility).
+        d.write("gain", &Value::Percent(50)).unwrap();
+        assert_eq!(d.read("gain").unwrap(), Value::Percent(50));
     }
 
     #[test]
@@ -403,6 +419,29 @@ mod tests {
         let d = Device::with_io_and_model(FakeSysfs::new(), WheelModel::G923);
         assert!(!d.settings().iter().any(|s| s.attr.starts_with("wheel_")));
         assert!(d.settings().iter().any(|s| s.attr == "range"));
+    }
+
+    #[test]
+    fn a_g923_has_no_content_for_leds_or_profiles_but_info_always_has_content() {
+        // A classic wheel has no LIGHTSYNC strip or onboard profile slots at
+        // all: those sidebar pages would be blank, so frontends must hide
+        // them rather than open onto nothing. Info always has content
+        // (the live input monitor + test sims work regardless of model).
+        let d = Device::with_io_and_model(FakeSysfs::new(), WheelModel::G923);
+        assert!(!d.category_has_content(Category::Leds));
+        assert!(!d.category_has_content(Category::Profiles));
+        assert!(d.category_has_content(Category::Info));
+        assert!(d.category_has_content(Category::Ffb));
+        assert!(d.category_has_content(Category::Steering));
+        assert!(d.category_has_content(Category::Pedals));
+    }
+
+    #[test]
+    fn a_dd_wheel_has_content_in_every_category() {
+        let d = Device::with_io_and_model(FakeSysfs::new(), WheelModel::Rs50);
+        for cat in Category::ALL {
+            assert!(d.category_has_content(*cat), "{cat:?}");
+        }
     }
 
     #[test]
