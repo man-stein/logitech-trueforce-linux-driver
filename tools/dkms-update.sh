@@ -26,6 +26,8 @@ UDEV_FFB_SRC="$REPO_ROOT/udev/71-logi-ffb-uhid.rules"
 UDEV_FFB_DST="/etc/udev/rules.d/71-logi-ffb-uhid.rules"
 UDEV_G923_SRC="$REPO_ROOT/udev/72-logitech-g923-rebind.rules"
 UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
+UDEV_G923_XBOX_SRC="$REPO_ROOT/udev/73-logitech-g923-xbox-modeswitch.rules"
+UDEV_G923_XBOX_DST="/etc/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
 MODPROBE_SRC="$REPO_ROOT/packaging/modprobe.d/hid-logitech-dd.conf"
 MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
 
@@ -113,6 +115,20 @@ if [ -f "$UDEV_G923_SRC" ]; then
 		udevadm trigger --subsystem-match=hid
 	else
 		echo "udev rule up to date ($UDEV_G923_DST)"
+	fi
+fi
+
+# Same for the G923 Xbox edition (c26d) boot-mode switch: it fires on
+# SUBSYSTEM=="usb" add/change, on the raw USB device, not the HID
+# interfaces the other two rules watch.
+if [ -f "$UDEV_G923_XBOX_SRC" ]; then
+	if ! cmp -s "$UDEV_G923_XBOX_SRC" "$UDEV_G923_XBOX_DST" 2>/dev/null; then
+		echo "== installing udev rule to $UDEV_G923_XBOX_DST =="
+		install -m 0644 "$UDEV_G923_XBOX_SRC" "$UDEV_G923_XBOX_DST"
+		udevadm control --reload
+		udevadm trigger --subsystem-match=usb
+	else
+		echo "udev rule up to date ($UDEV_G923_XBOX_DST)"
 	fi
 fi
 

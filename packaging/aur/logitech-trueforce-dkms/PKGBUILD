@@ -44,7 +44,8 @@ package_logitech-trueforce-dkms() {
 	license=('GPL-2.0-only')
 	depends=('dkms')
 	optdepends=('logi-dd: settings TUI, FFB proxy, simulated TrueForce and shim installer'
-	            'oversteer: GUI to configure wheel settings')
+	            'oversteer: GUI to configure wheel settings'
+	            'usb_modeswitch: switch the G923 Xbox edition (c26d) into PC mode on plug-in')
 	provides=("$_dkmsname")
 	conflicts=("$_dkmsname")
 	install=$pkgbase.install
@@ -83,6 +84,10 @@ package_logitech-trueforce-dkms() {
 	# competing driver that won the bind race, PID-scoped only.
 	install -Dm644 "$_src/udev/72-logitech-g923-rebind.rules" \
 		"$pkgdir/usr/lib/udev/rules.d/72-logitech-g923-rebind.rules"
+	# G923 Xbox edition (c26d) boot-mode switch: needs usb_modeswitch
+	# (optdepends above), a no-op without it.
+	install -Dm644 "$_src/udev/73-logitech-g923-xbox-modeswitch.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
 
 	# softdep ordering hint for the G923 PIDs, plus a narrow blacklist of
 	# the standalone new-lg4ff DKMS fork (see the file for why that one

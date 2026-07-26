@@ -1,9 +1,12 @@
 # udev rules: hand the wheel's sysfs + hidraw nodes, and /dev/uhid for the
 # logi-ffb virtual-device proxy, to the input group. The 72- rule is the
-# G923 (c266/c267/c26e) PID-scoped rebind rule.
+# G923 (c266/c267/c26e) PID-scoped rebind rule; the 73- rule switches the
+# G923 Xbox edition (c26d) into PC mode (c26e) on plug-in, a no-op unless
+# usb_modeswitch (Recommends below) is installed.
 udev/70-logitech-trueforce.rules usr/lib/udev/rules.d/
 udev/71-logi-ffb-uhid.rules usr/lib/udev/rules.d/
 udev/72-logitech-g923-rebind.rules usr/lib/udev/rules.d/
+udev/73-logitech-g923-xbox-modeswitch.rules usr/lib/udev/rules.d/
 # softdep ordering hint for the G923 PIDs, plus a narrow blacklist of the
 # standalone new-lg4ff DKMS fork (files under /etc are auto-flagged as
 # conffiles by debhelper, so no explicit conffiles list is needed).

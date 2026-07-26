@@ -1,0 +1,40 @@
+# G923 Xbox/PC edition (046d:c26d): switch from console/boot mode to PC
+# mode (046d:c26e) on every plug-in.
+#
+# The Xbox edition of the G923 always boots into a console-only USB mode
+# (idProduct c26d). In that mode it has no HID++ interface at all, so it
+# shows up on `lsusb` but creates no /dev/input node - neither this
+# driver nor the in-tree hid-logitech-hidpp can do anything with it. A
+# single USB control message switches it into PC mode (idProduct c26e,
+# HID++), which is the mode udev/72-logitech-g923-rebind.rules and the
+# driver both already handle. The wheel does not remember the switch, so
+# this has to fire on every single plug-in and cold boot, not just once.
+#
+# The switch command and its magic message are the same ones the G920
+# family (046d:c261 console mode -> 046d:c262 PC mode) has used for
+# years: message "0f00010142" to endpoint 1, expecting a response on
+# endpoint 0x81, confirmed by the target settling on device class 0x03
+# (HID). Sourced from batocera's udev/99-wheels.rules and the community
+# four43/logitech-g923-driver install script, both of which apply this
+# exact recipe to the G923 Xbox edition specifically.
+#
+# Known conflict: the out-of-tree "xone" Xbox-controller driver also
+# matches Xbox-branded accessories and can claim 046d:c26d before this
+# rule's RUN gets a chance to run, which blocks the switch outright (the
+# device stays claimed in console mode). If the wheel never reappears as
+# c26e, check whether xone bound to it (see the README's G923 section)
+# and blacklist or unbind it for this device.
+#
+# Gated on usb_modeswitch actually being installed (it is a recommended,
+# not hard, dependency in every packaging channel): some distros ship it
+# in /usr/bin, others in /usr/sbin - the same file via a symlink on
+# usrmerge systems, a genuinely separate package path otherwise -
+# `command -v` finds it wherever it lives instead of us hardcoding one.
+# Without it installed this rule is a silent no-op.
+
+ACTION!="add|change", GOTO="g923_xbox_modeswitch_end"
+SUBSYSTEM!="usb", GOTO="g923_xbox_modeswitch_end"
+
+ATTR{idVendor}=="046d", ATTR{idProduct}=="c26d", PROGRAM=="/bin/sh -c 'command -v usb_modeswitch'", RUN+="/bin/sh -c 'usb_modeswitch -v 046d -p c26d -M 0f00010142 -C 0x03 -m 01 -r 81 2>/dev/null'"
+
+LABEL="g923_xbox_modeswitch_end"

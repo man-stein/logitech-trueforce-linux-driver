@@ -25,6 +25,7 @@ OLD_BLACKLIST_FILE="/etc/modprobe.d/blacklist-hid-logitech-hidpp.conf"
 UDEV_DST="/etc/udev/rules.d/70-logitech-trueforce.rules"
 UDEV_FFB_DST="/etc/udev/rules.d/71-logi-ffb-uhid.rules"
 UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
+UDEV_G923_XBOX_DST="/etc/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
 MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
 WHEEL_PIDS="c276 c272 c268"
 # Steam appids of the Logitech-SDK sims for launch-option checks:
@@ -139,6 +140,11 @@ doctor() {
 		ok "G923 (c266/c267/c26e) rebind rule installed"
 	else
 		wrn "G923 rebind rule missing - the in-tree driver may keep winning the bind race on c266/c267/c26e (run: sudo ./tools/setup.sh)"
+	fi
+	if [ -f "$UDEV_G923_XBOX_DST" ] || [ -f "/usr/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules" ]; then
+		ok "G923 Xbox edition (c26d) mode-switch rule installed"
+	else
+		wrn "G923 Xbox mode-switch rule missing - the Xbox edition will not switch out of console mode (run: sudo ./tools/setup.sh)"
 	fi
 	if [ -f "$MODPROBE_DST" ]; then
 		ok "hid-logitech-dd modprobe.d config installed"

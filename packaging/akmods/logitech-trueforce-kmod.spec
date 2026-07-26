@@ -70,6 +70,9 @@ BuildArch:      noarch
 # keeps "install the driver, get the ecosystem" while still allowing a
 # lean module-only install.
 Recommends:     logi-dd
+# Switches the G923 Xbox edition (c26d) into PC mode (c26e) on plug-in;
+# the udev rule that runs it is a no-op without the binary present.
+Recommends:     usb_modeswitch
 
 %description -n %{kmod_name}-kmod-common
 udev rules granting the "input" group read/write access to the wheel's
@@ -81,6 +84,7 @@ force-feedback device).
 %{_prefix}/lib/udev/rules.d/70-logitech-trueforce.rules
 %{_prefix}/lib/udev/rules.d/71-logi-ffb-uhid.rules
 %{_prefix}/lib/udev/rules.d/72-logitech-g923-rebind.rules
+%{_prefix}/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules
 %config(noreplace) %{_sysconfdir}/modprobe.d/hid-logitech-dd.conf
 
 # Userspace companions are ordinary compiled binaries (arch-specific, not
@@ -180,6 +184,10 @@ install -D -m 0644 udev/71-logi-ffb-uhid.rules \
     "%{buildroot}%{_prefix}/lib/udev/rules.d/71-logi-ffb-uhid.rules"
 install -D -m 0644 udev/72-logitech-g923-rebind.rules \
     "%{buildroot}%{_prefix}/lib/udev/rules.d/72-logitech-g923-rebind.rules"
+# G923 Xbox edition (c26d) boot-mode switch: needs usb_modeswitch
+# (Recommends above), a no-op without it.
+install -D -m 0644 udev/73-logitech-g923-xbox-modeswitch.rules \
+    "%{buildroot}%{_prefix}/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
 install -D -m 0644 packaging/modprobe.d/hid-logitech-dd.conf \
     "%{buildroot}%{_sysconfdir}/modprobe.d/hid-logitech-dd.conf"
 

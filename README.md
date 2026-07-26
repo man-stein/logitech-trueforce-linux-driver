@@ -53,7 +53,12 @@ Six pieces, all built from this repository:
   three G923 PIDs specifically, a udev rule pre-empts the in-tree driver if it
   wins the initial bind race (unbind, then bind this driver); every other
   Logitech device it serves - G29/G27/DFGT/G920, mice, keyboards, receivers -
-  is untouched.
+  is untouched. The G923 **Xbox edition** also boots into a console-only USB
+  mode (`046d:c26d`) with no input node at all; install `usb_modeswitch`
+  (a recommended, not required, package) and a udev rule switches it into
+  PC mode (`046d:c26e`) automatically on every plug-in. If it never
+  switches, the out-of-tree `xone` Xbox-controller driver may have claimed
+  the device first and blocked it.
 
 - **logi-dd**, a terminal settings app: a native-Linux stand-in for the parts of
   G HUB that configure the wheel, with typed, validated edits and a G HUB-style
