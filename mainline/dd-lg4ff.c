@@ -703,9 +703,10 @@ struct dd_lg4ff_usbhid_device {
  * onto it every tick, which only makes the stall worse.
  *
  * new-lg4ff's LED calibration output (its CONFIG_LEDS_CLASS block, gated on
- * the ffb_leds param) is intentionally not ported here: it needs
- * dd_lg4ff_set_leds(), which does not exist yet, and ffb_leds/profile are
- * not among this task's module params.
+ * the ffb_leds param) is intentionally not ported here: dd_lg4ff_set_leds()
+ * now exists (see below) for the rev-LED classdevs, but ffb_leds/profile
+ * are not among this task's module params, so this timer never drives the
+ * LEDs itself.
  */
 static __always_inline int dd_lg4ff_timer(struct dd_lg4ff_device_entry *entry)
 {
@@ -1537,10 +1538,164 @@ int dd_lg4ff_raw_event(struct hid_device *hdev, struct hid_report *report, u8 *d
 	return 0;
 }
 
+#ifdef CONFIG_LEDS_CLASS
+
+/*
+ * Rev-LED command sender, ported verbatim from new-lg4ff (hid-lg4ff.c:
+ * 2044-2062). cmd[0]=0xf8, cmd[1]=0x12 addresses the classic wheel's LED
+ * bank, the same command the G25/G27/G29 use; this is unrelated to the
+ * HID++ 0x807A feature the native-mode DD wheels expose.
+ */
+static void dd_lg4ff_set_leds(struct hid_device *hid, u8 leds)
+{
+	struct dd_lg4ff_device_entry *entry;
+	u8 cmd[7];
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return;
+	}
+
+	cmd[0] = 0xf8;
+	cmd[1] = 0x12;
+	cmd[2] = leds;
+	cmd[3] = 0x00;
+	cmd[4] = 0x00;
+	cmd[5] = 0x00;
+	cmd[6] = 0x00;
+	dd_lg4ff_send_cmd(entry, cmd);
+}
+
+/*
+ * led_classdev brightness callbacks, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:2064-2115). Each of the 5 registered LEDs maps to one bit
+ * of entry->wdata.led_state; toggling one re-sends the whole state with
+ * dd_lg4ff_set_leds(). The reference gates the hardware write on its
+ * ffb_leds module param (skipping it while the FFB-level calibration
+ * display owns the LEDs); that param is not ported here, so the write
+ * always happens.
+ */
+static void dd_lg4ff_led_set_brightness(struct led_classdev *led_cdev,
+			enum led_brightness value)
+{
+	struct device *dev = led_cdev->dev->parent;
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+	int i, state = 0;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return;
+	}
+
+	for (i = 0; i < 5; i++) {
+		if (led_cdev != entry->wdata.led[i])
+			continue;
+		state = (entry->wdata.led_state >> i) & 1;
+		if (value == LED_OFF && state) {
+			entry->wdata.led_state &= ~(1 << i);
+			dd_lg4ff_set_leds(hid, entry->wdata.led_state);
+		} else if (value != LED_OFF && !state) {
+			entry->wdata.led_state |= 1 << i;
+			dd_lg4ff_set_leds(hid, entry->wdata.led_state);
+		}
+		break;
+	}
+}
+
+static enum led_brightness dd_lg4ff_led_get_brightness(struct led_classdev *led_cdev)
+{
+	struct device *dev = led_cdev->dev->parent;
+	struct hid_device *hid = to_hid_device(dev);
+	struct dd_lg4ff_device_entry *entry;
+	int i, value = 0;
+
+	entry = dd_lg4ff_get_entry(hid);
+	if (entry == NULL) {
+		return -EINVAL;
+	}
+
+	for (i = 0; i < 5; i++)
+		if (led_cdev == entry->wdata.led[i]) {
+			value = (entry->wdata.led_state >> i) & 1;
+			break;
+		}
+
+	return value ? LED_FULL : LED_OFF;
+}
+
+/*
+ * LED class device registration, ported verbatim from new-lg4ff
+ * (hid-lg4ff.c:2117-2171). Registers 5 LED classdevs named
+ * "<devname>::RPM1".."RPM5" and stores them in entry->wdata.led[]; a
+ * registration failure for any of them unwinds and unregisters whatever
+ * was already registered, then lets the driver continue without LEDs.
+ * Called from dd_lg4ff_init() below, once, unconditionally, since our
+ * device table (dd_lg4ff_devices[]) carries only the G923.
+ */
+static void dd_lg4ff_init_leds(struct hid_device *hid, struct dd_lg4ff_device_entry *entry, int i)
+{
+	int error, j;
+
+	/* register led subsystem - G27/G29/G923 only */
+	entry->wdata.led_state = 0;
+	for (j = 0; j < 5; j++)
+		entry->wdata.led[j] = NULL;
+
+	{
+		struct led_classdev *led;
+		size_t name_sz;
+		char *name;
+
+		dd_lg4ff_set_leds(hid, 0);
+
+		name_sz = strlen(dev_name(&hid->dev)) + 8;
+
+		for (j = 0; j < 5; j++) {
+			led = kzalloc(sizeof(struct led_classdev)+name_sz, GFP_KERNEL);
+			if (!led) {
+				hid_err(hid, "can't allocate memory for LED %d\n", j);
+				goto err_leds;
+			}
+
+			name = (void *)(&led[1]);
+			snprintf(name, name_sz, "%s::RPM%d", dev_name(&hid->dev), j+1);
+			led->name = name;
+			led->brightness = 0;
+			led->max_brightness = 1;
+			led->brightness_get = dd_lg4ff_led_get_brightness;
+			led->brightness_set = dd_lg4ff_led_set_brightness;
+
+			entry->wdata.led[j] = led;
+			error = led_classdev_register(&hid->dev, led);
+
+			if (error) {
+				hid_err(hid, "failed to register LED %d. Aborting.\n", j);
+err_leds:
+				/* Deregister LEDs (if any) */
+				for (j = 0; j < 5; j++) {
+					led = entry->wdata.led[j];
+					entry->wdata.led[j] = NULL;
+					if (!led)
+						continue;
+					led_classdev_unregister(led);
+					kfree(led);
+				}
+				goto out;	/* Let the driver continue without LEDs */
+			}
+		}
+	}
+out:
+	return;
+}
+#endif
+
 /*
  * dd_lg4ff_init() / dd_lg4ff_deinit(), ported from new-lg4ff's lg4ff_init()
- * / lg4ff_deinit() (hid-lg4ff.c:2275-2571), reduced to FFB setup: the LEDs
- * block (hid-lg4ff.c:2400-2409, 2456-2462, 2545-2563) is dropped, and the
+ * / lg4ff_deinit() (hid-lg4ff.c:2275-2571), reduced to FFB setup plus the
+ * rev-LED block (hid-lg4ff.c:2400-2409, 2545-2563; see dd_lg4ff_init_leds()
+ * above). The ffb_leds sysfs attribute and its FFB-level calibration
+ * display (hid-lg4ff.c:2021-2042, 2456-2462) are not ported, so the
  * sysfs-file creation/removal blocks (hid-lg4ff.c:2411-2462, 2517-2541) are
  * reduced to the four attributes defined just above.
  *
@@ -1671,6 +1826,11 @@ int dd_lg4ff_init(struct hid_device *hdev)
 		dev->ff->set_autocenter(dev, 0);
 	}
 
+#ifdef CONFIG_LEDS_CLASS
+	entry->has_leds = 1;
+	dd_lg4ff_init_leds(hdev, entry, i);
+#endif
+
 	/* Create sysfs interface */
 	error = device_create_file(&hdev->dev, &dd_lg4ff_attr_combine_pedals);
 	if (error)
@@ -1748,6 +1908,23 @@ void dd_lg4ff_deinit(struct hid_device *hdev)
 	hrtimer_cancel(&entry->hrtimer);
 
 	dd_lg4ff_stop_effects(entry);
+
+#ifdef CONFIG_LEDS_CLASS
+	if (entry->has_leds) {
+		int j;
+		struct led_classdev *led;
+
+		/* Deregister LEDs (if any) */
+		for (j = 0; j < 5; j++) {
+			led = entry->wdata.led[j];
+			entry->wdata.led[j] = NULL;
+			if (!led)
+				continue;
+			led_classdev_unregister(led);
+			kfree(led);
+		}
+	}
+#endif
 
 	*slot = NULL;
 	kfree(entry);
