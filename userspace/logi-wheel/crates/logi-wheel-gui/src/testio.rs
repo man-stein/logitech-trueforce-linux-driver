@@ -23,8 +23,9 @@ use logi_wheel_core::evtest::{self, TestEvent, EVENT_SIZE};
 /// One UI push worth of live wheel state. `buttons` is parallel to
 /// whichever code list `Reader::start` was given (see
 /// `evtest::button_codes_for_model`, model-dependent: the RS50/G PRO
-/// diagram's `WHEEL_BUTTONS` codes, or the G923's own known ranges);
-/// `axes` holds throttle/brake/clutch/handbrake raw values in that order.
+/// diagram's `WHEEL_BUTTONS` codes, or the G923's own captured
+/// `G923_BUTTONS` codes); `axes` holds throttle/brake/clutch/handbrake raw
+/// values in that order.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub steering_raw: i32,
@@ -465,8 +466,9 @@ mod tests {
 
     #[test]
     fn apply_event_tracks_g923_only_codes_the_rs50_table_would_drop() {
-        // 0x12c and 0x2c0 are both outside WHEEL_BUTTONS (the RS50 diagram
-        // table) but inside the G923's own known ranges; with the G923
+        // 0x2c3 and 0x2c4 (the G923's Plus/Minus buttons, live-captured
+        // 2026-07-27) are not in WHEEL_BUTTONS at all - the RS50 has no
+        // such buttons - but they are real G923 buttons; with the G923
         // code list they must track, not be silently ignored.
         fn ev(type_: u16, code: u16, value: i32) -> [u8; EVENT_SIZE] {
             let mut b = [0u8; EVENT_SIZE];
@@ -478,7 +480,11 @@ mod tests {
         let codes: Vec<u16> =
             logi_wheel_core::evtest::button_codes_for_model(logi_wheel_core::WheelModel::G923);
         let mut s = Snapshot { buttons: vec![false; codes.len()], ..Snapshot::default() };
-        assert!(apply_event(&mut s, &ev(1, 0x12c, 1), &codes), "tracked on a G923");
-        assert!(apply_event(&mut s, &ev(1, 0x2c0, 1), &codes), "tracked on a G923");
+        assert!(apply_event(&mut s, &ev(1, 0x2c3, 1), &codes), "tracked on a G923");
+        assert!(apply_event(&mut s, &ev(1, 0x2c4, 1), &codes), "tracked on a G923");
+        // A descriptor-gap code the live G923 never actually sends is now
+        // correctly absent from its own code list, so it is ignored - the
+        // same as any code neither the wheel nor the code list knows.
+        assert!(!apply_event(&mut s, &ev(1, 0x12c, 1), &codes), "gap code not tracked");
     }
 }

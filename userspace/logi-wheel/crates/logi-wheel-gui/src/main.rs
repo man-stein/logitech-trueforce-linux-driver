@@ -716,11 +716,11 @@ fn overlay_debug_from(new: Option<String>, old: Option<String>) -> Option<f32> {
 /// `start_test_monitor` resolved when it opened the reader (`snap.buttons`
 /// is parallel to `evtest::button_codes_for_model(model)`, not always
 /// `WHEEL_BUTTONS`): RS50/G PRO get their captured diagram labels, a G923
-/// gets the honest generic "Button N" fallback (see
+/// gets its own live-captured `evtest::G923_BUTTONS` labels (see
 /// `evtest::button_label_for_model`), never the RS50's labels for a
 /// button it does not have (e.g. a G923 has no left encoder at all, but
 /// its own 0x2c8 - the RS50's "L Encoder CW" - is a real, different
-/// button on it).
+/// button on it: the G923's PS button).
 fn apply_test_snapshot(app: &App, snap: &testio::Snapshot, model: WheelModel) {
     let range = app.get_test_range().max(1) as u32;
     let debug = overlay_debug();

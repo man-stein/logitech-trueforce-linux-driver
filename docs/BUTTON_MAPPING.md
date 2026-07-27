@@ -6,9 +6,9 @@ DirectInput, so bindings stay consistent across platforms.
 
 This is the reference for binding controls in a game. The wire-level bitmask
 (which report bit encodes which button) is in
-[PROTOCOL_SPECIFICATION.md](PROTOCOL_SPECIFICATION.md). The G923 is not
-covered here: it reports its own classic button layout straight from its HID
-descriptor.
+[PROTOCOL_SPECIFICATION.md](PROTOCOL_SPECIFICATION.md). The G923 has its own
+table below: it reports its own classic button layout straight from its HID
+descriptor, not the RS50/G PRO one.
 
 ![RS50 button layout](images/rs-wheel-hub-button-layout.png)
 
@@ -49,3 +49,40 @@ The D-pad reports as a hat switch (`ABS_HAT0X` / `ABS_HAT0Y`), not as four
 buttons - diagram callout "D".
 
 Indices 12 to 20 are gaps in the HID descriptor (unused).
+
+## G923
+
+The G923's own button layout, hardware-captured 2026-07-27 by a guided live
+capture (every physical button pressed in turn, its joystick index
+recorded) on a PS-edition unit (PID 0xc266). It reports the same sequential
+DirectInput indexing as the RS50/G PRO above, but a different set of
+buttons: no G1/GL/GR, and only one dial (right hand; the G923 has no left
+encoder at all).
+
+| Index | Button |
+|-------|--------|
+| 0 | X |
+| 1 | Square |
+| 2 | Circle |
+| 3 | Triangle |
+| 4 | Right Paddle |
+| 5 | Left Paddle |
+| 6 | R2 |
+| 7 | L2 |
+| 8 | Share |
+| 9 | Options |
+| 10 | R3 |
+| 11 | L3 |
+| 19 | Plus (Up) |
+| 20 | Minus (Down) |
+| 21 | Dial CW |
+| 22 | Dial CCW |
+| 23 | Dial Push |
+| 24 | PS |
+
+Indices 12 to 18 are gaps in the HID descriptor (unused). Indices 19-20
+(Plus/Minus) are real buttons on the G923, unlike the RS50/G PRO, which
+have no buttons there at all.
+
+The D-pad reports as a hat switch (`ABS_HAT0X` / `ABS_HAT0Y`), not as four
+buttons, same as the RS50/G PRO.

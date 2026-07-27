@@ -202,7 +202,7 @@ pub(crate) fn info_content_height<S: SysfsIo>(app: &App<S>) -> u16 {
         None => 7,
         // The gauges block (13) plus the button tester: the recent-press
         // line, one line per wheel button, and two borders. The button
-        // count is model-aware (a G923 shows 25 generic-labelled buttons,
+        // count is model-aware (a G923 shows its own 18 captured buttons,
         // not the RS50 diagram's 21; see `evtest::button_codes_for_model`),
         // so this must match whatever `draw_monitor` actually renders.
         Some(_) => {
@@ -1058,9 +1058,9 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
     // with the recent-press history on top. The code list and labels are
     // model-aware (see `evtest::button_codes_for_model`/
     // `button_name_for_model`): RS50/G PRO keep their captured diagram
-    // labels, a G923 gets the honest generic "Button N" fallback instead
-    // of the RS50's - wrong for it - labels (e.g. its own 0x2c8 is not
-    // the RS50's left encoder, which the G923 does not have).
+    // labels, a G923 gets its own captured `G923_BUTTONS` labels instead
+    // of the RS50's - wrong for it - labels (e.g. its own 0x2c8 is its PS
+    // button, not the RS50's left encoder, which the G923 does not have).
     let model = app.device.model();
     let recent = if t.recent.is_empty() {
         "-".to_string()
