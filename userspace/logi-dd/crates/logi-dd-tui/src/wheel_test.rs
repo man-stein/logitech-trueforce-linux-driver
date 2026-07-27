@@ -14,7 +14,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use logi_dd_core::evtest::{self, TestEvent, WheelInput, EVENT_SIZE};
 
@@ -36,6 +36,19 @@ impl SimKind {
             SimKind::Texture => "TrueForce texture",
         }
     }
+}
+
+/// How long a confirmed sim waits before it actually starts, giving the
+/// user time to get hands on (or off) the wheel.
+const SIM_COUNTDOWN: Duration = Duration::from_secs(5);
+
+/// A confirmed sim ('y' after `request_sim`'s prompt) waiting out
+/// `SIM_COUNTDOWN` before [`TestView::tick_countdown`] actually starts it.
+/// Cancellable the whole time ('s', the same key that stops a playing
+/// sim); cancelling means it never starts at all.
+struct SimCountdown {
+    kind: SimKind,
+    started: Instant,
 }
 
 /// The Test view's whole state: discovery result, the monitor's open fd
@@ -65,6 +78,9 @@ pub struct TestView {
     pub axes: [i32; 4],
     /// A sim waiting for its y/n confirmation.
     pub confirm: Option<SimKind>,
+    /// A confirmed sim riding out its countdown before it actually starts
+    /// (see `SimCountdown`); `None` while nothing is counting down.
+    countdown: Option<SimCountdown>,
     /// Set while a sim thread plays; cleared by the thread itself.
     sim_running: Arc<AtomicBool>,
     /// Set by `stop_sim` ('s' while playing); the sim thread polls it and
@@ -87,6 +103,7 @@ impl Default for TestView {
             hat: (0, 0),
             axes: [0; 4],
             confirm: None,
+            countdown: None,
             sim_running: Arc::new(AtomicBool::new(false)),
             sim_cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -253,6 +270,44 @@ impl TestView {
         }
         self.sim_cancel.store(true, Ordering::Relaxed);
         true
+    }
+
+    /// Arm the countdown after 'y' confirms a sim: nothing plays yet, the
+    /// wheel does not move, until `tick_countdown` runs it out.
+    pub fn arm_countdown(&mut self, kind: SimKind) {
+        self.countdown = Some(SimCountdown { kind, started: Instant::now() });
+    }
+
+    /// Whether a countdown is currently ticking down.
+    pub fn countdown_active(&self) -> bool {
+        self.countdown.is_some()
+    }
+
+    /// Seconds left in the countdown's whole-second display (5 down to 1;
+    /// the tick that would show 0 fires the sim instead, via
+    /// `tick_countdown`). `None` while nothing is counting down.
+    pub fn countdown_seconds_left(&self) -> Option<u64> {
+        self.countdown.as_ref().map(|c| {
+            let elapsed = c.started.elapsed().as_secs();
+            SIM_COUNTDOWN.as_secs().saturating_sub(elapsed).max(1)
+        })
+    }
+
+    /// Cancel a ticking countdown ('s' in the Info view, the same key that
+    /// stops an already-playing sim): the sim never starts. True when a
+    /// countdown was actually cancelled, false for a no-op.
+    pub fn cancel_countdown(&mut self) -> bool {
+        self.countdown.take().is_some()
+    }
+
+    /// Advance the countdown; once `SIM_COUNTDOWN` has elapsed, starts the
+    /// confirmed sim (via `spawn_sim`) and returns the status line to
+    /// show. Run every main-loop tick while `countdown_active()`; a no-op
+    /// (returns `None`) before the deadline or with nothing armed.
+    pub fn tick_countdown(&mut self) -> Option<String> {
+        let kind = self.countdown.as_ref().filter(|c| c.started.elapsed() >= SIM_COUNTDOWN)?.kind;
+        self.countdown = None;
+        Some(self.spawn_sim(kind))
     }
 }
 
@@ -500,6 +555,45 @@ mod tests {
         v.sim_running.store(true, Ordering::Relaxed);
         assert!(v.stop_sim());
         assert!(v.sim_cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn countdown_ticks_down_and_cancels_without_ever_playing() {
+        let mut v = TestView::default();
+        assert!(!v.countdown_active());
+        assert_eq!(v.countdown_seconds_left(), None);
+
+        v.arm_countdown(SimKind::ConstantForce);
+        assert!(v.countdown_active());
+        assert_eq!(v.countdown_seconds_left(), Some(5));
+        assert!(v.tick_countdown().is_none(), "deadline not reached yet");
+        assert!(!v.sim_running(), "the wheel has not moved");
+
+        assert!(v.cancel_countdown(), "was actually counting down");
+        assert!(!v.countdown_active());
+        assert_eq!(v.countdown_seconds_left(), None);
+        assert!(!v.cancel_countdown(), "a second cancel is a no-op");
+        assert!(v.tick_countdown().is_none(), "nothing armed after cancel");
+        assert!(!v.sim_running(), "cancelling never starts the sim");
+    }
+
+    #[test]
+    fn countdown_fires_the_sim_once_its_deadline_passes() {
+        let mut v = TestView {
+            dev: Some(WheelInput {
+                event_path: "/nonexistent/event99".to_string(),
+                name: "Logitech RS50 Base".to_string(),
+            }),
+            ..TestView::default()
+        };
+        v.arm_countdown(SimKind::Texture);
+        // Backdate the start past the deadline instead of sleeping out the
+        // real 5 s in a unit test.
+        v.countdown.as_mut().unwrap().started =
+            Instant::now() - SIM_COUNTDOWN - Duration::from_millis(10);
+        let status = v.tick_countdown().expect("deadline has passed");
+        assert!(status.contains("playing"), "status: {status}");
+        assert!(!v.countdown_active(), "cleared once it fires");
     }
 
     #[test]

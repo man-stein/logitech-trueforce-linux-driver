@@ -121,6 +121,15 @@ export component InfoPage inherits Rectangle {
 
     // The confirm dialog's state: 0 closed, 1 constant force, 2 texture.
     private property <int> confirm-kind: 0;
+    // The post-Continue countdown's state: 0 not counting, 1/2 which sim
+    // is about to fire (same meaning as `confirm-kind`). Pressing Continue
+    // moves from `confirm-kind` into this instead of firing the sim
+    // immediately, so the user has a few seconds to get hands on (or off)
+    // the wheel; cancelling here (`countdown-kind = 0`) means the sim
+    // never fires at all, same guarantee the confirm dialog itself makes.
+    private property <int> countdown-kind: 0;
+    // Seconds left in the countdown, ticked by `countdown-timer` below.
+    private property <int> countdown-seconds: 5;
 
     background: transparent;
 
@@ -472,6 +481,17 @@ export component InfoPage inherits Rectangle {
                                     color: Theme.text-color;
                                 }
                                 Text {
+                                    // Fixed width so the row's geometry
+                                    // never moves as the hat state changes
+                                    // ("centered" vs "down-right", the
+                                    // longest label `evtest::hat_label`
+                                    // produces): the whole live monitor
+                                    // used to jump horizontally on every
+                                    // D-pad change before this was pinned.
+                                    // Left-aligned within the fixed box, so
+                                    // shorter labels never drift right.
+                                    width: 90px;
+                                    horizontal-alignment: left;
                                     text: root.hat;
                                     font-size: 12px;
                                     font-weight: 700;
@@ -499,6 +519,11 @@ export component InfoPage inherits Rectangle {
                             font-weight: 700;
                             color: Theme.text-color;
                         }
+                        // Label and value columns are both fixed-width
+                        // (80px / 46px) so a value's digit count (0 vs
+                        // 65535) never changes this row's, or the bar's,
+                        // geometry - same stabilization as the D-pad row
+                        // above.
                         for axis in root.axes: HorizontalLayout {
                             spacing: 8px;
                             Text {
@@ -552,12 +577,12 @@ export component InfoPage inherits Rectangle {
                             spacing: 8px;
                             Button {
                                 text: "Simulate force feedback";
-                                enabled: root.available && !root.sim-running && root.confirm-kind == 0;
+                                enabled: root.available && !root.sim-running && root.confirm-kind == 0 && root.countdown-kind == 0;
                                 clicked => { root.confirm-kind = 1; }
                             }
                             Button {
                                 text: "Simulate TrueForce texture";
-                                enabled: root.available && !root.sim-running && root.confirm-kind == 0;
+                                enabled: root.available && !root.sim-running && root.confirm-kind == 0 && root.countdown-kind == 0;
                                 clicked => { root.confirm-kind = 2; }
                             }
                         }
@@ -614,9 +639,29 @@ export component InfoPage inherits Rectangle {
         }
     }
 
-    // Confirm dialog, painted over the whole page. No simulation ever
-    // fires without pressing Continue here.
-    if root.confirm-kind != 0: Rectangle {
+    // Ticks the post-Continue countdown down to 0, then fires the sim
+    // that was confirmed and stops itself (`countdown-kind = 0`). Only
+    // running while a countdown is actually in progress.
+    countdown-timer := Timer {
+        interval: 1s;
+        running: root.countdown-kind != 0;
+        triggered() => {
+            if (root.countdown-seconds > 1) {
+                root.countdown-seconds -= 1;
+            } else if (root.countdown-kind == 1) {
+                root.countdown-kind = 0;
+                root.sim-constant();
+            } else {
+                root.countdown-kind = 0;
+                root.sim-texture();
+            }
+        }
+    }
+
+    // Confirm dialog, then the countdown, painted over the whole page. No
+    // simulation ever fires without pressing Continue AND riding out the
+    // countdown below - cancelling either one stops it from ever firing.
+    if root.confirm-kind != 0 || root.countdown-kind != 0: Rectangle {
         background: Theme.scrim;
 
         // Swallow clicks outside the dialog panel.
@@ -636,19 +681,19 @@ export component InfoPage inherits Rectangle {
                 padding: 18px;
                 spacing: 12px;
 
-                Text {
+                if root.confirm-kind != 0: Text {
                     text: root.confirm-kind == 1 ? "Simulate force feedback" : "Simulate TrueForce texture";
                     font-size: 15px;
                     font-weight: 700;
                     color: Theme.text-color;
                 }
-                Text {
+                if root.confirm-kind != 0: Text {
                     text: "The wheel WILL move. Keep hands and objects clear of the rim. Continue?";
                     font-size: 13px;
                     color: Theme.text-color;
                     wrap: word-wrap;
                 }
-                HorizontalLayout {
+                if root.confirm-kind != 0: HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
                     Button {
@@ -659,13 +704,34 @@ export component InfoPage inherits Rectangle {
                         text: "Continue";
                         primary: true;
                         clicked => {
-                            if (root.confirm-kind == 1) {
-                                root.sim-constant();
-                            } else {
-                                root.sim-texture();
-                            }
+                            root.countdown-kind = root.confirm-kind;
+                            root.countdown-seconds = 5;
                             root.confirm-kind = 0;
                         }
+                    }
+                }
+
+                // The countdown itself: a few seconds to get hands on (or
+                // off) the wheel before the force actually starts.
+                // Cancelling here means the sim never fires.
+                if root.countdown-kind != 0: Text {
+                    text: root.countdown-kind == 1 ? "Simulate force feedback" : "Simulate TrueForce texture";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: Theme.text-color;
+                }
+                if root.countdown-kind != 0: Text {
+                    text: "Starting in \{root.countdown-seconds}... Keep hands and objects clear of the rim.";
+                    font-size: 13px;
+                    color: Theme.text-color;
+                    wrap: word-wrap;
+                }
+                if root.countdown-kind != 0: HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.countdown-kind = 0; }
                     }
                 }
             }

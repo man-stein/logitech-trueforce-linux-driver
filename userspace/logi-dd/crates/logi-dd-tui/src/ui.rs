@@ -201,8 +201,13 @@ pub(crate) fn info_content_height<S: SysfsIo>(app: &App<S>) -> u16 {
         // The empty state: 5 text lines plus the block's two borders.
         None => 7,
         // The gauges block (13) plus the button tester: the recent-press
-        // line, one line per wheel button, and two borders.
-        Some(_) => 13 + 3 + logi_dd_core::evtest::WHEEL_BUTTONS.len() as u16,
+        // line, one line per wheel button, and two borders. The button
+        // count is model-aware (a G923 shows 25 generic-labelled buttons,
+        // not the RS50 diagram's 21; see `evtest::button_codes_for_model`),
+        // so this must match whatever `draw_monitor` actually renders.
+        Some(_) => {
+            13 + 3 + logi_dd_core::evtest::button_codes_for_model(app.device.model()).len() as u16
+        }
     };
     // The identity block renders regardless of `no_wheel` now (see
     // `draw_settings`), so its height always counts here too.
@@ -1025,6 +1030,16 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]));
+    // A confirmed sim's countdown, re-read fresh every frame (the Info
+    // page polls at ~30 Hz while the monitor is live, so this ticks down
+    // visibly in real time): the wheel does not move until it reaches the
+    // sim itself, and 's' cancels it outright.
+    if let Some(secs) = t.countdown_seconds_left() {
+        top.push(Line::from(Span::styled(
+            format!("Starting in {secs}... keep hands and objects clear of the rim (s cancels)"),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+    }
     if t.sim_running() {
         top.push(Line::from(Span::styled(
             "force playing... (25%, 2 s; s to stop)",
@@ -1040,18 +1055,29 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
         .render(rows[0], buf);
 
     // The button tester: every wheel button, reverse-video while held,
-    // with the recent-press history on top.
+    // with the recent-press history on top. The code list and labels are
+    // model-aware (see `evtest::button_codes_for_model`/
+    // `button_name_for_model`): RS50/G PRO keep their captured diagram
+    // labels, a G923 gets the honest generic "Button N" fallback instead
+    // of the RS50's - wrong for it - labels (e.g. its own 0x2c8 is not
+    // the RS50's left encoder, which the G923 does not have).
+    let model = app.device.model();
     let recent = if t.recent.is_empty() {
         "-".to_string()
     } else {
-        t.recent.iter().map(|c| evtest::button_name(*c)).collect::<Vec<_>>().join(", ")
+        t.recent
+            .iter()
+            .map(|c| evtest::button_name_for_model(model, *c))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let mut items: Vec<ListItem> = vec![ListItem::new(Line::from(vec![
         Span::styled("Last pressed: ", Style::default().fg(Color::Gray)),
         Span::raw(recent),
     ]))];
-    items.extend(evtest::WHEEL_BUTTONS.iter().map(|(code, label)| {
-        let held = t.pressed.contains(code);
+    items.extend(evtest::button_codes_for_model(model).into_iter().map(|code| {
+        let label = evtest::button_name_for_model(model, code);
+        let held = t.pressed.contains(&code);
         let mut item = ListItem::new(format!("  {label:<18}"));
         if held {
             item = item.style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));

@@ -586,27 +586,53 @@ pub fn to_setting_row_with_error(row: &Row, error: Option<&str>) -> SettingRow {
     sr
 }
 
-/// Sidebar labels for `Category::ALL`, in the same order the index the
-/// sidebar reports (`select-category(index)`) is resolved against.
-pub fn category_labels_model() -> slint::ModelRc<slint::SharedString> {
+/// Which of `Category::ALL` belong in the sidebar for a wheel of `model`:
+/// every category with content (`WheelModel::category_has_content`), in
+/// `Category::ALL`'s order. A G923 has no Leds/Profiles rows at all (see
+/// `CLASSIC_REGISTRY`), so both are dropped; a DD wheel (`Rs50`/`GPro`/
+/// `Unknown`) keeps every category, unchanged from before this function
+/// existed.
+///
+/// This is the single source of truth the sidebar's labels and its index
+/// mapping (`category_at`/`index_of` below) are both built from, so the two
+/// can never disagree about which row is at which index - the failure mode
+/// task 22 ran into when it left the labels list as the untouched
+/// `Category::ALL` and tried to hide widgets after the fact instead.
+pub fn visible_categories(model: WheelModel) -> Vec<Category> {
+    Category::ALL.iter().copied().filter(|c| model.category_has_content(*c)).collect()
+}
+
+/// Sidebar labels for `visible`, in the order the index the sidebar reports
+/// (`select-category(index)`) is resolved against. `visible` is normally
+/// `visible_categories(model)`; callers must use the same list for this and
+/// for `category_at`/`index_of`, or the index mapping and the labels drift
+/// apart.
+pub fn category_labels_model(visible: &[Category]) -> slint::ModelRc<slint::SharedString> {
     let labels: Vec<slint::SharedString> =
-        Category::ALL.iter().map(|c| slint::SharedString::from(c.label())).collect();
+        visible.iter().map(|c| slint::SharedString::from(c.label())).collect();
     slint::ModelRc::new(slint::VecModel::from(labels))
 }
 
 /// Resolve a sidebar row index (as the Slint `select-category` callback
-/// hands it back) to the `Category` it represents. Slint only ever reports
-/// an index the `for` loop actually produced, but a negative or
-/// past-the-end value is clamped rather than indexed into a panic.
-pub fn category_at(index: i32) -> Category {
-    let last = Category::ALL.len() as i32 - 1;
-    Category::ALL[index.clamp(0, last) as usize]
+/// hands it back) to the `Category` it represents, against `visible` (see
+/// `category_labels_model`). Slint only ever reports an index the `for`
+/// loop actually produced, but a negative or past-the-end value is clamped
+/// rather than indexed into a panic. Panics if `visible` is empty (it never
+/// is: `Info` always has content, for every model).
+pub fn category_at(visible: &[Category], index: i32) -> Category {
+    let last = visible.len() as i32 - 1;
+    visible[index.clamp(0, last) as usize]
 }
 
 /// The inverse of `category_at`: which sidebar row index highlights
-/// `category`.
-pub fn index_of(category: Category) -> i32 {
-    Category::ALL.iter().position(|c| *c == category).unwrap_or(0) as i32
+/// `category` in `visible`, or `-1` if `category` was filtered out of
+/// `visible` entirely (a hidden category can never be the selected one, so
+/// -1 - never a valid sidebar index - is the right sentinel, matching the
+/// `setup-index`/`info-index`/etc. "unset" convention on the Slint side;
+/// unlike a fallback to `0`, it can never collide with a real, different,
+/// visible category's index).
+pub fn index_of(visible: &[Category], category: Category) -> i32 {
+    visible.iter().position(|c| *c == category).map(|i| i as i32).unwrap_or(-1)
 }
 
 // --- curve editor <-> Curve conversions ---
@@ -1369,7 +1395,9 @@ mod tests {
 
     #[test]
     fn category_labels_model_has_one_label_per_category_in_order() {
-        let model = category_labels_model();
+        let visible = visible_categories(WheelModel::Rs50);
+        assert_eq!(visible, Category::ALL);
+        let model = category_labels_model(&visible);
         let labels: Vec<String> = model.iter().map(|s| s.to_string()).collect();
         let expected: Vec<String> = Category::ALL.iter().map(|c| c.label().to_string()).collect();
         assert_eq!(labels, expected);
@@ -1377,16 +1405,52 @@ mod tests {
 
     #[test]
     fn category_at_and_index_of_round_trip_for_every_category() {
+        let visible = visible_categories(WheelModel::Rs50);
         for cat in Category::ALL {
-            let idx = index_of(*cat);
-            assert_eq!(category_at(idx), *cat);
+            let idx = index_of(&visible, *cat);
+            assert_eq!(category_at(&visible, idx), *cat);
         }
     }
 
     #[test]
     fn category_at_clamps_out_of_range_indices() {
-        assert_eq!(category_at(-1), Category::ALL[0]);
-        assert_eq!(category_at(9999), *Category::ALL.last().unwrap());
+        let visible = visible_categories(WheelModel::Rs50);
+        assert_eq!(category_at(&visible, -1), Category::ALL[0]);
+        assert_eq!(category_at(&visible, 9999), *Category::ALL.last().unwrap());
+    }
+
+    #[test]
+    fn visible_categories_drops_leds_and_profiles_for_a_g923() {
+        let visible = visible_categories(WheelModel::G923);
+        assert!(!visible.contains(&Category::Leds));
+        assert!(!visible.contains(&Category::Profiles));
+        assert!(visible.contains(&Category::Info));
+        assert!(visible.contains(&Category::Ffb));
+        assert!(visible.contains(&Category::Steering));
+        assert!(visible.contains(&Category::Pedals));
+    }
+
+    #[test]
+    fn visible_categories_keeps_every_category_for_a_dd_wheel() {
+        for model in [WheelModel::Rs50, WheelModel::GPro, WheelModel::Unknown] {
+            assert_eq!(visible_categories(model), Category::ALL, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn index_of_returns_negative_one_for_a_hidden_category() {
+        let visible = visible_categories(WheelModel::G923);
+        assert_eq!(index_of(&visible, Category::Leds), -1);
+        assert_eq!(index_of(&visible, Category::Profiles), -1);
+    }
+
+    #[test]
+    fn category_labels_model_for_a_g923_excludes_leds_and_profiles() {
+        let visible = visible_categories(WheelModel::G923);
+        let model = category_labels_model(&visible);
+        let labels: Vec<String> = model.iter().map(|s| s.to_string()).collect();
+        assert!(!labels.contains(&Category::Leds.label().to_string()));
+        assert!(!labels.contains(&Category::Profiles.label().to_string()));
     }
 
     #[test]

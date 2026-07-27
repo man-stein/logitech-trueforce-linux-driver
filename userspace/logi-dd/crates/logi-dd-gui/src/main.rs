@@ -335,6 +335,73 @@ fn set<T>(cell: &Arc<Mutex<T>>, value: T) {
     *cell.lock().unwrap() = value;
 }
 
+/// Rebuild the sidebar (labels, plus the trailing "Setup" row) and every
+/// index property (`setup-index`/`info-index`/`profiles-index`/
+/// `leds-index`) from `visible`, the categories a wheel of the current
+/// model actually has content for (see `bridge::visible_categories`).
+///
+/// This is the only place any of those properties are set, and they are
+/// always set together from the same `visible` list, so the labels the
+/// sidebar renders and the index mapping `select-category` is resolved
+/// against (`bridge::category_at`/`index_of`) can never drift apart - the
+/// bug this replaces was hiding widgets on individual pages while leaving
+/// the sidebar's row list (and its indices) built from the untouched
+/// `Category::ALL`.
+/// Apply a freshly-resolved visible-category list (from a new
+/// `Response::Info`/`NoWheel`): no-op if it matches what is already
+/// showing, otherwise rebuilds the sidebar and, if `current_category` was
+/// on a row the new list just dropped (e.g. the wheel was swapped for a
+/// G923 while the Leds page was open), snaps it back to `Info` (always
+/// visible, for every model) and updates the header/selection to match.
+/// Does not itself reload the page's content for that snap-back case (this
+/// runs inside the worker's response handler, which has no handle back to
+/// `worker` to send a fresh `LoadCategory`); the sidebar and header are
+/// correct immediately, the content area catches up on the next manual
+/// category click or refresh.
+fn apply_visible_categories(
+    app: &App,
+    visible_categories: &Arc<Mutex<Vec<Category>>>,
+    current_category: &Arc<Mutex<Category>>,
+    new_visible: Vec<Category>,
+) {
+    let mut visible = visible_categories.lock().unwrap();
+    if *visible == new_visible {
+        return;
+    }
+    *visible = new_visible;
+    rebuild_sidebar(app, &visible);
+    let mut cat = current_category.lock().unwrap();
+    if !visible.contains(&*cat) {
+        *cat = Category::Info;
+        app.set_category_label(Category::Info.label().into());
+    }
+    app.set_selected_category(bridge::index_of(&visible, *cat));
+}
+
+fn rebuild_sidebar(app: &App, visible: &[Category]) {
+    let mut labels: Vec<slint::SharedString> = bridge::category_labels_model(visible).iter().collect();
+    // The trailing "Setup" row: kept out of `visible`/`category_labels_model`
+    // (and its own test) since that list's contract is "one label per
+    // visible device category" and Setup is not a device category.
+    labels.push("Setup".into());
+    app.set_category_labels(slint::ModelRc::new(slint::VecModel::from(labels)));
+    app.set_setup_index(visible.len() as i32);
+    // The Info category carries the live input monitor (the old Test page);
+    // selecting it starts the evdev reader, leaving it stops it. Always
+    // present (every model has Info content), so this is never -1.
+    app.set_info_index(bridge::index_of(visible, Category::Info));
+    // The Profiles category swaps in the computer-side profile store while
+    // the wheel is in desktop mode (see `show-computer-profiles`); -1 (and
+    // so never selectable) for a wheel with no onboard profile store, e.g.
+    // a G923.
+    app.set_profiles_index(bridge::index_of(visible, Category::Profiles));
+    // The Leds category carries the LIGHTSYNC preview strip above its
+    // composed settings list; -1 for a wheel with no LIGHTSYNC strip at
+    // all, e.g. a G923, so the whole category (row, page, preview) is gone
+    // rather than just the preview widget.
+    app.set_leds_index(bridge::index_of(visible, Category::Leds));
+}
+
 /// Open `url` in the user's default browser via `xdg-open`, detached. Best
 /// effort: a spawn failure (no `xdg-open` on a minimal system) is ignored
 /// rather than taking the app down, since this is a convenience link.
@@ -633,8 +700,16 @@ fn overlay_debug() -> Option<f32> {
 /// properties. Runs on the UI thread (the reader's callback hops here via
 /// `slint::invoke_from_event_loop` first). Degrees are derived from the
 /// raw 0..65535 steering axis and the `test-range` property the monitor
-/// start seeded from `wheel_range`.
-fn apply_test_snapshot(app: &App, snap: &testio::Snapshot) {
+/// start seeded from `wheel_range`. `model` is the same model
+/// `start_test_monitor` resolved when it opened the reader (`snap.buttons`
+/// is parallel to `evtest::button_codes_for_model(model)`, not always
+/// `WHEEL_BUTTONS`): RS50/G PRO get their captured diagram labels, a G923
+/// gets the honest generic "Button N" fallback (see
+/// `evtest::button_label_for_model`), never the RS50's labels for a
+/// button it does not have (e.g. a G923 has no left encoder at all, but
+/// its own 0x2c8 - the RS50's "L Encoder CW" - is a real, different
+/// button on it).
+fn apply_test_snapshot(app: &App, snap: &testio::Snapshot, model: WheelModel) {
     let range = app.get_test_range().max(1) as u32;
     let debug = overlay_debug();
     let deg = debug
@@ -642,24 +717,26 @@ fn apply_test_snapshot(app: &App, snap: &testio::Snapshot) {
     app.set_test_degrees(deg);
     app.set_test_degrees_text(format!("{deg:+.1} deg").into());
     app.set_test_hat(evtest::hat_label(snap.hat.0, snap.hat.1).into());
-    let buttons: Vec<TestButton> = evtest::WHEEL_BUTTONS
+    let codes = evtest::button_codes_for_model(model);
+    let buttons: Vec<TestButton> = codes
         .iter()
         .zip(&snap.buttons)
-        .map(|((code, label), pressed)| TestButton {
+        .map(|(code, pressed)| TestButton {
             code: i32::from(*code),
-            label: (*label).into(),
+            label: evtest::button_name_for_model(model, *code).into(),
             pressed: *pressed,
         })
         .collect();
     app.set_test_buttons(slint::ModelRc::new(slint::VecModel::from(buttons)));
     // The layout image's callout tints: a box lights while any of its
-    // buttons is held (`snap.buttons` is parallel to `WHEEL_BUTTONS`), the
-    // D-pad box while the hat is off center.
+    // buttons is held (`snap.buttons` is parallel to `codes`), the D-pad
+    // box while the hat is off center. Only meaningful over the RS50
+    // diagram photo, which `info_page.slint` only ever draws for
+    // `wheel-kind == 0` (RS50/`Unknown`); computed unconditionally here
+    // regardless, since it is cheap and harmless for a model that never
+    // renders it.
     let held = |code: u16| {
-        evtest::WHEEL_BUTTONS
-            .iter()
-            .position(|(c, _)| *c == code)
-            .is_some_and(|i| snap.buttons.get(i).copied().unwrap_or(false))
+        codes.iter().position(|c| *c == code).is_some_and(|i| snap.buttons.get(i).copied().unwrap_or(false))
     };
     let callouts: Vec<TestCallout> = evtest::CALLOUT_BOXES
         .iter()
@@ -702,22 +779,25 @@ fn start_test_monitor(
     stop_test_monitor(&reader_cell);
     std::thread::spawn(move || {
         let found = evtest::discover_wheel_input();
-        // The configured rotation range, read once through the same sysfs
-        // plumbing the settings pages use; 900 when unreadable. A DD wheel
-        // keeps it at `wheel_range`; the G923's classic engine has no
-        // `wheel_` prefix at all, so read whichever of the two this
-        // device's own registry actually has.
-        let range = logi_dd_core::Device::discover()
-            .ok()
-            .and_then(|d| {
+        // The configured rotation range, and the wheel's model (which
+        // button code list/labels to use, see `evtest::button_codes_for_
+        // model`), read once through the same sysfs plumbing the settings
+        // pages use; range 900 and model `Unknown` (the DD-wheel-shaped
+        // default) when discovery fails. A DD wheel keeps range at
+        // `wheel_range`; the G923's classic engine has no `wheel_` prefix
+        // at all, so read whichever of the two this device's own registry
+        // actually has.
+        let (model, range) = match logi_dd_core::Device::discover() {
+            Ok(d) => {
                 let attr = if d.available("wheel_range") { "wheel_range" } else { "range" };
-                d.read(attr).ok()
-            })
-            .and_then(|v| match v {
-                Value::Int(n) => u32::try_from(n).ok(),
-                _ => None,
-            })
-            .unwrap_or(900);
+                let range = match d.read(attr).ok() {
+                    Some(Value::Int(n)) => u32::try_from(n).unwrap_or(900),
+                    _ => 900,
+                };
+                (d.model(), range)
+            }
+            Err(_) => (WheelModel::default(), 900),
+        };
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = app_weak.upgrade() else { return };
             app.set_test_scanned(true);
@@ -734,13 +814,14 @@ fn start_test_monitor(
             let gone_weak = app.as_weak();
             match testio::Reader::start(
                 &wheel.event_path,
+                evtest::button_codes_for_model(model),
                 move |snap| {
                     // Reader thread -> UI thread, at most ~30 Hz (the
                     // reader throttles before calling this).
                     let weak = snap_weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(app) = weak.upgrade() {
-                            apply_test_snapshot(&app, &snap);
+                            apply_test_snapshot(&app, &snap, model);
                         }
                     });
                 },
@@ -826,26 +907,18 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let app = App::new()?;
-    // The sidebar labels are the real device categories plus a trailing
-    // "Setup" row; kept out of `bridge::category_labels_model` (and its own
-    // test) since that function's contract is "one label per
-    // `Category::ALL`, in `Category::ALL`'s order" and Setup is not a
-    // device category.
-    let mut labels: Vec<slint::SharedString> = bridge::category_labels_model().iter().collect();
-    labels.push("Setup".into());
-    app.set_category_labels(slint::ModelRc::new(slint::VecModel::from(labels)));
-    let setup_index = Category::ALL.len() as i32;
-    app.set_setup_index(setup_index);
-    // The Info category carries the live input monitor (the old Test page);
-    // selecting it starts the evdev reader, leaving it stops it.
-    let info_index = bridge::index_of(Category::Info);
-    app.set_info_index(info_index);
-    // The Profiles category swaps in the computer-side profile store while
-    // the wheel is in desktop mode (see `show-computer-profiles`).
-    app.set_profiles_index(bridge::index_of(Category::Profiles));
-    // The Leds category carries the LIGHTSYNC preview strip above its
-    // composed settings list.
-    app.set_leds_index(bridge::index_of(Category::Leds));
+    // Which categories the connected wheel has content for: starts at
+    // every category (`WheelModel::default()` is `Unknown`, treated as a
+    // DD wheel, the same fallback used everywhere else) until the first
+    // `Response::Info` reports the wheel's real model and narrows it down
+    // (a G923 has neither Leds nor Profiles content; see
+    // `bridge::visible_categories`). The sidebar's labels and its index
+    // mapping (`bridge::category_at`/`index_of`) are always built from
+    // this same list, via `rebuild_sidebar`, so the two can never disagree
+    // about which row is at which index.
+    let visible_categories: Arc<Mutex<Vec<Category>>> =
+        Arc::new(Mutex::new(bridge::visible_categories(WheelModel::default())));
+    rebuild_sidebar(&app, &visible_categories.lock().unwrap());
     app.set_project_url(logi_dd_core::PROJECT_URL.into());
     app.on_open_url(|url| open_in_browser(&url));
     // The Info identity block's software rows: this front-end's own
@@ -915,7 +988,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let current_category = Arc::new(Mutex::new(Category::ALL[0]));
     let current_mode = Arc::new(Mutex::new(Mode::Desktop));
     app.set_category_label(get(&current_category).label().into());
-    app.set_selected_category(bridge::index_of(get(&current_category)));
+    app.set_selected_category(bridge::index_of(
+        &visible_categories.lock().unwrap(),
+        get(&current_category),
+    ));
 
     // The current category's row values, keyed by attr, refreshed on every
     // `Response::Rows`. The curve editor needs this to seed a `Curve` from
@@ -962,6 +1038,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let slot_text_editor = slot_text_editor.clone();
         let shaping_toggles = shaping_toggles.clone();
         let last_rows = last_rows.clone();
+        let visible_categories = visible_categories.clone();
         Worker::spawn(move |response| {
             let app_weak = app_weak.clone();
             let current_category = current_category.clone();
@@ -971,6 +1048,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let slot_text_editor = slot_text_editor.clone();
             let shaping_toggles = shaping_toggles.clone();
             let last_rows = last_rows.clone();
+            let visible_categories = visible_categories.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(app) = app_weak.upgrade() else { return };
                 match response {
@@ -1161,6 +1239,17 @@ fn main() -> Result<(), slint::PlatformError> {
                         // so they hide instead of rendering onto a wheel
                         // that cannot back them.
                         app.set_classic_wheel(matches!(info.model, WheelModel::G923));
+                        // The sidebar itself: a G923 has no Leds/Profiles
+                        // content at all, so those rows drop out of the
+                        // sidebar entirely (not just the two DD-only panels
+                        // above), same as the TUI. See
+                        // `apply_visible_categories`.
+                        apply_visible_categories(
+                            &app,
+                            &visible_categories,
+                            &current_category,
+                            bridge::visible_categories(info.model),
+                        );
                     }
                     Response::NoWheel(message) => {
                         app.set_no_wheel(true);
@@ -1174,6 +1263,15 @@ fn main() -> Result<(), slint::PlatformError> {
                         // DD-wheel-shaped panels rather than keep whatever
                         // the last connected wheel happened to be.
                         app.set_classic_wheel(false);
+                        // Same fallback for the sidebar: with no wheel
+                        // connected, show every category rather than keep
+                        // whatever the last connected wheel's list was.
+                        apply_visible_categories(
+                            &app,
+                            &visible_categories,
+                            &current_category,
+                            bridge::visible_categories(WheelModel::default()),
+                        );
                     }
                     Response::Profiles { names, status, error } => {
                         let items: Vec<slint::SharedString> =
@@ -1197,23 +1295,27 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let worker = worker.clone();
         let current_category = current_category.clone();
+        let visible_categories = visible_categories.clone();
         let app_weak = app.as_weak();
         let test_reader = test_reader.clone();
         let test_device = test_device.clone();
         app.on_select_category(move |index| {
+            let Some(app) = app_weak.upgrade() else { return };
             // The trailing "Setup" row: show that page and stop, without
             // asking the worker for a category (there is none). Switching
             // back to a real category below still reloads it via the usual
             // `LoadCategory` request, so nothing needs to force a refresh
-            // when leaving the page.
-            if index == setup_index {
+            // when leaving the page. Read live off the property (not a
+            // captured constant): the row's index moves whenever the
+            // sidebar is rebuilt for a new wheel model (see
+            // `rebuild_sidebar`).
+            if index == app.get_setup_index() {
                 stop_test_monitor(&test_reader);
-                if let Some(app) = app_weak.upgrade() {
-                    app.set_selected_category(index);
-                }
+                app.set_selected_category(index);
                 return;
             }
-            let cat = bridge::category_at(index);
+            let visible = visible_categories.lock().unwrap().clone();
+            let cat = bridge::category_at(&visible, index);
             // The Info category hosts the live input monitor: entering it
             // starts the evdev reader (independent of the sysfs worker
             // request below, which fetches the identity rows); leaving it
@@ -1224,10 +1326,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 stop_test_monitor(&test_reader);
             }
             set(&current_category, cat);
-            if let Some(app) = app_weak.upgrade() {
-                app.set_selected_category(bridge::index_of(cat));
-                app.set_category_label(cat.label().into());
-            }
+            app.set_selected_category(bridge::index_of(&visible, cat));
+            app.set_category_label(cat.label().into());
             worker.request(Request::LoadCategory(cat));
         });
     }

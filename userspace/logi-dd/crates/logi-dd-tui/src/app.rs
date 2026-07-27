@@ -634,6 +634,7 @@ impl<S: SysfsIo> App<S> {
             || self.profile_name_edit.is_some()
             || self.profile_delete_confirm.is_some()
             || self.test.confirm.is_some()
+            || self.test.countdown_active()
             || self.tf_intensity_edit.is_some()
             || self.tf_pitch_edit.is_some()
             || self.tf_sweep_confirm
@@ -1120,6 +1121,18 @@ impl<S: SysfsIo> App<S> {
     /// Whether a test sweep child is alive (spawned and not yet reaped).
     pub fn tf_sweep_active(&self) -> bool {
         self.tf_sweep.is_some()
+    }
+
+    /// Advance a ticking force-sim countdown, run by the main loop's
+    /// ticks (the Info page already polls at ~30 Hz while its monitor is
+    /// live, `test_polling`, so the "Starting in N..." status keeps up
+    /// and 's' cancels promptly - no extra poll-timeout wiring needed). A
+    /// no-op before the countdown's deadline or with nothing armed;
+    /// updates the status line once it fires the sim.
+    pub fn tick_sim_countdown(&mut self) {
+        if let Some(status) = self.test.tick_countdown() {
+            self.status = status;
+        }
     }
 
     /// Reap the test sweep once it exits; run by the main loop's ticks
@@ -1849,11 +1862,15 @@ impl<S: SysfsIo> App<S> {
         }
         if self.is_info() {
             // A pending sim confirmation swallows the next key: only 'y'
-            // fires the effect, anything else cancels. Nothing ever plays
-            // without this explicit step.
+            // arms the 5 s countdown (see below), anything else cancels
+            // outright. Nothing ever plays without this explicit step.
             if let Some(kind) = self.test.confirm.take() {
                 self.status = if matches!(key, Char('y') | Char('Y')) {
-                    self.test.spawn_sim(kind)
+                    self.test.arm_countdown(kind);
+                    format!(
+                        "{}: starting in 5... keep hands and objects clear of the rim (s cancels)",
+                        kind.label()
+                    )
                 } else {
                     "test: simulation cancelled".to_string()
                 };
@@ -1922,9 +1939,14 @@ impl<S: SysfsIo> App<S> {
                         self.driver_version_text()
                     );
                 }
-                // Stop the playing sim; a no-op while nothing plays.
-                Char('s') if self.test.stop_sim() => {
-                    self.status = "test: simulation stopped".to_string();
+                // Cancel a ticking countdown (the sim never starts), else
+                // stop an already-playing sim; a no-op while neither.
+                Char('s') => {
+                    if self.test.cancel_countdown() {
+                        self.status = "test: countdown cancelled".to_string();
+                    } else if self.test.stop_sim() {
+                        self.status = "test: simulation stopped".to_string();
+                    }
                 }
                 _ => {}
             }
@@ -2844,6 +2866,39 @@ mod tests {
         a.on_key(KeyCode::Esc);
         assert!(a.test.confirm.is_none());
         assert!(!a.test.sim_running());
+    }
+
+    #[test]
+    fn info_sim_y_arms_a_countdown_instead_of_playing_immediately() {
+        use crate::wheel_test::SimKind;
+        use crossterm::event::KeyCode;
+        let mut a = info_view_app();
+        a.test.dev = Some(logi_dd_core::evtest::WheelInput {
+            event_path: "/nonexistent/event99".to_string(),
+            name: "Logitech RS50 Base".to_string(),
+        });
+        a.on_key(KeyCode::Char('f'));
+        assert_eq!(a.test.confirm, Some(SimKind::ConstantForce));
+        a.on_key(KeyCode::Char('y'));
+        assert!(a.test.confirm.is_none(), "confirm resolved");
+        assert!(a.test.countdown_active(), "armed a countdown, not playing yet");
+        assert!(!a.test.sim_running(), "the wheel has not moved yet");
+        assert!(a.status.contains("starting in 5"), "status: {}", a.status);
+
+        // 's' during the countdown cancels it outright, same key that
+        // stops an already-playing sim; the sim never starts.
+        a.on_key(KeyCode::Char('s'));
+        assert!(!a.test.countdown_active());
+        assert!(!a.test.sim_running());
+        assert!(a.status.contains("countdown cancelled"), "status: {}", a.status);
+
+        // Advancing the loop's tick (`tick_sim_countdown`) before the
+        // deadline is a no-op.
+        a.on_key(KeyCode::Char('f'));
+        a.on_key(KeyCode::Char('y'));
+        assert!(a.test.countdown_active());
+        a.tick_sim_countdown();
+        assert!(a.test.countdown_active(), "deadline not reached yet");
     }
 
     #[test]

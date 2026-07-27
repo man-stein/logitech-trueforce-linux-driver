@@ -25,6 +25,32 @@ pub enum WheelModel {
     G923,
 }
 
+impl WheelModel {
+    /// The registry `self`'s settings live in: [`CLASSIC_REGISTRY`] for a
+    /// G923, [`REGISTRY`] (the direct-drive `wheel_*` set) for everything
+    /// else. A free function on the model alone (not `Device::settings`,
+    /// which needs a live device) so a frontend holding only a
+    /// [`DeviceInfo`]'s `model` field, not the `Device` itself, can still
+    /// resolve which settings a wheel of this model would show.
+    pub fn settings(self) -> &'static [SettingSpec] {
+        match self {
+            WheelModel::G923 => CLASSIC_REGISTRY,
+            _ => REGISTRY,
+        }
+    }
+
+    /// Whether `cat` has anything to show for a wheel of this model: at
+    /// least one row in `self.settings()`, or `Info` (its identity rows can
+    /// be empty on a classic wheel, but the page also carries the live
+    /// input monitor and force-feedback test sims, which work off evdev
+    /// regardless of model). See [`Device::category_has_content`], which
+    /// this backs; kept as a model-only free function for the same reason
+    /// as [`WheelModel::settings`].
+    pub fn category_has_content(self, cat: Category) -> bool {
+        cat == Category::Info || self.settings().iter().any(|s| s.category == cat)
+    }
+}
+
 pub struct DeviceInfo {
     /// Human-readable identity for the Info page's "Wheel" row (e.g.
     /// "Logitech G923 Racing Wheel for PlayStation 4 and PC"), or empty
@@ -220,10 +246,7 @@ impl<S: SysfsIo> Device<S> {
     /// wheels' rows marked unavailable (a different device model, not "DD
     /// with everything missing").
     pub fn settings(&self) -> &'static [SettingSpec] {
-        match self.model {
-            WheelModel::G923 => CLASSIC_REGISTRY,
-            _ => REGISTRY,
-        }
+        self.model.settings()
     }
 
     /// Look up `attr` in either registry: the two attribute namespaces never
@@ -244,7 +267,7 @@ impl<S: SysfsIo> Device<S> {
     /// Frontends use this to hide a sidebar entry that would otherwise open
     /// onto a blank page, e.g. a G923 has no `Leds`/`Profiles` rows at all.
     pub fn category_has_content(&self, cat: Category) -> bool {
-        cat == Category::Info || self.settings().iter().any(|s| s.category == cat)
+        self.model.category_has_content(cat)
     }
 
     /// The classic engine (a G923) has no desktop/onboard split at all, so

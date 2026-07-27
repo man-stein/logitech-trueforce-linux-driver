@@ -11,6 +11,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::device::WheelModel;
+
 /// evdev event types (`linux/input-event-codes.h`).
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
@@ -217,6 +219,74 @@ pub fn button_name(code: u16) -> String {
     }
 }
 
+/// The honest, model-agnostic fallback label for a code neither the RS50
+/// nor the G PRO diagram covers: "Button N", numbered by the joystick
+/// index the kernel's default sequential input mapping implies
+/// (`hidpp_dd_input_mapping` in mainline/hid-logitech-hidpp.c). Index 0-15
+/// is `BTN_JOYSTICK + n` (evdev 0x120-0x12f, 16 codes) -> "Button 1"
+/// through "Button 16"; index 16-24 is `BTN_TRIGGER_HAPPY + (n - 16)`
+/// (evdev 0x2c0-0x2c8, 9 codes) -> "Button 17" through "Button 25". These
+/// are exactly the ranges the G923 (PID 0xc266/0xc26e) reports, hardware-
+/// confirmed 2026-07-23. `None` outside both ranges (falls back further to
+/// [`button_name_for_model`]'s "BTN <code>").
+///
+/// This is NOT a real per-button mapping: nobody has done a guided capture
+/// of which physical G923 button produces which code, the way the RS50's
+/// diagram-derived `WHEEL_BUTTONS` was. It only promises "this is joystick
+/// button index N", which is always true and never misleading, unlike
+/// reusing `WHEEL_BUTTONS` would be - e.g. `WHEEL_BUTTONS` labels 0x2c8 as
+/// the RS50's "L Encoder CW", but the G923 has no left encoder at all and
+/// its own 0x2c8 is a different physical button (its PS button, by the
+/// live device's own report). A future guided G923 capture (press each
+/// button, record which code fires, the same method
+/// `docs/BUTTON_MAPPING.md` used for the RS50) could add a real
+/// `G923_BUTTONS` table alongside `WHEEL_BUTTONS`.
+pub fn generic_button_label(code: u16) -> Option<String> {
+    if (0x120..=0x12f).contains(&code) {
+        Some(format!("Button {}", code - 0x120 + 1))
+    } else if (0x2c0..=0x2c8).contains(&code) {
+        Some(format!("Button {}", 16 + (code - 0x2c0) + 1))
+    } else {
+        None
+    }
+}
+
+/// The evdev codes to track and show on the Test page's button grid, in
+/// display order, for a wheel of `model`. RS50/G PRO (and `Unknown`,
+/// which is treated as a DD wheel everywhere else in this crate too) get
+/// the captured `WHEEL_BUTTONS` diagram list; a G923 gets its own known
+/// code ranges instead (see `generic_button_label`), so every button it
+/// actually has shows up - zipping its snapshot against `WHEEL_BUTTONS`
+/// would silently drop 13 of its 25 buttons (0x12c-0x12f, 0x2c0-0x2c4),
+/// the ones outside the RS50's own button set.
+pub fn button_codes_for_model(model: WheelModel) -> Vec<u16> {
+    match model {
+        WheelModel::G923 => (0x120..=0x12f).chain(0x2c0..=0x2c8).collect(),
+        WheelModel::Rs50 | WheelModel::GPro | WheelModel::Unknown => {
+            WHEEL_BUTTONS.iter().map(|(c, _)| *c).collect()
+        }
+    }
+}
+
+/// [`button_label_for_model`] with the "BTN <code>" fallback, mirroring
+/// [`button_name`] but per-model.
+pub fn button_name_for_model(model: WheelModel, code: u16) -> String {
+    button_label_for_model(model, code).unwrap_or_else(|| format!("BTN {code}"))
+}
+
+/// The label for `code` on a wheel of `model`: the RS50/G PRO diagram
+/// table for those models (and `Unknown`, same reasoning as
+/// [`button_codes_for_model`]), or [`generic_button_label`]'s honest
+/// fallback for a G923.
+pub fn button_label_for_model(model: WheelModel, code: u16) -> Option<String> {
+    match model {
+        WheelModel::G923 => generic_button_label(code),
+        WheelModel::Rs50 | WheelModel::GPro | WheelModel::Unknown => {
+            button_label(code).map(str::to_string)
+        }
+    }
+}
+
 /// A short label for the non-steering axes the Test view bars show.
 pub fn axis_label(code: u16) -> Option<&'static str> {
     match code {
@@ -394,6 +464,58 @@ mod tests {
         assert_eq!(button_label(0x12c), None, "descriptor gap");
         assert_eq!(button_name(0x129), "Menu");
         assert_eq!(button_name(0x2c0), "BTN 704");
+    }
+
+    #[test]
+    fn generic_button_label_covers_both_joystick_ranges() {
+        assert_eq!(generic_button_label(0x120), Some("Button 1".to_string()));
+        assert_eq!(generic_button_label(0x12f), Some("Button 16".to_string()));
+        assert_eq!(generic_button_label(0x2c0), Some("Button 17".to_string()));
+        assert_eq!(generic_button_label(0x2c8), Some("Button 25".to_string()));
+        assert_eq!(generic_button_label(0x2c9), None, "past the G923's known range");
+        assert_eq!(generic_button_label(0x100), None, "outside both ranges");
+    }
+
+    #[test]
+    fn button_label_for_model_never_gives_a_g923_an_rs50_label() {
+        // The live G923 (PID 0xc266) actually reports 0x2c8, which
+        // WHEEL_BUTTONS calls the RS50's "L Encoder CW" - the G923 has no
+        // left encoder at all, so that label would be an outright lie for
+        // it. The generic fallback names it by index instead.
+        assert_eq!(button_label(0x2c8), Some("L Encoder CW"));
+        assert_eq!(
+            button_label_for_model(WheelModel::G923, 0x2c8),
+            Some("Button 25".to_string())
+        );
+        assert_eq!(button_name_for_model(WheelModel::G923, 0x2c8), "Button 25");
+        // A code outside the G923's own known ranges still falls back
+        // further, honestly, to the raw code rather than any label.
+        assert_eq!(button_name_for_model(WheelModel::G923, 0x2ff), "BTN 767");
+    }
+
+    #[test]
+    fn button_label_for_model_keeps_the_rs50_and_gpro_table() {
+        for model in [WheelModel::Rs50, WheelModel::GPro, WheelModel::Unknown] {
+            assert_eq!(button_label_for_model(model, 0x2c8), Some("L Encoder CW".to_string()));
+            assert_eq!(button_name_for_model(model, 0x129), "Menu");
+        }
+    }
+
+    #[test]
+    fn button_codes_for_model_matches_the_live_g923_and_keeps_dd_wheels_unchanged() {
+        let g923 = button_codes_for_model(WheelModel::G923);
+        assert_eq!(g923.len(), 25, "16 + 9 codes, hardware-confirmed on the live device");
+        assert!(g923.contains(&0x120));
+        assert!(g923.contains(&0x12f));
+        assert!(g923.contains(&0x2c0));
+        assert!(g923.contains(&0x2c8));
+        assert!(!g923.contains(&0x2c9));
+
+        for model in [WheelModel::Rs50, WheelModel::GPro, WheelModel::Unknown] {
+            let codes = button_codes_for_model(model);
+            let expected: Vec<u16> = WHEEL_BUTTONS.iter().map(|(c, _)| *c).collect();
+            assert_eq!(codes, expected, "{model:?}");
+        }
     }
 
     #[test]

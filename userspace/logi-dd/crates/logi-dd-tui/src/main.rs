@@ -99,6 +99,9 @@ fn run(mut app: App<RealSysfs>) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Reap a finished test sweep (a no-op while none plays).
         app.tick_tf_sweep();
+        // Advance a ticking force-sim countdown (a no-op while none is
+        // armed); fires the sim itself once its 5 s elapses.
+        app.tick_sim_countdown();
         // An idle tick (no key): check for external profile/mode drift, at
         // most once per `DRIFT_POLL_TIMEOUT` even while the monitor's 33ms
         // tick is driving the loop.

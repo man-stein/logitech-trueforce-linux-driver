@@ -18,11 +18,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use logi_dd_core::evtest::{self, TestEvent, EVENT_SIZE, WHEEL_BUTTONS};
+use logi_dd_core::evtest::{self, TestEvent, EVENT_SIZE};
 
 /// One UI push worth of live wheel state. `buttons` is parallel to
-/// `evtest::WHEEL_BUTTONS`; `axes` holds throttle/brake/clutch/handbrake
-/// raw values in that order.
+/// whichever code list `Reader::start` was given (see
+/// `evtest::button_codes_for_model`, model-dependent: the RS50/G PRO
+/// diagram's `WHEEL_BUTTONS` codes, or the G923's own known ranges);
+/// `axes` holds throttle/brake/clutch/handbrake raw values in that order.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub steering_raw: i32,
@@ -47,10 +49,14 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Open `path` and start the read loop. Fails fast (EACCES, ENOENT)
-    /// so permission problems surface inline instead of in a dead page.
+    /// Open `path` and start the read loop, tracking `codes` (see
+    /// `evtest::button_codes_for_model`; `snapshot.buttons` stays parallel
+    /// to this exact list for the reader's whole lifetime). Fails fast
+    /// (EACCES, ENOENT) so permission problems surface inline instead of
+    /// in a dead page.
     pub fn start(
         path: &str,
+        codes: Vec<u16>,
         on_snapshot: impl Fn(Snapshot) + Send + 'static,
         on_gone: impl FnOnce() + Send + 'static,
     ) -> std::io::Result<Reader> {
@@ -66,7 +72,7 @@ impl Reader {
                 // steering at center rather than showing full left lock
                 // until the first real event arrives.
                 steering_raw: evtest::AXIS_MAX / 2,
-                buttons: vec![false; WHEEL_BUTTONS.len()],
+                buttons: vec![false; codes.len()],
                 ..Snapshot::default()
             };
             let mut buf = [0u8; EVENT_SIZE * 64];
@@ -84,7 +90,7 @@ impl Reader {
                     }
                     Ok(n) => {
                         for chunk in buf[..n].chunks_exact(EVENT_SIZE) {
-                            if apply_event(&mut snapshot, chunk) {
+                            if apply_event(&mut snapshot, chunk, &codes) {
                                 dirty = true;
                             }
                         }
@@ -126,21 +132,21 @@ impl Drop for Reader {
 }
 
 /// Fold one raw event into `snapshot`; true if anything shown changed.
-fn apply_event(snapshot: &mut Snapshot, chunk: &[u8]) -> bool {
+/// `codes` is the same list `snapshot.buttons` is parallel to (see
+/// `Reader::start`).
+fn apply_event(snapshot: &mut Snapshot, chunk: &[u8], codes: &[u16]) -> bool {
     match evtest::parse_event(chunk) {
         Some(TestEvent::Steering(raw)) => {
             snapshot.steering_raw = raw;
             true
         }
-        Some(TestEvent::Button { code, pressed }) => {
-            match WHEEL_BUTTONS.iter().position(|(c, _)| *c == code) {
-                Some(i) => {
-                    snapshot.buttons[i] = pressed;
-                    true
-                }
-                None => false,
+        Some(TestEvent::Button { code, pressed }) => match codes.iter().position(|c| *c == code) {
+            Some(i) => {
+                snapshot.buttons[i] = pressed;
+                true
             }
-        }
+            None => false,
+        },
         Some(TestEvent::Axis { code, value }) => match code {
             evtest::ABS_HAT0X => {
                 snapshot.hat.0 = value;
@@ -442,16 +448,37 @@ mod tests {
             b[20..24].copy_from_slice(&value.to_le_bytes());
             b
         }
-        let mut s = Snapshot { buttons: vec![false; WHEEL_BUTTONS.len()], ..Snapshot::default() };
-        assert!(apply_event(&mut s, &ev(1, 0x120, 1)), "button A press");
+        let codes: Vec<u16> =
+            logi_dd_core::evtest::button_codes_for_model(logi_dd_core::WheelModel::Rs50);
+        let mut s = Snapshot { buttons: vec![false; codes.len()], ..Snapshot::default() };
+        assert!(apply_event(&mut s, &ev(1, 0x120, 1), &codes), "button A press");
         assert!(s.buttons[0]);
-        assert!(apply_event(&mut s, &ev(3, 0, 50000)), "steering");
+        assert!(apply_event(&mut s, &ev(3, 0, 50000), &codes), "steering");
         assert_eq!(s.steering_raw, 50000);
-        assert!(apply_event(&mut s, &ev(3, evtest::ABS_RY, 12345)), "brake");
+        assert!(apply_event(&mut s, &ev(3, evtest::ABS_RY, 12345), &codes), "brake");
         assert_eq!(s.axes[1], 12345);
-        assert!(apply_event(&mut s, &ev(3, evtest::ABS_HAT0Y, -1)), "hat up");
+        assert!(apply_event(&mut s, &ev(3, evtest::ABS_HAT0Y, -1), &codes), "hat up");
         assert_eq!(s.hat, (0, -1));
-        assert!(!apply_event(&mut s, &ev(0, 0, 0)), "SYN is not shown state");
-        assert!(!apply_event(&mut s, &ev(1, 0x12c, 1)), "phantom button ignored");
+        assert!(!apply_event(&mut s, &ev(0, 0, 0), &codes), "SYN is not shown state");
+        assert!(!apply_event(&mut s, &ev(1, 0x12c, 1), &codes), "phantom button ignored (RS50)");
+    }
+
+    #[test]
+    fn apply_event_tracks_g923_only_codes_the_rs50_table_would_drop() {
+        // 0x12c and 0x2c0 are both outside WHEEL_BUTTONS (the RS50 diagram
+        // table) but inside the G923's own known ranges; with the G923
+        // code list they must track, not be silently ignored.
+        fn ev(type_: u16, code: u16, value: i32) -> [u8; EVENT_SIZE] {
+            let mut b = [0u8; EVENT_SIZE];
+            b[16..18].copy_from_slice(&type_.to_le_bytes());
+            b[18..20].copy_from_slice(&code.to_le_bytes());
+            b[20..24].copy_from_slice(&value.to_le_bytes());
+            b
+        }
+        let codes: Vec<u16> =
+            logi_dd_core::evtest::button_codes_for_model(logi_dd_core::WheelModel::G923);
+        let mut s = Snapshot { buttons: vec![false; codes.len()], ..Snapshot::default() };
+        assert!(apply_event(&mut s, &ev(1, 0x12c, 1), &codes), "tracked on a G923");
+        assert!(apply_event(&mut s, &ev(1, 0x2c0, 1), &codes), "tracked on a G923");
     }
 }
