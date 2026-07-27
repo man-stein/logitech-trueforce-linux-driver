@@ -685,19 +685,18 @@ impl<S: SysfsIo> App<S> {
     /// row (`n` or Enter opens the name prompt).
     ///
     /// A wheel with no `wheel_mode` row at all (the G923's classic engine
-    /// has no desktop/onboard concept, and no onboard profile store to
-    /// snapshot) gets neither branch: just its own (empty) registry rows,
-    /// rather than a computer-profile UI that would silently save nothing
-    /// useful.
+    /// has no desktop/onboard concept, and no onboard profile store) skips
+    /// straight to the computer-side store with no Mode row above it: it
+    /// still has its own four settings to snapshot, just no onboard half to
+    /// offer alongside them.
     fn profiles_rows(&self) -> Vec<Row> {
         let all = self.registry_rows(Category::Profiles);
-        if !all.iter().any(|r| r.attr == "wheel_mode") {
+        let has_mode = all.iter().any(|r| r.attr == "wheel_mode");
+        if has_mode && matches!(self.device.current_mode(), Ok(Mode::Onboard)) {
             return all;
         }
-        if matches!(self.device.current_mode(), Ok(Mode::Onboard)) {
-            return all;
-        }
-        let mut rows: Vec<Row> = all.into_iter().filter(|r| r.attr == "wheel_mode").collect();
+        let mut rows: Vec<Row> =
+            if has_mode { all.into_iter().filter(|r| r.attr == "wheel_mode").collect() } else { Vec::new() };
         for name in profiles::list_in(&self.profiles_dir) {
             rows.push(Row {
                 attr: format!("{PROFILE_ROW_PREFIX}{name}"),
@@ -1608,7 +1607,13 @@ impl<S: SysfsIo> App<S> {
     }
 
     /// Switch the wheel between desktop and onboard mode (the `d` shortcut).
+    /// A no-op for a wheel with no `wheel_mode` at all (the G923's classic
+    /// engine): there is no mode to switch, so this must not attempt a
+    /// write sysfs does not expose and surface it as a failed status.
     pub fn toggle_mode(&mut self) {
+        if !self.device.available("wheel_mode") {
+            return;
+        }
         let (idx, name) = match self.device.current_mode() {
             Ok(Mode::Desktop) => (1u8, "onboard"),
             _ => (0u8, "desktop"),
@@ -2327,30 +2332,77 @@ mod tests {
     }
 
     #[test]
-    fn g923_profiles_page_has_no_computer_profile_ui() {
-        // No wheel_mode, no onboard profile store to snapshot: the Profiles
-        // page must not offer a save/apply UI that would silently do
-        // nothing useful on this wheel.
+    fn g923_profiles_page_offers_the_computer_store_without_a_mode_row() {
+        // No wheel_mode, no onboard profile store to snapshot into or out
+        // of: the Profiles page must skip straight to the computer-side
+        // store (the "Save current as..." row, plus any saved profiles),
+        // with no Mode row and no onboard slot picker anywhere on it.
         let mut a = g923_app();
+        a.profiles_dir = profiles_tempdir();
         a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
         a.reload();
-        assert!(a.rows.is_empty(), "expected no Profiles rows for a G923: {:?}", a.rows.iter().map(|r| &r.attr).collect::<Vec<_>>());
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec![PROFILE_NEW_ATTR], "empty store: just Save, no Mode row");
     }
 
     #[test]
-    fn g923_hides_leds_and_profiles_from_the_sidebar_and_digit_jumps() {
+    fn g923_profiles_page_saves_and_applies_its_classic_settings() {
+        // The computer-side store must actually work on a G923: a save
+        // snapshots its own four settings, and an apply after a drift
+        // restores them, same round trip a DD wheel's desktop Profiles page
+        // gets (see `enter_on_a_saved_profile_applies_it`).
+        use crossterm::event::KeyCode;
+        let mut a = g923_app();
+        a.profiles_dir = profiles_tempdir();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == PROFILE_NEW_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        for c in "race".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("saved"), "status: {}", a.status);
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["profile:race", PROFILE_NEW_ATTR]);
+        let text = std::fs::read_to_string(a.profiles_dir.join("race.profile")).unwrap();
+        assert!(text.contains("range=900"));
+
+        // Drift a setting, then apply the snapshot back.
+        a.device.write("range", &Value::Int(540)).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "profile:race").unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("applied"), "status: {}", a.status);
+        assert_eq!(a.device.read("range").unwrap(), Value::Int(900));
+    }
+
+    #[test]
+    fn g923_toggle_mode_is_a_no_op() {
+        // The `d` shortcut's usual desktop/onboard meaning must not attempt
+        // a doomed `wheel_mode` write on a wheel that has none.
+        let mut a = g923_app();
+        let status_before = a.status.clone();
+        a.toggle_mode();
+        assert_eq!(a.status, status_before, "no status change from a no-op toggle");
+        assert_eq!(a.device.current_mode().unwrap(), Mode::Desktop);
+    }
+
+    #[test]
+    fn g923_hides_leds_from_the_sidebar_and_digit_jumps_but_keeps_profiles() {
         use crossterm::event::KeyCode;
         let a = g923_app();
         assert!(!a.category_applicable(Category::Leds));
-        assert!(!a.category_applicable(Category::Profiles));
+        assert!(a.category_applicable(Category::Profiles));
         assert!(a.category_applicable(Category::Ffb));
         assert!(a.category_applicable(Category::Steering));
         assert!(a.category_applicable(Category::Pedals));
         assert!(a.category_applicable(Category::Info));
 
-        // Digit 5 (LIGHTSYNC) and 6 (Profiles) are inert: nothing there to
-        // jump to, so the category (and focus) must not change. (Category
-        // order is Info, Ffb, Steering, Pedals, Leds, Profiles: digits 1-6.)
+        // Digit 5 (LIGHTSYNC) is inert: nothing there to jump to. Digit 6
+        // (Profiles) works: the computer-side store still has content, even
+        // with no onboard slots. (Category order is Info, Ffb, Steering,
+        // Pedals, Leds, Profiles: digits 1-6.)
         let mut a = g923_app();
         a.focus = Focus::Sidebar;
         let before = a.category();
@@ -2358,17 +2410,19 @@ mod tests {
         assert_eq!(a.category(), before, "no LIGHTSYNC content to jump to");
         assert_eq!(a.focus, Focus::Sidebar, "an inert digit does not steal focus");
         a.on_key(KeyCode::Char('6'));
-        assert_eq!(a.category(), before, "no Profiles content to jump to");
+        assert_eq!(a.category(), Category::Profiles, "Profiles has content to jump to");
+        assert_eq!(a.focus, Focus::Content, "a jump lands ready to work");
 
-        // Up/Down (move_cat) must skip straight over both instead of
-        // landing on them. Info now sits at the front of the order, not
-        // adjacent to Profiles, so stepping forward past Pedals on a G923
-        // (which hides Leds/Profiles) reaches Setup, not Info.
+        // Up/Down (move_cat) skips Leds but still stops at Profiles.
         a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
         a.move_cat(1);
-        assert!(a.is_setup(), "skips Leds and Profiles going forward, to Setup");
+        assert_eq!(a.category(), Category::Profiles, "skips Leds going forward, to Profiles");
+        a.move_cat(1);
+        assert!(a.is_setup(), "Profiles is the last content category; another step reaches Setup");
         a.move_cat(-1);
-        assert_eq!(a.category(), Category::Pedals, "skips them going backward too");
+        assert_eq!(a.category(), Category::Profiles);
+        a.move_cat(-1);
+        assert_eq!(a.category(), Category::Pedals, "skips Leds going backward too");
     }
 
     #[test]
@@ -2377,8 +2431,8 @@ mod tests {
         let mut a = g923_app();
         a.focus = Focus::Sidebar;
         // Digit-jump through every category (1..=6) plus Setup (7): none of
-        // these may panic for a wheel whose registry has no Leds/Profiles/
-        // Info rows at all.
+        // these may panic for a wheel whose registry has no Leds/Info rows
+        // at all (Profiles always has the computer-side store).
         for d in '1'..='7' {
             a.on_key(KeyCode::Char(d));
         }

@@ -1467,18 +1467,17 @@ mod tests {
     }
 
     #[test]
-    fn g923_sidebar_omits_leds_and_profiles() {
+    fn g923_sidebar_omits_leds_but_keeps_profiles() {
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let a = g923_app();
         term.draw(|f| draw(f, &a)).unwrap();
         let text = screen(&term);
         assert!(!text.contains("LIGHTSYNC"), "LIGHTSYNC must be hidden for a G923:\n{text}");
-        assert!(
-            !text.contains("Profiles / mode"),
-            "Profiles / mode must be hidden for a G923:\n{text}"
-        );
-        // The categories with real content, plus Setup, are all still there.
-        for label in ["Force feedback", "Steering", "Pedals", "Info / Testing", "Setup"] {
+        // The categories with real content, plus Profiles (the computer
+        // profile store) and Setup, are all still there.
+        for label in
+            ["Force feedback", "Steering", "Pedals", "Info / Testing", "Profiles / mode", "Setup"]
+        {
             assert!(text.contains(label), "missing {label}:\n{text}");
         }
     }

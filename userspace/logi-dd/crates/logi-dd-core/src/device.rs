@@ -43,11 +43,15 @@ impl WheelModel {
     /// least one row in `self.settings()`, or `Info` (its identity rows can
     /// be empty on a classic wheel, but the page also carries the live
     /// input monitor and force-feedback test sims, which work off evdev
-    /// regardless of model). See [`Device::category_has_content`], which
-    /// this backs; kept as a model-only free function for the same reason
-    /// as [`WheelModel::settings`].
+    /// regardless of model), or `Profiles` (its computer-side profile store
+    /// snapshots whatever settings this model does have - see
+    /// `crate::profiles` - so the category is never truly empty even for a
+    /// wheel with no onboard slots at all, e.g. a G923). See
+    /// [`Device::category_has_content`], which this backs; kept as a
+    /// model-only free function for the same reason as
+    /// [`WheelModel::settings`].
     pub fn category_has_content(self, cat: Category) -> bool {
-        cat == Category::Info || self.settings().iter().any(|s| s.category == cat)
+        matches!(cat, Category::Info | Category::Profiles) || self.settings().iter().any(|s| s.category == cat)
     }
 }
 
@@ -550,14 +554,16 @@ mod tests {
     }
 
     #[test]
-    fn a_g923_has_no_content_for_leds_or_profiles_but_info_always_has_content() {
-        // A classic wheel has no LIGHTSYNC strip or onboard profile slots at
-        // all: those sidebar pages would be blank, so frontends must hide
-        // them rather than open onto nothing. Info always has content
-        // (the live input monitor + test sims work regardless of model).
+    fn a_g923_has_no_content_for_leds_but_info_and_profiles_always_have_content() {
+        // A classic wheel has no LIGHTSYNC strip at all: that sidebar page
+        // would be blank, so frontends must hide it rather than open onto
+        // nothing. Info always has content (the live input monitor + test
+        // sims work regardless of model), and so does Profiles: even with
+        // no onboard slots, the computer-side profile store still has the
+        // wheel's own four settings to save/apply.
         let d = Device::with_io_and_model(FakeSysfs::new(), WheelModel::G923);
         assert!(!d.category_has_content(Category::Leds));
-        assert!(!d.category_has_content(Category::Profiles));
+        assert!(d.category_has_content(Category::Profiles));
         assert!(d.category_has_content(Category::Info));
         assert!(d.category_has_content(Category::Ffb));
         assert!(d.category_has_content(Category::Steering));

@@ -10,6 +10,15 @@
 //! [`Kind`]) so a profile survives hand-editing and version drift: unknown
 //! or unparsable lines fail individually on apply, never the whole file.
 //!
+//! Wheel-agnostic by construction: [`save_in`]/[`apply_in`] walk
+//! `Device::settings()`, the registry the connected model's own rows come
+//! from, not a fixed constant. A wheel with no onboard profile store or
+//! desktop/onboard split at all (a G923, always reported as desktop mode by
+//! [`crate::device::Device::current_mode`]) still gets a real snapshot of
+//! whatever settings it does have (range, gain, autocenter,
+//! combine_pedals), and applying one back to it works the same way as on a
+//! direct-drive wheel.
+//!
 //! Excluded from a snapshot: read-only attrs (nothing to replay), actions
 //! (a snapshot must never trigger a calibration), slot-text attrs (the
 //! onboard slot names belong to the wheel, not a host profile), attrs the
@@ -25,7 +34,6 @@ use std::path::{Path, PathBuf};
 use crate::device::Device;
 use crate::error::Error;
 use crate::kind::Kind;
-use crate::registry::REGISTRY;
 use crate::setting::{Access, ModeReq, SettingSpec};
 use crate::sysfs::SysfsIo;
 
@@ -89,11 +97,17 @@ pub fn list_in(dir: &Path) -> Vec<String> {
 /// Snapshot the device's current settings into `<dir>/<name>.profile`,
 /// creating the directory as needed. Unreadable or unavailable attrs are
 /// skipped rather than failing the save.
+///
+/// Walks `dev.settings()` (the registry this specific model's rows come
+/// from: the DD `wheel_*` set, or a classic wheel's own small set), not a
+/// bare registry constant, so a wheel with no onboard profile store at all
+/// (a G923) still gets a real snapshot of whatever it does have (range,
+/// gain, autocenter, combine_pedals) instead of a header-only file.
 pub fn save_in<S: SysfsIo>(dir: &Path, name: &str, dev: &Device<S>) -> Result<(), Error> {
     let path = profile_path(dir, name)?;
     let mut out = String::from(FILE_HEADER);
     out.push('\n');
-    for spec in REGISTRY.iter().filter(|s| snapshotted(s)) {
+    for spec in dev.settings().iter().filter(|s| snapshotted(s)) {
         if !dev.available(spec.attr) {
             continue;
         }
@@ -365,5 +379,62 @@ mod tests {
         delete("envtest").unwrap();
         assert!(list().is_empty());
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    /// A fake G923 (classic engine): no `wheel_*` attrs, no onboard profile
+    /// store or mode split at all, just its own four settings, set through
+    /// `Device::write` (not a raw sysfs string) so the seeded values are
+    /// exactly what `Kind::ScaledPercent`'s round trip produces.
+    fn g923_wheel() -> Device<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        fs.set("gain", "0");
+        fs.set("autocenter", "0");
+        fs.set("combine_pedals", "0");
+        let dev = Device::with_io_and_model(fs, crate::device::WheelModel::G923);
+        dev.write("gain", &Value::Percent(80)).unwrap();
+        dev.write("autocenter", &Value::Percent(50)).unwrap();
+        dev
+    }
+
+    #[test]
+    fn g923_save_apply_round_trips_its_classic_settings() {
+        // A wheel with no onboard profile store at all must still get a
+        // real computer-side snapshot of what it does have, and applying it
+        // back after a drift must restore every value - the same contract
+        // `save_apply_round_trips_the_snapshot` proves for a DD wheel.
+        let dir = tempdir();
+        let a = g923_wheel();
+        let (range, gain, autocenter) =
+            (a.read("range").unwrap(), a.read("gain").unwrap(), a.read("autocenter").unwrap());
+        save_in(&dir, "classic", &a).unwrap();
+        assert_eq!(list_in(&dir), vec!["classic".to_string()]);
+
+        // Drift every saved value away from what was snapshotted.
+        a.write("range", &Value::Int(540)).unwrap();
+        a.write("gain", &Value::Percent(20)).unwrap();
+        a.write("autocenter", &Value::Percent(10)).unwrap();
+        a.write("combine_pedals", &Value::Enum(1)).unwrap();
+
+        let errors = apply_in(&dir, "classic", &a).unwrap();
+        assert_eq!(errors, Vec::new(), "clean apply: {errors:?}");
+        assert_eq!(a.read("range").unwrap(), range);
+        assert_eq!(a.read("gain").unwrap(), gain);
+        assert_eq!(a.read("autocenter").unwrap(), autocenter);
+        assert_eq!(a.read("combine_pedals").unwrap(), Value::Enum(0));
+    }
+
+    #[test]
+    fn g923_saved_file_has_its_own_four_attrs_never_the_dd_wheel_set() {
+        let dir = tempdir();
+        save_in(&dir, "classic", &g923_wheel()).unwrap();
+        let text = fs::read_to_string(dir.join("classic.profile")).unwrap();
+        assert!(text.contains("range=900\n"));
+        assert!(text.contains("combine_pedals=0\n"));
+        assert!(text.contains("gain="));
+        assert!(text.contains("autocenter="));
+        // Never a DD wheel_* line: this is a different device model, not
+        // "DD with everything missing" (see `save_in`'s doc comment).
+        assert!(!text.contains("wheel_"));
     }
 }

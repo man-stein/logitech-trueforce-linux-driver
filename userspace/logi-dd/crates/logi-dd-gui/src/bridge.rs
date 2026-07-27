@@ -588,10 +588,12 @@ pub fn to_setting_row_with_error(row: &Row, error: Option<&str>) -> SettingRow {
 
 /// Which of `Category::ALL` belong in the sidebar for a wheel of `model`:
 /// every category with content (`WheelModel::category_has_content`), in
-/// `Category::ALL`'s order. A G923 has no Leds/Profiles rows at all (see
-/// `CLASSIC_REGISTRY`), so both are dropped; a DD wheel (`Rs50`/`GPro`/
-/// `Unknown`) keeps every category, unchanged from before this function
-/// existed.
+/// `Category::ALL`'s order. A G923 has no LIGHTSYNC rows at all (see
+/// `CLASSIC_REGISTRY`), so `Leds` is dropped; `Profiles` stays (the
+/// computer-side store still snapshots its own four settings, just with no
+/// onboard slot picker or mode row alongside it - see `show-computer-
+/// profiles` in `ui/app.slint`). A DD wheel (`Rs50`/`GPro`/`Unknown`) keeps
+/// every category, unchanged from before this function existed.
 ///
 /// This is the single source of truth the sidebar's labels and its index
 /// mapping (`category_at`/`index_of` below) are both built from, so the two
@@ -1420,10 +1422,13 @@ mod tests {
     }
 
     #[test]
-    fn visible_categories_drops_leds_and_profiles_for_a_g923() {
+    fn visible_categories_drops_leds_but_keeps_profiles_for_a_g923() {
+        // No LIGHTSYNC strip at all, so that page is dropped; Profiles stays
+        // (the computer-side store still snapshots its four settings, even
+        // with no onboard slots to show alongside it).
         let visible = visible_categories(WheelModel::G923);
         assert!(!visible.contains(&Category::Leds));
-        assert!(!visible.contains(&Category::Profiles));
+        assert!(visible.contains(&Category::Profiles));
         assert!(visible.contains(&Category::Info));
         assert!(visible.contains(&Category::Ffb));
         assert!(visible.contains(&Category::Steering));
@@ -1441,16 +1446,16 @@ mod tests {
     fn index_of_returns_negative_one_for_a_hidden_category() {
         let visible = visible_categories(WheelModel::G923);
         assert_eq!(index_of(&visible, Category::Leds), -1);
-        assert_eq!(index_of(&visible, Category::Profiles), -1);
+        assert_ne!(index_of(&visible, Category::Profiles), -1, "Profiles stays selectable on a G923");
     }
 
     #[test]
-    fn category_labels_model_for_a_g923_excludes_leds_and_profiles() {
+    fn category_labels_model_for_a_g923_excludes_leds_but_keeps_profiles() {
         let visible = visible_categories(WheelModel::G923);
         let model = category_labels_model(&visible);
         let labels: Vec<String> = model.iter().map(|s| s.to_string()).collect();
         assert!(!labels.contains(&Category::Leds.label().to_string()));
-        assert!(!labels.contains(&Category::Profiles.label().to_string()));
+        assert!(labels.contains(&Category::Profiles.label().to_string()));
     }
 
     #[test]

@@ -15,6 +15,10 @@ export component ComputerProfiles inherits Rectangle {
     // picks the error color over the ok color.
     in property <string> status: "";
     in property <bool> status-error: false;
+    // Whether the connected wheel has no onboard mode/slots at all (a
+    // G923): swaps out the helper text's mention of "onboard mode", which
+    // would otherwise describe a feature this wheel does not have.
+    in property <bool> classic-wheel: false;
 
     callback apply-profile(string);
     callback delete-profile(string);
@@ -36,7 +40,9 @@ export component ComputerProfiles inherits Rectangle {
             color: Theme.text-color;
         }
         Text {
-            text: "Snapshots of every wheel setting, stored on this computer. Apply replays a snapshot onto the wheel; the wheel's own onboard slots are managed in onboard mode instead.";
+            text: root.classic-wheel
+                ? "Snapshots of every wheel setting, stored on this computer. Apply replays a snapshot onto the wheel."
+                : "Snapshots of every wheel setting, stored on this computer. Apply replays a snapshot onto the wheel; the wheel's own onboard slots are managed in onboard mode instead.";
             font-size: 12px;
             color: Theme.muted-text-color;
             wrap: word-wrap;

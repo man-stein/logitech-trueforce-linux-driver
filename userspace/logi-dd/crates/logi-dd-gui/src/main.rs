@@ -390,10 +390,10 @@ fn rebuild_sidebar(app: &App, visible: &[Category]) {
     // selecting it starts the evdev reader, leaving it stops it. Always
     // present (every model has Info content), so this is never -1.
     app.set_info_index(bridge::index_of(visible, Category::Info));
-    // The Profiles category swaps in the computer-side profile store while
-    // the wheel is in desktop mode (see `show-computer-profiles`); -1 (and
-    // so never selectable) for a wheel with no onboard profile store, e.g.
-    // a G923.
+    // The Profiles category is always present, for every model: it swaps in
+    // the computer-side profile store (see `show-computer-profiles`), which
+    // works for a wheel with no onboard slots at all, e.g. a G923, same as
+    // for a DD wheel in desktop mode.
     app.set_profiles_index(bridge::index_of(visible, Category::Profiles));
     // The Leds category carries the LIGHTSYNC preview strip above its
     // composed settings list; -1 for a wheel with no LIGHTSYNC strip at
@@ -911,8 +911,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // every category (`WheelModel::default()` is `Unknown`, treated as a
     // DD wheel, the same fallback used everywhere else) until the first
     // `Response::Info` reports the wheel's real model and narrows it down
-    // (a G923 has neither Leds nor Profiles content; see
-    // `bridge::visible_categories`). The sidebar's labels and its index
+    // (a G923 has no Leds content; see `bridge::visible_categories`). The
+    // sidebar's labels and its index
     // mapping (`bridge::category_at`/`index_of`) are always built from
     // this same list, via `rebuild_sidebar`, so the two can never disagree
     // about which row is at which index.
@@ -1232,17 +1232,19 @@ fn main() -> Result<(), slint::PlatformError> {
                         let firmware =
                             bridge::merge_info_firmware(&app.get_info_firmware(), &info.firmware);
                         app.set_info_firmware(firmware.into());
-                        // The classic engine (G923) has no onboard profile
-                        // store and no LIGHTSYNC strip at all: gate the two
-                        // DD-only panels that are not built from registry
-                        // rows (`ComputerProfiles`, the LIGHTSYNC preview),
-                        // so they hide instead of rendering onto a wheel
-                        // that cannot back them.
+                        // The classic engine (G923) has no LIGHTSYNC strip
+                        // and no desktop/onboard split at all: gate the
+                        // LIGHTSYNC preview panel (not built from registry
+                        // rows, so nothing else hides it) and the Profiles
+                        // page's Mode row/header mode toggle on this, in
+                        // `ui/app.slint`. The computer-side profile store
+                        // itself is NOT gated on it: it always renders for
+                        // the Profiles category, on a G923 too (see
+                        // `show-computer-profiles`).
                         app.set_classic_wheel(matches!(info.model, WheelModel::G923));
-                        // The sidebar itself: a G923 has no Leds/Profiles
-                        // content at all, so those rows drop out of the
-                        // sidebar entirely (not just the two DD-only panels
-                        // above), same as the TUI. See
+                        // The sidebar itself: a G923 has no Leds content at
+                        // all, so that row drops out of the sidebar
+                        // entirely; Profiles stays, same as the TUI. See
                         // `apply_visible_categories`.
                         apply_visible_categories(
                             &app,
