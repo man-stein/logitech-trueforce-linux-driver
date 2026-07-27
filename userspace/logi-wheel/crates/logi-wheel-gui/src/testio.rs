@@ -310,7 +310,7 @@ pub fn run_test_sequence(
         }
     };
     let mut device = EvdevFf { file };
-    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_GAP, on_event)
+    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_COUNTDOWN, on_event)
 }
 
 #[cfg(test)]

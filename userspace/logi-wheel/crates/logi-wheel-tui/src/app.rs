@@ -634,7 +634,6 @@ impl<S: SysfsIo> App<S> {
             || self.profile_name_edit.is_some()
             || self.profile_delete_confirm.is_some()
             || self.test.confirm.is_some()
-            || self.test.countdown_active()
             || self.tf_intensity_edit.is_some()
             || self.tf_pitch_edit.is_some()
             || self.tf_sweep_confirm
@@ -1122,23 +1121,14 @@ impl<S: SysfsIo> App<S> {
         self.tf_sweep.is_some()
     }
 
-    /// Advance a ticking force-sim countdown, run by the main loop's
-    /// ticks (the Info page already polls at ~30 Hz while its monitor is
-    /// live, `test_polling`, so the "Starting in N..." status keeps up
-    /// and 's' cancels promptly - no extra poll-timeout wiring needed). A
-    /// no-op before the countdown's deadline or with nothing armed;
-    /// updates the status line once it fires the sim.
-    pub fn tick_sim_countdown(&mut self) {
-        if let Some(status) = self.test.tick_countdown() {
-            self.status = status;
-        }
-    }
-
     /// Pick up a just-finished sequence's one-line summary (see
-    /// `TestView::tick_sim_status`), run alongside `tick_sim_countdown`.
-    /// A no-op most ticks; the per-step text while a sequence plays is
-    /// shown inline by the Test area panel itself (`TestView::sim_status_line`),
-    /// not through this status line.
+    /// `TestView::tick_sim_status`), run by the main loop's ticks (the
+    /// Info page already polls at ~30 Hz while its monitor is live, so
+    /// this and the live per-step plan - rendered straight off
+    /// `TestView::sim_progress` every draw, no separate tick needed -
+    /// both keep up promptly). A no-op most ticks; the per-step list
+    /// while a sequence plays is the Test area panel itself, not this
+    /// status line.
     pub fn tick_sim_status(&mut self) {
         if let Some(status) = self.test.tick_sim_status() {
             self.status = status;
@@ -1878,15 +1868,14 @@ impl<S: SysfsIo> App<S> {
         }
         if self.is_info() {
             // A pending sim confirmation swallows the next key: only 'y'
-            // arms the 5 s countdown (see below), anything else cancels
-            // outright. Nothing ever plays without this explicit step.
+            // starts the sequence, anything else cancels outright.
+            // Nothing ever plays without this explicit step. Starting it
+            // shows the full plan immediately (every row pending) and the
+            // first step's own countdown begins right away - there is no
+            // separate pre-sequence wait to arm.
             if let Some(kind) = self.test.confirm.take() {
                 self.status = if matches!(key, Char('y') | Char('Y')) {
-                    self.test.arm_countdown(kind);
-                    format!(
-                        "{}: starting in 5... keep hands and objects clear of the rim (s cancels)",
-                        kind.label()
-                    )
+                    self.test.spawn_sim(kind)
                 } else {
                     "test: simulation cancelled".to_string()
                 };
@@ -1955,14 +1944,11 @@ impl<S: SysfsIo> App<S> {
                         self.driver_version_text()
                     );
                 }
-                // Cancel a ticking countdown (the sim never starts), else
-                // stop an already-playing sim; a no-op while neither.
-                Char('s') => {
-                    if self.test.cancel_countdown() {
-                        self.status = "test: countdown cancelled".to_string();
-                    } else if self.test.stop_sim() {
-                        self.status = "test: simulation stopped".to_string();
-                    }
+                // Stop a running sequence, whether it is in a step's
+                // countdown or actually playing one; a no-op while
+                // nothing plays.
+                Char('s') if self.test.stop_sim() => {
+                    self.status = "test: simulation stopped".to_string();
                 }
                 _ => {}
             }
@@ -2934,9 +2920,10 @@ mod tests {
     }
 
     #[test]
-    fn info_sim_y_arms_a_countdown_instead_of_playing_immediately() {
+    fn info_sim_y_starts_the_sequence_with_its_full_plan_visible() {
         use crate::wheel_test::SimKind;
         use crossterm::event::KeyCode;
+        use logi_wheel_core::fftest;
         let mut a = info_view_app();
         a.test.dev = Some(logi_wheel_core::evtest::WheelInput {
             event_path: "/nonexistent/event99".to_string(),
@@ -2946,24 +2933,16 @@ mod tests {
         assert_eq!(a.test.confirm, Some(SimKind::Force));
         a.on_key(KeyCode::Char('y'));
         assert!(a.test.confirm.is_none(), "confirm resolved");
-        assert!(a.test.countdown_active(), "armed a countdown, not playing yet");
-        assert!(!a.test.sim_running(), "the wheel has not moved yet");
-        assert!(a.status.contains("starting in 5"), "status: {}", a.status);
-
-        // 's' during the countdown cancels it outright, same key that
-        // stops an already-playing sim; the sim never starts.
-        a.on_key(KeyCode::Char('s'));
-        assert!(!a.test.countdown_active());
-        assert!(!a.test.sim_running());
-        assert!(a.status.contains("countdown cancelled"), "status: {}", a.status);
-
-        // Advancing the loop's tick (`tick_sim_countdown`) before the
-        // deadline is a no-op.
-        a.on_key(KeyCode::Char('f'));
-        a.on_key(KeyCode::Char('y'));
-        assert!(a.test.countdown_active());
-        a.tick_sim_countdown();
-        assert!(a.test.countdown_active(), "deadline not reached yet");
+        assert_eq!(a.test.sim_kind, Some(SimKind::Force));
+        // The whole plan (every row pending) is visible immediately -
+        // before the background thread has even opened the device - and
+        // there is no separate pre-sequence countdown left to arm: the
+        // sequence itself, via fftest::STEP_COUNTDOWN, counts down before
+        // its own first step.
+        let progress = a.test.sim_progress();
+        assert_eq!(progress.states.len(), fftest::FORCE_SEQUENCE.len());
+        assert!(progress.states.iter().all(|s| *s == fftest::StepState::Pending));
+        assert!(a.status.contains("playing"), "status: {}", a.status);
     }
 
     #[test]

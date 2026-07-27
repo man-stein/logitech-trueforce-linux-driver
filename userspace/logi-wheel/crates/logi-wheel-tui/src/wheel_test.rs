@@ -3,14 +3,15 @@
 //! sequences.
 //!
 //! The pure logic (event decoding, degrees, button names, discovery,
-//! and - since this task - the step tables and `ff_effect` construction
-//! for the sequences themselves) comes from `logi_wheel_core` (`evtest`
-//! and `fftest`). This module owns the open file handle the synchronous
-//! TUI polls each tick, the small `EVIOCSFF`/`EVIOCRMFF`/`EVIOCGBIT`
-//! ioctl surface a sequence needs (mirroring the GUI crate's `testio`
-//! module; kept out of core so it stays dependency-free), and the
-//! per-step status text the sequence thread hands back for the view to
-//! poll.
+//! the step tables, `ff_effect` construction, and the rendered-plan
+//! state machine [`fftest::SequenceProgress`] the running sequences feed)
+//! comes from `logi_wheel_core` (`evtest` and `fftest`). This module owns
+//! the open file handle the synchronous TUI polls each tick, the small
+//! `EVIOCSFF`/`EVIOCRMFF`/`EVIOCGBIT` ioctl surface a sequence needs
+//! (mirroring the GUI crate's `testio` module; kept out of core so it
+//! stays dependency-free), and the sequence thread that folds every step
+//! event into a shared [`fftest::SequenceProgress`] the view reads live
+//! each draw.
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
@@ -18,25 +19,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use logi_wheel_core::evtest::{self, TestEvent, WheelInput, EVENT_SIZE};
-use logi_wheel_core::fftest::{self, DeviceError, FfDevice, FfEffect, SequenceEvent};
+use logi_wheel_core::fftest::{self, DeviceError, FfDevice, FfEffect, SequenceProgress};
 pub use logi_wheel_core::fftest::SimKind;
 use logi_wheel_core::WheelModel;
-
-/// How long a confirmed sequence waits before it actually starts, giving
-/// the user time to get hands on (or off) the wheel.
-const SIM_COUNTDOWN: Duration = fftest::SIM_COUNTDOWN;
-
-/// A confirmed sequence ('y' after `request_sim`'s prompt) waiting out
-/// `SIM_COUNTDOWN` before [`TestView::tick_countdown`] actually starts it.
-/// Cancellable the whole time ('s', the same key that stops a playing
-/// sequence); cancelling means it never starts at all.
-struct SimCountdown {
-    kind: SimKind,
-    started: Instant,
-}
 
 /// The Test view's whole state: discovery result, the monitor's open fd
 /// and live input state, and the sim confirm/running flags.
@@ -71,21 +58,27 @@ pub struct TestView {
     pub axes: [i32; 4],
     /// A sequence waiting for its y/n confirmation.
     pub confirm: Option<SimKind>,
-    /// A confirmed sequence riding out its countdown before it actually
-    /// starts (see `SimCountdown`); `None` while nothing is counting
-    /// down.
-    countdown: Option<SimCountdown>,
+    /// The kind of the most recently confirmed sequence, set the instant
+    /// `spawn_sim` starts it. Left in place after the run ends (unlike
+    /// `sim_running`, which clears) so the finished plan - see
+    /// `sim_progress` - stays on screen instead of disappearing; only the
+    /// next `spawn_sim` replaces it.
+    pub sim_kind: Option<SimKind>,
     /// Set while a sequence thread plays; cleared by the thread itself.
     sim_running: Arc<AtomicBool>,
-    /// Set by `stop_sim` ('s' while playing); the sequence thread polls
-    /// it and stops + erases the current step's effect within one poll
-    /// tick, ending the run without starting any further step.
-    /// Re-armed (cleared) by the next `spawn_sim`.
+    /// Set by `stop_sim` ('s' while playing, including during a step's
+    /// countdown); the sequence thread polls it and stops + erases the
+    /// current step's effect within one poll tick, ending the run
+    /// without starting any further step. Re-armed (cleared) by the next
+    /// `spawn_sim`.
     sim_cancel: Arc<AtomicBool>,
-    /// The current step's label (or a skip notice), updated by the
-    /// sequence thread on every step; read live by the view while
-    /// `sim_running()` (see `sim_status_line`).
-    sim_step_status: Arc<Mutex<String>>,
+    /// Every row's live state for `sim_kind`'s step table (pending,
+    /// counting down, playing, done, or skipped - see
+    /// `fftest::SequenceProgress`), folded from the sequence thread's
+    /// events. Read live by the view every draw (`sim_progress`); stays
+    /// exactly as the thread left it once the run ends, which is what
+    /// keeps a finished step's row visible instead of it disappearing.
+    sim_progress: Arc<Mutex<SequenceProgress>>,
     /// Set exactly once by the sequence thread when it ends, holding the
     /// one-line summary for the main status line; taken (and cleared) by
     /// `tick_sim_status`.
@@ -107,10 +100,10 @@ impl Default for TestView {
             hat: (0, 0),
             axes: [0; 4],
             confirm: None,
-            countdown: None,
+            sim_kind: None,
             sim_running: Arc::new(AtomicBool::new(false)),
             sim_cancel: Arc::new(AtomicBool::new(false)),
-            sim_step_status: Arc::new(Mutex::new(String::new())),
+            sim_progress: Arc::new(Mutex::new(SequenceProgress::new(&[]))),
             sim_final: Arc::new(Mutex::new(None)),
         }
     }
@@ -142,13 +135,32 @@ impl TestView {
     /// The current step's label (or skip notice) while a sequence plays;
     /// `None` once it has stopped (the final summary goes through
     /// `tick_sim_status`/`self.status` instead).
-    pub fn sim_status_line(&self) -> Option<String> {
-        self.sim_running().then(|| self.sim_step_status.lock().unwrap().clone())
+    ///
+    /// A clone of the current live progress (one row per step in
+    /// `sim_kind`'s table): pending, counting down, playing, done, or
+    /// skipped. Read fresh every draw while the Info page is open, which
+    /// is what makes the countdown visibly tick down and a step's row
+    /// flip to done in real time - no separate per-tick poll is needed.
+    /// Stays exactly as the sequence thread left it once the run ends
+    /// (see `sim_kind`'s doc comment), so a finished run's rows remain on
+    /// screen instead of disappearing.
+    pub fn sim_progress(&self) -> SequenceProgress {
+        self.sim_progress.lock().unwrap().clone()
+    }
+
+    /// Test-only direct access to the live progress, for render-check
+    /// tests (in this module and in `ui`) that need to show a specific
+    /// mid-run-looking state (a done row, a skipped row, ...) without any
+    /// real device I/O or sleeping - the sequence thread is the only
+    /// other writer, and no test here runs one concurrently with this.
+    #[cfg(test)]
+    pub fn sim_progress_for_test(&self) -> std::sync::MutexGuard<'_, SequenceProgress> {
+        self.sim_progress.lock().unwrap()
     }
 
     /// Take the just-finished sequence's one-line summary, if the thread
-    /// has posted one since the last call. Run every tick alongside
-    /// `tick_countdown` (see `App::tick_sim_status`); a no-op most ticks.
+    /// has posted one since the last call. Run every tick (see
+    /// `App::tick_sim_status`); a no-op most ticks.
     pub fn tick_sim_status(&mut self) -> Option<String> {
         self.sim_final.lock().unwrap().take()
     }
@@ -263,11 +275,16 @@ impl TestView {
 
     /// Spawn the confirmed sequence on its own thread (the TUI's event
     /// loop must keep drawing while it plays) and return the status line
-    /// to show immediately. The thread runs every runnable step to
-    /// completion, cancellation, or device-gone, posting per-step text
-    /// into `sim_step_status` and a final summary into `sim_final`
+    /// to show immediately. The full plan (every row `Pending`) is
+    /// visible the instant this returns, before the thread has even
+    /// opened the device - see `sim_progress`'s doc comment - and the
+    /// thread's own first act is `fftest::STEP_COUNTDOWN`'s lead-in for
+    /// row 0, so nothing plays without a visible countdown, including
+    /// the very first step. The thread runs every runnable step to
+    /// completion, cancellation, or device-gone, folding each step event
+    /// into `sim_progress` and posting a final summary into `sim_final`
     /// (`tick_sim_status` picks that up); a device that vanishes mid-run
-    /// cleans up silently, matching `sim_step_status`'s wording.
+    /// cleans up silently, matching the summary's wording.
     pub fn spawn_sim(&mut self, kind: SimKind) -> String {
         let Some(dev) = &self.dev else { return "test: no wheel".to_string() };
         if self.sim_running() {
@@ -277,16 +294,17 @@ impl TestView {
         self.sim_cancel.store(false, Ordering::Relaxed);
         let steps = kind.steps();
         let model = self.model;
-        *self.sim_step_status.lock().unwrap() = format!("{}: starting...", kind.label());
+        self.sim_kind = Some(kind);
+        *self.sim_progress.lock().unwrap() = SequenceProgress::new(steps);
         *self.sim_final.lock().unwrap() = None;
 
         let path = dev.event_path.clone();
         let running = self.sim_running.clone();
         let cancel = self.sim_cancel.clone();
-        let step_status = self.sim_step_status.clone();
+        let progress = self.sim_progress.clone();
         let final_status = self.sim_final.clone();
         std::thread::spawn(move || {
-            let outcome = run_test_sequence(&path, steps, model, &cancel, &step_status);
+            let outcome = run_test_sequence(&path, steps, model, &cancel, &progress);
             *final_status.lock().unwrap() = Some(format!("test: {} {}", kind.label(), outcome.summary()));
             running.store(false, Ordering::Relaxed);
         });
@@ -294,53 +312,16 @@ impl TestView {
     }
 
     /// Stop the playing sequence ('s' in the Info view): flag the sim
-    /// thread, which stops + erases the current step's effect within its
-    /// poll tick and ends the run without starting the next step. True
-    /// when something was playing, false for a no-op.
+    /// thread, which - whether it is currently in a step's countdown or
+    /// actually playing one - stops and erases within one poll tick and
+    /// ends the run without starting anything further. True when
+    /// something was playing, false for a no-op.
     pub fn stop_sim(&self) -> bool {
         if !self.sim_running() {
             return false;
         }
         self.sim_cancel.store(true, Ordering::Relaxed);
         true
-    }
-
-    /// Arm the countdown after 'y' confirms a sequence: nothing plays
-    /// yet, the wheel does not move, until `tick_countdown` runs it out.
-    pub fn arm_countdown(&mut self, kind: SimKind) {
-        self.countdown = Some(SimCountdown { kind, started: Instant::now() });
-    }
-
-    /// Whether a countdown is currently ticking down.
-    pub fn countdown_active(&self) -> bool {
-        self.countdown.is_some()
-    }
-
-    /// Seconds left in the countdown's whole-second display (5 down to 1;
-    /// the tick that would show 0 fires the sequence instead, via
-    /// `tick_countdown`). `None` while nothing is counting down.
-    pub fn countdown_seconds_left(&self) -> Option<u64> {
-        self.countdown.as_ref().map(|c| {
-            let elapsed = c.started.elapsed().as_secs();
-            SIM_COUNTDOWN.as_secs().saturating_sub(elapsed).max(1)
-        })
-    }
-
-    /// Cancel a ticking countdown ('s' in the Info view, the same key that
-    /// stops an already-playing sequence): it never starts. True when a
-    /// countdown was actually cancelled, false for a no-op.
-    pub fn cancel_countdown(&mut self) -> bool {
-        self.countdown.take().is_some()
-    }
-
-    /// Advance the countdown; once `SIM_COUNTDOWN` has elapsed, starts the
-    /// confirmed sequence (via `spawn_sim`) and returns the status line to
-    /// show. Run every main-loop tick while `countdown_active()`; a no-op
-    /// (returns `None`) before the deadline or with nothing armed.
-    pub fn tick_countdown(&mut self) -> Option<String> {
-        let kind = self.countdown.as_ref().filter(|c| c.started.elapsed() >= SIM_COUNTDOWN)?.kind;
-        self.countdown = None;
-        Some(self.spawn_sim(kind))
     }
 }
 
@@ -440,19 +421,19 @@ impl FfDevice for EvdevFf {
 }
 
 /// Open `path` and run `steps` against it end to end (see
-/// `fftest::run_sequence`), posting each step's label (or the skip list)
-/// into `step_status` as it goes. `model` resolves each step's logical
-/// direction to the raw value its engine expects (see
-/// `fftest::resolve_direction`). Blocking; the caller runs it on its own
-/// thread. An open failure is folded into the same `SequenceOutcome`
-/// shape a mid-run failure would produce, so callers have one path to
-/// handle either.
+/// `fftest::run_sequence`, with `fftest::STEP_COUNTDOWN`'s 3s lead-in
+/// before every step), folding each event into `progress` as it goes.
+/// `model` resolves each step's logical direction to the raw value its
+/// engine expects (see `fftest::resolve_direction`). Blocking; the caller
+/// runs it on its own thread. An open failure is folded into the same
+/// `SequenceOutcome` shape a mid-run failure would produce, so callers
+/// have one path to handle either.
 fn run_test_sequence(
     path: &str,
     steps: &'static [fftest::SimStep],
     model: WheelModel,
     cancel: &AtomicBool,
-    step_status: &Arc<Mutex<String>>,
+    progress: &Arc<Mutex<SequenceProgress>>,
 ) -> fftest::SequenceOutcome {
     let file = match std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC).open(path) {
         Ok(f) => f,
@@ -466,20 +447,15 @@ fn run_test_sequence(
         }
     };
     let mut device = EvdevFf { file };
-    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_GAP, |ev| {
-        let text = match ev {
-            SequenceEvent::Skipped(labels) => {
-                format!("skipping (not supported by this wheel): {}", labels.join(", "))
-            }
-            SequenceEvent::Step { index, total, step } => fftest::step_status_text(index, total, step),
-        };
-        *step_status.lock().unwrap() = text;
+    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_COUNTDOWN, |ev| {
+        progress.lock().unwrap().apply(&ev);
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn event(type_: u16, code: u16, value: i32) -> Option<TestEvent> {
         let mut b = [0u8; EVENT_SIZE];
@@ -551,9 +527,10 @@ mod tests {
     }
 
     #[test]
-    fn sim_status_line_is_none_while_nothing_plays() {
+    fn sim_progress_is_empty_before_anything_is_confirmed() {
         let v = TestView::default();
-        assert_eq!(v.sim_status_line(), None);
+        assert_eq!(v.sim_kind, None);
+        assert!(v.sim_progress().states.is_empty());
     }
 
     #[test]
@@ -566,27 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn countdown_ticks_down_and_cancels_without_ever_playing() {
-        let mut v = TestView::default();
-        assert!(!v.countdown_active());
-        assert_eq!(v.countdown_seconds_left(), None);
-
-        v.arm_countdown(SimKind::Force);
-        assert!(v.countdown_active());
-        assert_eq!(v.countdown_seconds_left(), Some(5));
-        assert!(v.tick_countdown().is_none(), "deadline not reached yet");
-        assert!(!v.sim_running(), "the wheel has not moved");
-
-        assert!(v.cancel_countdown(), "was actually counting down");
-        assert!(!v.countdown_active());
-        assert_eq!(v.countdown_seconds_left(), None);
-        assert!(!v.cancel_countdown(), "a second cancel is a no-op");
-        assert!(v.tick_countdown().is_none(), "nothing armed after cancel");
-        assert!(!v.sim_running(), "cancelling never starts the sequence");
-    }
-
-    #[test]
-    fn countdown_fires_the_sim_once_its_deadline_passes() {
+    fn spawn_sim_shows_the_whole_plan_pending_before_the_thread_touches_the_device() {
+        // The full plan (every row Pending) must be in place the instant
+        // spawn_sim returns - set synchronously, before the background
+        // thread ever opens the device - so a front-end can render "here
+        // is what is about to happen" with no race against the thread.
         let mut v = TestView {
             dev: Some(WheelInput {
                 event_path: "/nonexistent/event99".to_string(),
@@ -594,23 +555,20 @@ mod tests {
             }),
             ..TestView::default()
         };
-        v.arm_countdown(SimKind::Texture);
-        // Backdate the start past the deadline instead of sleeping out the
-        // real 5 s in a unit test.
-        v.countdown.as_mut().unwrap().started =
-            Instant::now() - SIM_COUNTDOWN - Duration::from_millis(10);
-        let status = v.tick_countdown().expect("deadline has passed");
+        let status = v.spawn_sim(SimKind::Force);
         assert!(status.contains("playing"), "status: {status}");
-        assert!(!v.countdown_active(), "cleared once it fires");
+        assert_eq!(v.sim_kind, Some(SimKind::Force));
+        let progress = v.sim_progress();
+        assert_eq!(progress.states.len(), fftest::FORCE_SEQUENCE.len());
+        assert!(progress.states.iter().all(|s| *s == fftest::StepState::Pending));
     }
 
     #[test]
     fn spawn_sim_end_to_end_posts_its_final_summary_for_tick_sim_status_to_pick_up() {
-        // The full wire-up a real run goes through once the countdown
-        // fires: spawn_sim starts the background thread, which (against a
+        // spawn_sim starts the background thread, which (against a
         // device that is not really there) ends quickly as "gone" and
         // posts a summary that `tick_sim_status` (polled by the main
-        // loop alongside `tick_countdown`) then surfaces.
+        // loop) then surfaces.
         let mut v = TestView {
             dev: Some(WheelInput {
                 event_path: "/nonexistent/event99".to_string(),
@@ -621,12 +579,11 @@ mod tests {
         let status = v.spawn_sim(SimKind::Force);
         assert!(status.contains("playing"), "status: {status}");
         assert!(v.sim_running());
-        assert!(v.sim_status_line().is_some());
 
         // The sequence thread runs on its own; wait it out (bounded, no
         // synchronous join point from here).
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while v.sim_running() && Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while v.sim_running() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(!v.sim_running(), "must finish against a nonexistent node quickly");
@@ -635,22 +592,28 @@ mod tests {
         assert!(summary.contains("force feedback"), "summary: {summary}");
         assert!(summary.contains("disconnected"), "ENOENT reads as gone, not a raw error: {summary}");
         assert_eq!(v.tick_sim_status(), None, "taken, not re-read");
+
+        // The plan stays on screen after the run ends: an open failure
+        // never even reaches ff_bits(), so every row is still Pending -
+        // still there, not cleared away, which is the point.
+        assert_eq!(v.sim_kind, Some(SimKind::Force));
+        assert_eq!(v.sim_progress().states.len(), fftest::FORCE_SEQUENCE.len());
     }
 
     #[test]
     fn run_test_sequence_against_a_missing_node_ends_quietly_as_device_gone() {
         // ENOENT on open (no such node at all) is folded into the same
         // "gone" outcome ENODEV mid-run would produce, so a wheel that
-        // was already unplugged before the countdown fired behaves the
-        // same as one unplugged mid-sequence.
+        // was already unplugged before it was confirmed behaves the same
+        // as one unplugged mid-sequence.
         let cancel = AtomicBool::new(false);
-        let status = Arc::new(Mutex::new(String::new()));
+        let progress = Arc::new(Mutex::new(fftest::SequenceProgress::new(fftest::FORCE_SEQUENCE)));
         let outcome = run_test_sequence(
             "/nonexistent/event99",
             fftest::FORCE_SEQUENCE,
             WheelModel::Rs50,
             &cancel,
-            &status,
+            &progress,
         );
         assert_eq!(outcome.end, fftest::SequenceEnd::DeviceGone);
         assert_eq!(outcome.ran, 0);

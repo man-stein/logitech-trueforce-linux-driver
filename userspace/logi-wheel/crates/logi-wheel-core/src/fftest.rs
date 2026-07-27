@@ -16,14 +16,19 @@
 //! - the step tables ([`FORCE_SEQUENCE`], [`TEXTURE_SEQUENCE`]) and the
 //!   `ff_effect` byte layout ([`build_ff_effect`]) are the one shared
 //!   source of truth;
-//! - the sequencing itself (capability filtering, upload/play/wait/stop/
-//!   erase per step, the inter-step settle gap, cancellation, ENODEV
-//!   handling) is also shared, via [`run_sequence`] against the
-//!   [`FfDevice`] trait;
+//! - the sequencing itself (capability filtering, the per-step countdown,
+//!   upload/play/wait/stop/erase per step, cancellation, ENODEV handling)
+//!   is also shared, via [`run_sequence`] against the [`FfDevice`] trait;
 //! - only the actual file descriptor and the `ioctl`/`libc` calls that
 //!   implement `FfDevice` stay in each front-end (this crate stays
 //!   dependency-free and never opens a device node), mirroring how
-//!   `evtest` keeps event decoding here while the open fd stays out.
+//!   `evtest` keeps event decoding here while the open fd stays out;
+//! - so does the rendered plan's state machine ([`StepState`],
+//!   [`SequenceProgress`]): a front-end confirms a sequence, builds a
+//!   [`SequenceProgress`] with every row `Pending` and shows the whole
+//!   plan immediately, then folds each [`SequenceEvent`] the running
+//!   sequence reports into it. Both front-ends render the exact same rows
+//!   from the exact same source; only the widgets differ.
 //!
 //! Force/direction math is not invented here: `direction` values and the
 //! condition-effect coefficient signs are exactly what
@@ -135,16 +140,35 @@ pub const SIM_LEVEL_30: i16 = 9830;
 /// (spring/damper) steps use.
 pub const SIM_SATURATION_30: u16 = 19661;
 
-/// How long a confirmed sequence waits before it starts (both front-ends'
-/// countdown UI); unify the one magic number instead of each keeping its
-/// own copy.
-pub const SIM_COUNTDOWN: Duration = Duration::from_secs(5);
 /// How often a step's playback wait re-checks the cancel flag.
 pub const SIM_CANCEL_POLL: Duration = Duration::from_millis(10);
-/// A short pause between two steps, letting the wheel settle (and the
-/// user register the label change) before the next effect uploads. Also
-/// cancellable, like everything else in the sequence.
-pub const STEP_GAP: Duration = Duration::from_millis(400);
+
+/// The lead-in countdown [`run_sequence`] runs before every step,
+/// including the first: `ticks` one-second ticks counting down to 1, each
+/// held out for `tick`. Replaces two things the sequence used to do
+/// separately - a fixed 5s wait before the sequence started at all, and a
+/// silent 400ms gap between steps with no visible countdown - with one
+/// coherent behavior: every step, first or not, gets the same visible
+/// "3, 2, 1" before it plays, so nothing stacks and the user always knows
+/// exactly when the wheel is about to move. Cancellable at any tick, same
+/// as a step's own playback wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Countdown {
+    pub ticks: u64,
+    pub tick: Duration,
+}
+
+impl Countdown {
+    /// No countdown at all: zero ticks, so [`run_sequence`] moves straight
+    /// from a step's `Step` event into uploading it. Only meant for tests
+    /// that do not care about countdown behavior and want to stay fast;
+    /// both front-ends always pass [`STEP_COUNTDOWN`].
+    pub const NONE: Countdown = Countdown { ticks: 0, tick: Duration::ZERO };
+}
+
+/// The countdown both front-ends run in production: 3 real seconds (one
+/// tick per second), before every step.
+pub const STEP_COUNTDOWN: Countdown = Countdown { ticks: 3, tick: Duration::from_secs(1) };
 
 // ---------------------------------------------------------------------------
 // `struct ff_effect` (`linux/input.h`), mirrored field for field.
@@ -328,10 +352,11 @@ const fn pulse(label: &'static str, side: Side) -> SimStep {
 /// upload/play/stop/erase cycle (see [`run_sequence`]), same as every
 /// other step.
 ///
-/// Total nominal playback (excluding [`STEP_GAP`] between steps and the
-/// countdown before the sequence starts) is ~10.7 s; with nine inter-step
-/// gaps that lands the whole run around 14.3 s, inside the task's
-/// "thorough, ~12-15 s" target.
+/// Nominal effect playback alone is ~10.7 s; with [`STEP_COUNTDOWN`]'s 3 s
+/// lead-in before each of the ten steps, the whole run takes about 40.7 s
+/// end to end - longer than earlier drafts of this sequence, but every
+/// second of it is either a labelled step actually playing or a counted-
+/// down "it is about to move" warning, never a silent, unexplained wait.
 pub const FORCE_SEQUENCE: &[SimStep] = &[
     pulse("Constant force, left pulse", Side::Left),
     pulse("Constant force, right pulse", Side::Right),
@@ -378,9 +403,9 @@ pub const FORCE_SEQUENCE: &[SimStep] = &[
 /// The TrueForce texture sequence: a frequency progression through four
 /// `FF_PERIODIC`/`FF_SINE` steps (10 Hz through 100 Hz) at the same
 /// moderate amplitude, so the user can feel that the wheel reproduces a
-/// range rather than one fixed tone. Nominal playback is 8 s; with three
-/// inter-step gaps the whole run lands around 9 s, inside the task's
-/// ~8-10 s target.
+/// range rather than one fixed tone. Nominal playback alone is 8 s; with
+/// [`STEP_COUNTDOWN`]'s 3 s lead-in before each of the four steps, the
+/// whole run takes about 20 s end to end.
 pub const TEXTURE_SEQUENCE: &[SimStep] = &[
     SimStep {
         label: "Low rumble (~10 Hz) - a slow, heavy pulse",
@@ -435,11 +460,110 @@ impl SimKind {
     }
 }
 
-/// The status text a front-end shows while `step` (1-based `index` of
+/// The status text a front-end shows while `step` (0-based `row` of
 /// `total`) plays. Shared so both front-ends' status lines read
 /// identically.
-pub fn step_status_text(index: usize, total: usize, step: &SimStep) -> String {
-    format!("step {index}/{total}: {}", step.label)
+pub fn step_status_text(row: usize, total: usize, step: &SimStep) -> String {
+    format!("step {}/{total}: {}", row + 1, step.label)
+}
+
+// ---------------------------------------------------------------------------
+// Per-step progress: the state machine both front-ends render the same
+// way (a persistent list of every step, pending through done/skipped),
+// fed by [`SequenceEvent`]s from a running (or finished) [`run_sequence`].
+// ---------------------------------------------------------------------------
+
+/// One step's state in a rendered plan. Exactly the five states the task
+/// calls for: waiting its turn, ticking down before it plays, playing,
+/// finished (fully, or stopped early by a cancel that still cleaned up),
+/// or skipped for lacking device support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Pending,
+    /// Counting down before this step plays; ticks from
+    /// [`Countdown::ticks`] down to 1.
+    Countdown(u64),
+    Playing,
+    Done,
+    Skipped,
+}
+
+impl StepState {
+    /// A short, state-only word (never relying on color alone to carry
+    /// meaning, since some renderers show these next to a color swatch):
+    /// "pending", "3..." while counting down, "playing", "done",
+    /// "skipped".
+    pub fn status_text(&self) -> String {
+        match self {
+            StepState::Pending => "pending".to_string(),
+            StepState::Countdown(secs) => format!("{secs}..."),
+            StepState::Playing => "playing".to_string(),
+            StepState::Done => "done".to_string(),
+            StepState::Skipped => "skipped".to_string(),
+        }
+    }
+}
+
+/// The whole plan's live progress: one [`StepState`] per row of the step
+/// table currently playing (or just finished), plus which row is
+/// currently active. Lives here, not per front-end, so the GUI and TUI
+/// render the exact same rows from the exact same source - only the
+/// widgets differ. A front-end builds one with [`SequenceProgress::new`]
+/// the moment a sequence is confirmed (so the full plan renders before
+/// anything plays), then folds every [`SequenceEvent`] the running
+/// sequence reports into it with [`SequenceProgress::apply`], and keeps
+/// showing the result after the run ends - nothing here ever reverts a
+/// row back to `Pending`, which is what keeps a finished step's row on
+/// screen instead of it disappearing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceProgress {
+    pub states: Vec<StepState>,
+    /// The row a `Countdown` or `Step` event last pointed at; cleared back
+    /// to `None` once that row's `Done` event lands. `None` before
+    /// anything starts and once the whole run has ended.
+    pub current: Option<usize>,
+}
+
+impl SequenceProgress {
+    /// One row per entry in `steps`, all `Pending`, nothing active yet.
+    pub fn new(steps: &[SimStep]) -> Self {
+        SequenceProgress { states: vec![StepState::Pending; steps.len()], current: None }
+    }
+
+    /// Fold one [`SequenceEvent`] in: mark the row(s) it names with the
+    /// matching [`StepState`]. Unknown rows (out of range for whatever
+    /// `steps` this was built from) are ignored rather than panicking -
+    /// defensive only, every real event's row always fits the table it
+    /// came from.
+    pub fn apply(&mut self, event: &SequenceEvent) {
+        match *event {
+            SequenceEvent::Skipped(rows) => {
+                for &(row, _) in rows {
+                    if let Some(s) = self.states.get_mut(row) {
+                        *s = StepState::Skipped;
+                    }
+                }
+            }
+            SequenceEvent::Countdown { row, seconds_left, .. } => {
+                if let Some(s) = self.states.get_mut(row) {
+                    *s = StepState::Countdown(seconds_left);
+                }
+                self.current = Some(row);
+            }
+            SequenceEvent::Step { row, .. } => {
+                if let Some(s) = self.states.get_mut(row) {
+                    *s = StepState::Playing;
+                }
+                self.current = Some(row);
+            }
+            SequenceEvent::Done { row, .. } => {
+                if let Some(s) = self.states.get_mut(row) {
+                    *s = StepState::Done;
+                }
+                self.current = None;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,70 +656,100 @@ impl SequenceOutcome {
 }
 
 /// What [`run_sequence`] reports back through `on_event`, in the order
-/// they can happen: the skip list once up front (only if non-empty), then
-/// one `Step` per runnable step, right before it uploads.
+/// they can happen: the skip list once up front (only if non-empty, and
+/// always before the first `Countdown`, so a rendered plan can mark those
+/// rows before anything else happens), then a `Countdown`/`Step`/`Done`
+/// triple per runnable step. `row` is always 0-based into the `steps`
+/// slice `run_sequence` was given, and `total` is always `steps.len()` -
+/// both stay stable across skips, so a front-end's rendered plan (one row
+/// per table entry, in table order) never needs to renumber anything.
 #[derive(Debug, Clone, Copy)]
 pub enum SequenceEvent<'a> {
-    Skipped(&'a [&'static str]),
-    Step { index: usize, total: usize, step: &'a SimStep },
+    /// The full skip list, determined once up front from the device's
+    /// `EVIOCGBIT` capability query: each unsupported step's row and
+    /// label.
+    Skipped(&'a [(usize, &'static str)]),
+    /// Row `row` is counting down before it plays; `seconds_left` ticks
+    /// from the countdown's tick count down to 1.
+    Countdown { row: usize, total: usize, step: &'a SimStep, seconds_left: u64 },
+    /// Row `row` is now playing.
+    Step { row: usize, total: usize, step: &'a SimStep },
+    /// Row `row` finished: it played out its full duration, or was
+    /// stopped early by a cancel that arrived mid-play - either way it
+    /// was cleanly stopped and erased first, so its row is done either
+    /// way.
+    Done { row: usize, total: usize },
 }
 
 /// Run `steps` against `device`, resolving each step's logical [`Side`]
 /// against `model` (see [`resolve_direction`] - this is the one place the
-/// DD/G923 direction-sign divergence actually matters to playback): skip
-/// any whose [`StepEffect::ff_type`] the device's [`FfDevice::ff_bits`]
-/// does not advertise, then for each runnable step upload, play, wait out
-/// its `duration_ms` (or until `cancel` flips), stop, and erase - always
-/// all four, on every path, before the next step ever uploads, so no
-/// effect slot leaks. A short `step_gap` between steps (itself
-/// cancellable) lets the wheel settle and the label change register;
-/// pass [`Duration::ZERO`] to skip it (tests do, to stay fast).
+/// DD/G923 direction-sign divergence actually matters to playback).
 ///
-/// Cancellable at any point: before a step starts, during its play wait,
-/// or during the gap after it - in every case the sequence stops right
-/// there (with whatever was already uploaded cleanly stopped and erased)
-/// rather than continuing to the next step.
+/// The device's [`FfDevice::ff_bits`] capability query determines the
+/// full skip list up front (reported once via [`SequenceEvent::Skipped`]
+/// before anything else); every other row then gets `countdown`'s
+/// lead-in (see [`Countdown`]), plays, and is stopped and erased - always
+/// all three, on every path, before the next row's countdown ever starts,
+/// so no effect slot leaks.
+///
+/// Cancellable at any point: before a row's countdown starts, during a
+/// countdown tick, or during a row's play wait - in every case the
+/// sequence stops right there (with whatever was already uploaded
+/// cleanly stopped and erased) rather than continuing to the next row.
 pub fn run_sequence(
     device: &mut impl FfDevice,
     steps: &[SimStep],
     model: WheelModel,
     cancel: &AtomicBool,
-    step_gap: Duration,
+    countdown: Countdown,
     mut on_event: impl FnMut(SequenceEvent),
 ) -> SequenceOutcome {
     let bits = device.ff_bits();
-    let mut runnable: Vec<&SimStep> = Vec::with_capacity(steps.len());
-    let mut skipped: Vec<&'static str> = Vec::new();
-    for step in steps {
-        if ff_type_supported(&bits, step.effect.ff_type()) {
-            runnable.push(step);
-        } else {
-            skipped.push(step.label);
+    let total = steps.len();
+    let mut skip_mask = vec![false; total];
+    let mut skipped_rows: Vec<(usize, &'static str)> = Vec::new();
+    let mut skipped_labels: Vec<&'static str> = Vec::new();
+    for (row, step) in steps.iter().enumerate() {
+        if !ff_type_supported(&bits, step.effect.ff_type()) {
+            skip_mask[row] = true;
+            skipped_rows.push((row, step.label));
+            skipped_labels.push(step.label);
         }
     }
-    if !skipped.is_empty() {
-        on_event(SequenceEvent::Skipped(&skipped));
+    if !skipped_rows.is_empty() {
+        on_event(SequenceEvent::Skipped(&skipped_rows));
     }
 
-    let total = runnable.len();
-    if total == 0 {
-        return SequenceOutcome { end: SequenceEnd::Completed, ran: 0, skipped };
+    if skipped_labels.len() == total {
+        return SequenceOutcome { end: SequenceEnd::Completed, ran: 0, skipped: skipped_labels };
     }
 
     if let Err(e) = device.set_gain(0xFFFF) {
-        return SequenceOutcome { end: e.into_end(), ran: 0, skipped };
+        return SequenceOutcome { end: e.into_end(), ran: 0, skipped: skipped_labels };
     }
 
-    for (i, step) in runnable.into_iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            return SequenceOutcome { end: SequenceEnd::Cancelled, ran: i, skipped };
+    let mut ran = 0;
+    for (row, step) in steps.iter().enumerate() {
+        if skip_mask[row] {
+            continue;
         }
-        on_event(SequenceEvent::Step { index: i + 1, total, step });
+        if cancel.load(Ordering::Relaxed) {
+            return SequenceOutcome { end: SequenceEnd::Cancelled, ran, skipped: skipped_labels };
+        }
+
+        for seconds_left in (1..=countdown.ticks).rev() {
+            on_event(SequenceEvent::Countdown { row, total, step, seconds_left });
+            if wait_out(countdown.tick, cancel) == WaitOutcome::Cancelled {
+                return SequenceOutcome { end: SequenceEnd::Cancelled, ran, skipped: skipped_labels };
+            }
+        }
+
+        on_event(SequenceEvent::Step { row, total, step });
 
         let effect = build_ff_effect(step, model);
         let id = match device.upload(&effect) {
             Ok(id) => id,
-            Err(e) => return SequenceOutcome { end: e.into_end(), ran: i, skipped },
+            Err(e) => return SequenceOutcome { end: e.into_end(), ran, skipped: skipped_labels },
         };
 
         let played = device.play(id, 1);
@@ -611,19 +765,18 @@ pub fn run_sequence(
         device.erase(id);
 
         if let Err(e) = played {
-            return SequenceOutcome { end: e.into_end(), ran: i, skipped };
-        }
-        if wait_outcome == WaitOutcome::Cancelled {
-            return SequenceOutcome { end: SequenceEnd::Cancelled, ran: i + 1, skipped };
+            return SequenceOutcome { end: e.into_end(), ran, skipped: skipped_labels };
         }
 
-        let is_last = i + 1 == total;
-        if !is_last && wait_out(step_gap, cancel) == WaitOutcome::Cancelled {
-            return SequenceOutcome { end: SequenceEnd::Cancelled, ran: i + 1, skipped };
+        ran += 1;
+        on_event(SequenceEvent::Done { row, total });
+
+        if wait_outcome == WaitOutcome::Cancelled {
+            return SequenceOutcome { end: SequenceEnd::Cancelled, ran, skipped: skipped_labels };
         }
     }
 
-    SequenceOutcome { end: SequenceEnd::Completed, ran: total, skipped }
+    SequenceOutcome { end: SequenceEnd::Completed, ran, skipped: skipped_labels }
 }
 
 /// How a playback (or gap) wait ended: it ran out `duration`, or `cancel`
@@ -691,12 +844,11 @@ mod tests {
                 FF_RAMP, FF_SPRING, FF_DAMPER, FF_PERIODIC,
             ]
         );
-        // Nominal (gap-free) playback plus the nine cancellable inter-step
-        // gaps must land in the task's ~12-15s "thorough" budget.
+        // Nominal effect playback alone (excluding every step's
+        // STEP_COUNTDOWN lead-in) stays in the task's original
+        // ~10-11s "thorough" budget for the steps themselves.
         let total_ms: u32 = FORCE_SEQUENCE.iter().map(|s| u32::from(s.duration_ms)).sum();
-        let gap_ms = u32::try_from(STEP_GAP.as_millis()).unwrap();
-        let with_gaps = total_ms + (FORCE_SEQUENCE.len() as u32 - 1) * gap_ms;
-        assert!((12_000..=15_000).contains(&with_gaps), "with_gaps={with_gaps}");
+        assert!((10_000..=11_000).contains(&total_ms), "total_ms={total_ms}");
     }
 
     #[test]
@@ -856,8 +1008,9 @@ mod tests {
         next_id: i16,
         gone_after_uploads: Option<usize>,
         /// If set, `erase` flips this once its call count reaches the
-        /// given number - used to exercise the inter-step gap's own
-        /// cancel check without any real sleeping.
+        /// given number - used to exercise the between-steps cancel check
+        /// (the top-of-loop check ahead of the next row's countdown)
+        /// without any real sleeping.
         cancel_after_erases: Option<(usize, std::sync::Arc<AtomicBool>)>,
     }
 
@@ -936,15 +1089,15 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         let cancel = AtomicBool::new(false);
         let mut seen = Vec::new();
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |ev| {
-            if let SequenceEvent::Step { index, total, step } = ev {
-                seen.push((index, total, step.label));
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |ev| {
+            if let SequenceEvent::Step { row, total, step } = ev {
+                seen.push((row, total, step.label));
             }
         });
         assert_eq!(outcome.end, SequenceEnd::Completed);
         assert_eq!(outcome.ran, 3);
         assert!(outcome.skipped.is_empty());
-        assert_eq!(seen, vec![(1, 3, "one"), (2, 3, "two"), (3, 3, "three")]);
+        assert_eq!(seen, vec![(0, 3, "one"), (1, 3, "two"), (2, 3, "three")]);
         assert_eq!(device.uploads, 3);
         assert_eq!(device.erases, 3, "every upload must be erased - no leaked slot");
         // Each step plays (id, 1) then stops (id, 0), in order.
@@ -955,19 +1108,21 @@ mod tests {
     fn run_sequence_skips_steps_the_device_does_not_advertise() {
         // Only FF_CONSTANT is supported: the Ramp and Periodic steps must
         // be skipped, not attempted (and never leaked, since they are
-        // never uploaded at all).
+        // never uploaded at all). Rows stay 0-based into the full table,
+        // so "two" is row 1 and "three" is row 2 even though row 0 ("one")
+        // is the only one that actually runs.
         let mut device = MockDevice::supporting(&[FF_CONSTANT]);
         let cancel = AtomicBool::new(false);
         let mut skip_report = None;
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |ev| {
-            if let SequenceEvent::Skipped(labels) = ev {
-                skip_report = Some(labels.to_vec());
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |ev| {
+            if let SequenceEvent::Skipped(rows) = ev {
+                skip_report = Some(rows.to_vec());
             }
         });
         assert_eq!(outcome.end, SequenceEnd::Completed);
         assert_eq!(outcome.ran, 1);
         assert_eq!(outcome.skipped, vec!["two", "three"]);
-        assert_eq!(skip_report, Some(vec!["two", "three"]));
+        assert_eq!(skip_report, Some(vec![(1, "two"), (2, "three")]));
         assert_eq!(device.uploads, 1);
         assert_eq!(device.erases, 1);
         assert!(outcome.summary().contains("not supported"));
@@ -977,7 +1132,7 @@ mod tests {
     fn run_sequence_skipping_every_step_runs_nothing_and_still_completes() {
         let mut device = MockDevice::supporting(&[]);
         let cancel = AtomicBool::new(false);
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |_| {});
         assert_eq!(outcome.end, SequenceEnd::Completed);
         assert_eq!(outcome.ran, 0);
         assert_eq!(outcome.skipped.len(), 3);
@@ -989,7 +1144,7 @@ mod tests {
     fn run_sequence_cancelled_before_it_starts_runs_nothing() {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         let cancel = AtomicBool::new(true);
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |_| {});
         assert_eq!(outcome.end, SequenceEnd::Cancelled);
         assert_eq!(outcome.ran, 0);
         assert_eq!(device.uploads, 0);
@@ -1004,10 +1159,10 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         let cancel = AtomicBool::new(false);
         let mut seen = Vec::new();
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |ev| {
-            if let SequenceEvent::Step { index, step, .. } = ev {
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |ev| {
+            if let SequenceEvent::Step { row, step, .. } = ev {
                 seen.push(step.label);
-                if index == 2 {
+                if row == 1 {
                     cancel.store(true, Ordering::Relaxed);
                 }
             }
@@ -1020,23 +1175,24 @@ mod tests {
     }
 
     #[test]
-    fn run_sequence_cancelled_during_the_inter_step_gap_ends_before_the_next_step() {
-        // No step event ever sets `cancel`; instead the mock flips it the
-        // moment the first step's erase happens (i.e. during the gap
-        // that follows it), exercising the gap's own cancel check
-        // specifically rather than a step's play-wait.
+    fn run_sequence_cancelled_between_steps_ends_before_the_next_one_starts() {
+        // No Step event ever sets `cancel`; instead the mock flips it the
+        // moment the first step's erase happens, exercising the
+        // between-steps cancel check (the top-of-loop check ahead of the
+        // next row's countdown) rather than a step's own play-wait or
+        // countdown-tick wait.
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         device.cancel_after_erases = Some((1, cancel.clone()));
         let mut seen = Vec::new();
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::from_millis(50), |ev| {
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |ev| {
             if let SequenceEvent::Step { step, .. } = ev {
                 seen.push(step.label);
             }
         });
         assert_eq!(outcome.end, SequenceEnd::Cancelled);
         assert_eq!(outcome.ran, 1);
-        assert_eq!(seen, vec!["one"], "the gap ends the run before step two ever starts");
+        assert_eq!(seen, vec!["one"], "the second step never starts");
         assert_eq!(device.uploads, 1);
         assert_eq!(device.erases, 1);
     }
@@ -1046,7 +1202,7 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         device.gone_after_uploads = Some(2); // the second step's upload
         let cancel = AtomicBool::new(false);
-        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |_| {});
         assert_eq!(outcome.end, SequenceEnd::DeviceGone);
         assert_eq!(outcome.ran, 1, "only the first step ever completed");
         assert_eq!(device.uploads, 2, "the failed upload still counts as attempted");
@@ -1078,7 +1234,8 @@ mod tests {
         }
         let mut device = FailGain;
         let cancel = AtomicBool::new(false);
-        let outcome = run_sequence(&mut device, &QUICK_STEPS[..1], RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
+        let outcome =
+            run_sequence(&mut device, &QUICK_STEPS[..1], RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |_| {});
         assert_eq!(outcome.end, SequenceEnd::Failed("permission denied".to_string()));
         assert_eq!(outcome.ran, 0);
         assert!(outcome.summary().contains("permission denied"));
@@ -1086,7 +1243,162 @@ mod tests {
 
     #[test]
     fn step_status_text_names_the_step_and_its_position() {
-        let text = step_status_text(2, 10, &FORCE_SEQUENCE[1]);
+        let text = step_status_text(1, 10, &FORCE_SEQUENCE[1]);
         assert_eq!(text, "step 2/10: Constant force, right pulse");
+    }
+
+    // -----------------------------------------------------------------
+    // The per-step countdown: ticks down before every step, including
+    // the first, and is cancellable mid-tick just like a step's own
+    // play-wait.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn run_sequence_counts_down_before_every_step_including_the_first() {
+        let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
+        let cancel = AtomicBool::new(false);
+        let countdown = Countdown { ticks: 3, tick: Duration::ZERO };
+        let mut events: Vec<String> = Vec::new();
+        let outcome = run_sequence(&mut device, &QUICK_STEPS[..1], RUNNER_TEST_MODEL, &cancel, countdown, |ev| {
+            match ev {
+                SequenceEvent::Countdown { row, seconds_left, .. } => {
+                    events.push(format!("countdown row={row} secs={seconds_left}"))
+                }
+                SequenceEvent::Step { row, .. } => events.push(format!("step row={row}")),
+                SequenceEvent::Done { row, .. } => events.push(format!("done row={row}")),
+                SequenceEvent::Skipped(_) => {}
+            }
+        });
+        assert_eq!(outcome.end, SequenceEnd::Completed);
+        assert_eq!(
+            events,
+            vec![
+                "countdown row=0 secs=3",
+                "countdown row=0 secs=2",
+                "countdown row=0 secs=1",
+                "step row=0",
+                "done row=0",
+            ],
+            "the very first step gets the same lead-in as every other one"
+        );
+    }
+
+    #[test]
+    fn run_sequence_cancelled_mid_countdown_never_plays_that_step() {
+        // Cancel as soon as the countdown reaches 2; the tick's own
+        // nonzero wait must catch it before the step ever uploads.
+        let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
+        let cancel = AtomicBool::new(false);
+        let countdown = Countdown { ticks: 3, tick: Duration::from_millis(20) };
+        let mut seen: Vec<u64> = Vec::new();
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, countdown, |ev| {
+            if let SequenceEvent::Countdown { seconds_left, .. } = ev {
+                seen.push(seconds_left);
+                if seconds_left == 2 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        assert_eq!(outcome.end, SequenceEnd::Cancelled);
+        assert_eq!(outcome.ran, 0, "the step never played: it was still counting down");
+        assert_eq!(seen, vec![3, 2], "the tick after the cancel never fires");
+        assert_eq!(device.uploads, 0, "cancelling mid-countdown must never upload the effect");
+    }
+
+    // -----------------------------------------------------------------
+    // SequenceProgress: the rendered-plan state machine both front-ends
+    // fold every SequenceEvent into.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn sequence_progress_starts_pending_and_matches_the_step_table() {
+        let progress = SequenceProgress::new(FORCE_SEQUENCE);
+        assert_eq!(progress.states.len(), FORCE_SEQUENCE.len(), "one row per step, no more, no less");
+        assert!(progress.states.iter().all(|s| *s == StepState::Pending));
+        assert_eq!(progress.current, None);
+    }
+
+    #[test]
+    fn sequence_progress_follows_one_step_through_countdown_play_and_done() {
+        let mut progress = SequenceProgress::new(QUICK_STEPS);
+        progress.apply(&SequenceEvent::Countdown { row: 0, total: 3, step: &QUICK_STEPS[0], seconds_left: 3 });
+        assert_eq!(progress.states[0], StepState::Countdown(3));
+        assert_eq!(progress.current, Some(0));
+        assert_eq!(progress.states[1], StepState::Pending, "other rows are untouched");
+
+        progress.apply(&SequenceEvent::Countdown { row: 0, total: 3, step: &QUICK_STEPS[0], seconds_left: 1 });
+        assert_eq!(progress.states[0], StepState::Countdown(1));
+
+        progress.apply(&SequenceEvent::Step { row: 0, total: 3, step: &QUICK_STEPS[0] });
+        assert_eq!(progress.states[0], StepState::Playing);
+        assert_eq!(progress.current, Some(0));
+
+        progress.apply(&SequenceEvent::Done { row: 0, total: 3 });
+        assert_eq!(progress.states[0], StepState::Done);
+        assert_eq!(progress.current, None, "nothing active once the step is done");
+
+        // A finished row's state is never reverted: the whole point is
+        // that a completed step stays visible as done, not pending, once
+        // the run has moved on (or ended).
+        assert_eq!(progress.states[0], StepState::Done);
+    }
+
+    #[test]
+    fn sequence_progress_marks_skipped_rows_without_touching_others() {
+        let mut progress = SequenceProgress::new(QUICK_STEPS);
+        progress.apply(&SequenceEvent::Skipped(&[(1, "two"), (2, "three")]));
+        assert_eq!(progress.states, vec![StepState::Pending, StepState::Skipped, StepState::Skipped]);
+    }
+
+    #[test]
+    fn sequence_progress_reflects_a_full_run_including_a_skip() {
+        // Fold every event a real run_sequence call against QUICK_STEPS
+        // (with only FF_CONSTANT/FF_PERIODIC supported, skipping the
+        // Ramp) would report, and check the final rendered plan matches
+        // exactly what actually happened: row 0 done, row 1 skipped
+        // (never touched otherwise), row 2 done, nothing left active.
+        let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_PERIODIC]);
+        let cancel = AtomicBool::new(false);
+        let mut progress = SequenceProgress::new(QUICK_STEPS);
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |ev| {
+            progress.apply(&ev);
+        });
+        assert_eq!(outcome.end, SequenceEnd::Completed);
+        assert_eq!(progress.states, vec![StepState::Done, StepState::Skipped, StepState::Done]);
+        assert_eq!(progress.current, None);
+    }
+
+    #[test]
+    fn sequence_progress_keeps_a_cancelled_run_s_last_states_visible() {
+        // Mirrors run_sequence_cancelled_mid_step_stops_and_erases_then_ends:
+        // row 0 finishes, row 1 is interrupted mid-play by its own cancel
+        // (still cleanly stopped and erased, so it reads as done), row 2
+        // never starts and stays pending - none of that gets cleared away
+        // once the run ends, which is the point of the whole feature.
+        let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
+        let cancel = AtomicBool::new(false);
+        let mut progress = SequenceProgress::new(QUICK_STEPS);
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Countdown::NONE, |ev| {
+            progress.apply(&ev);
+            if let SequenceEvent::Step { row, .. } = ev {
+                if row == 1 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        assert_eq!(outcome.end, SequenceEnd::Cancelled);
+        assert_eq!(progress.states, vec![StepState::Done, StepState::Done, StepState::Pending]);
+    }
+
+    #[test]
+    fn step_state_status_text_never_relies_on_color_alone() {
+        // Every state renders as a distinct word (or a ticking number),
+        // never just a color swatch - the user is colorblind, so text is
+        // the primary signal, color only ever a secondary one.
+        assert_eq!(StepState::Pending.status_text(), "pending");
+        assert_eq!(StepState::Countdown(3).status_text(), "3...");
+        assert_eq!(StepState::Playing.status_text(), "playing");
+        assert_eq!(StepState::Done.status_text(), "done");
+        assert_eq!(StepState::Skipped.status_text(), "skipped");
     }
 }

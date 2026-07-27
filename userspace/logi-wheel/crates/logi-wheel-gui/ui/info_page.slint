@@ -30,6 +30,22 @@ export struct TestCallout {
     pressed: bool,
 }
 
+// One row of a confirmed simulation's plan (`fftest::SimStep` + its live
+// `fftest::StepState`, both from Rust): the step's label and duration
+// text, a state-only word ("pending"/"3..."/"playing"/"done"/"skipped" -
+// see `StepState::status_text`, never relying on color alone), and
+// `state` (0 pending, 1 counting down, 2 playing, 3 done, 4 skipped) for
+// this row's color, a secondary cue only. The whole plan is pushed once
+// a simulation is confirmed (every row pending) and again on every step
+// event as the run plays; rows are never removed, which is what keeps a
+// finished step's row on screen.
+export struct TestPlanRow {
+    label: string,
+    duration-text: string,
+    status-text: string,
+    state: int,
+}
+
 // A small horizontal 0..65535 bar.
 component AxisBar inherits Rectangle {
     in property <int> value: 0;
@@ -106,34 +122,37 @@ export component InfoPage inherits Rectangle {
     // for the button-callout overlay), 1 G PRO, 2 G923. See
     // `bridge::wheel_image_index` for how a frontend picks this.
     in property <int> wheel-kind: 0;
-    // True while a simulation plays; disables both sim buttons and shows
-    // the Stop button.
+    // True while a simulation plays (including a step's countdown lead-
+    // in); disables both sim buttons and shows the Stop button.
     in property <bool> sim-running: false;
     in property <string> sim-error: "";
-    // The current step's label while a sequence plays, or the
-    // just-finished sequence's one-line summary once it stops (set from
-    // Rust; see `App.test-sim-status`).
+    // The running (or just-finished) sequence's one-line summary (set
+    // from Rust; see `App.test-sim-status`) - "starting...", or how the
+    // run ended once it stops. The per-step detail lives in `sim-plan`
+    // below, not here.
     in property <string> sim-status: "";
+    // The confirmed sequence's whole plan, one row per step, in order -
+    // pushed the instant a simulation is confirmed (every row pending,
+    // before the sequence thread has even opened the device) and again
+    // on every step event as the run plays. Stays populated after the
+    // run ends (Rust never clears it until the next simulation is
+    // confirmed), which is what keeps a finished step's row visible
+    // instead of disappearing.
+    in property <[TestPlanRow]> sim-plan: [];
 
     callback rescan();
     // Fired only from the confirm dialog's Continue button, never
-    // directly from the sim buttons.
+    // directly from the sim buttons. Starts the sequence immediately -
+    // its own first step's countdown is the only wait, so nothing here
+    // stacks a second one on top.
     callback sim-constant();
     callback sim-texture();
-    // Stops (and erases) the currently playing simulation immediately.
+    // Stops (and erases) the currently playing simulation immediately,
+    // whether it is in a step's countdown or actually playing one.
     callback sim-stop();
 
     // The confirm dialog's state: 0 closed, 1 constant force, 2 texture.
     private property <int> confirm-kind: 0;
-    // The post-Continue countdown's state: 0 not counting, 1/2 which sim
-    // is about to fire (same meaning as `confirm-kind`). Pressing Continue
-    // moves from `confirm-kind` into this instead of firing the sim
-    // immediately, so the user has a few seconds to get hands on (or off)
-    // the wheel; cancelling here (`countdown-kind = 0`) means the sim
-    // never fires at all, same guarantee the confirm dialog itself makes.
-    private property <int> countdown-kind: 0;
-    // Seconds left in the countdown, ticked by `countdown-timer` below.
-    private property <int> countdown-seconds: 5;
 
     background: transparent;
 
@@ -578,7 +597,7 @@ export component InfoPage inherits Rectangle {
                             color: Theme.text-color;
                         }
                         Text {
-                            text: "Plays a short sequence of labelled steps (constant force both directions, a rising ramp, centering spring, damper, sine vibration) through the wheel's force-feedback path, at moderate strength. The texture test plays a frequency progression (low rumble through high-frequency buzz) through the TrueForce/FFB path.";
+                            text: "Plays a short sequence of labelled steps (constant force both directions, a rising ramp, centering spring, damper, sine vibration) through the wheel's force-feedback path, at moderate strength. The texture test plays a frequency progression (low rumble through high-frequency buzz) through the TrueForce/FFB path. Every step counts down for a few seconds first, so the wheel never moves without warning.";
                             font-size: 12px;
                             color: Theme.muted-text-color;
                             wrap: word-wrap;
@@ -587,32 +606,55 @@ export component InfoPage inherits Rectangle {
                             spacing: 8px;
                             Button {
                                 text: "Simulate force feedback";
-                                enabled: root.available && !root.sim-running && root.confirm-kind == 0 && root.countdown-kind == 0;
+                                enabled: root.available && !root.sim-running && root.confirm-kind == 0;
                                 clicked => { root.confirm-kind = 1; }
                             }
                             Button {
                                 text: "Simulate TrueForce texture";
-                                enabled: root.available && !root.sim-running && root.confirm-kind == 0 && root.countdown-kind == 0;
+                                enabled: root.available && !root.sim-running && root.confirm-kind == 0;
                                 clicked => { root.confirm-kind = 2; }
                             }
-                        }
-                        // While an effect plays: the status plus a Stop
-                        // button that stops and erases it immediately.
-                        if root.sim-running: HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-
-                            Text {
-                                text: root.sim-status;
-                                font-size: 12px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                                color: Theme.ok-color;
-                                wrap: word-wrap;
-                            }
-                            Button {
+                            if root.sim-running: Button {
                                 text: "Stop";
                                 clicked => { root.sim-stop(); }
+                            }
+                        }
+                        if root.sim-plan.length > 0: Text {
+                            text: root.sim-status;
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: root.sim-running ? Theme.ok-color : Theme.muted-text-color;
+                            wrap: word-wrap;
+                        }
+                        // The whole plan, one row per step: label,
+                        // duration, and a state-only word (never color
+                        // alone - see `TestPlanRow`). Shown in full the
+                        // instant a simulation is confirmed and left in
+                        // place after the run ends, so a finished step's
+                        // row never disappears.
+                        for row in root.sim-plan: HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                width: 64px;
+                                text: row.status-text;
+                                font-size: 12px;
+                                font-weight: row.state == 1 || row.state == 2 ? 700 : 400;
+                                color: row.state == 1 ? Theme.accent
+                                    : row.state == 2 ? Theme.ok-color
+                                    : row.state == 4 ? Theme.faint-text-color
+                                    : Theme.muted-text-color;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: row.label;
+                                font-size: 12px;
+                                color: row.state == 4 ? Theme.faint-text-color : Theme.text-color;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: row.duration-text;
+                                font-size: 12px;
+                                color: Theme.muted-text-color;
                             }
                         }
                         if root.sim-error != "": Text {
@@ -650,29 +692,13 @@ export component InfoPage inherits Rectangle {
         }
     }
 
-    // Ticks the post-Continue countdown down to 0, then fires the sim
-    // that was confirmed and stops itself (`countdown-kind = 0`). Only
-    // running while a countdown is actually in progress.
-    countdown-timer := Timer {
-        interval: 1s;
-        running: root.countdown-kind != 0;
-        triggered() => {
-            if (root.countdown-seconds > 1) {
-                root.countdown-seconds -= 1;
-            } else if (root.countdown-kind == 1) {
-                root.countdown-kind = 0;
-                root.sim-constant();
-            } else {
-                root.countdown-kind = 0;
-                root.sim-texture();
-            }
-        }
-    }
-
-    // Confirm dialog, then the countdown, painted over the whole page. No
-    // simulation ever fires without pressing Continue AND riding out the
-    // countdown below - cancelling either one stops it from ever firing.
-    if root.confirm-kind != 0 || root.countdown-kind != 0: Rectangle {
+    // Confirm dialog, painted over the whole page. No simulation ever
+    // fires without pressing Continue here; Continue starts the sequence
+    // right away - its own first step carries the same countdown lead-in
+    // as every other step (rendered in the panel above, once `sim-plan`
+    // is populated), so there is no separate pre-sequence wait to stack
+    // on top of it.
+    if root.confirm-kind != 0: Rectangle {
         background: Theme.scrim;
 
         // Swallow clicks outside the dialog panel.
@@ -692,19 +718,19 @@ export component InfoPage inherits Rectangle {
                 padding: 18px;
                 spacing: 12px;
 
-                if root.confirm-kind != 0: Text {
+                Text {
                     text: root.confirm-kind == 1 ? "Simulate force feedback" : "Simulate TrueForce texture";
                     font-size: 15px;
                     font-weight: 700;
                     color: Theme.text-color;
                 }
-                if root.confirm-kind != 0: Text {
-                    text: "The wheel WILL move. Keep hands and objects clear of the rim. Continue?";
+                Text {
+                    text: "The wheel WILL move. Keep hands and objects clear of the rim. Each step counts down for a few seconds before it plays. Continue?";
                     font-size: 13px;
                     color: Theme.text-color;
                     wrap: word-wrap;
                 }
-                if root.confirm-kind != 0: HorizontalLayout {
+                HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
                     Button {
@@ -715,34 +741,13 @@ export component InfoPage inherits Rectangle {
                         text: "Continue";
                         primary: true;
                         clicked => {
-                            root.countdown-kind = root.confirm-kind;
-                            root.countdown-seconds = 5;
+                            if (root.confirm-kind == 1) {
+                                root.sim-constant();
+                            } else {
+                                root.sim-texture();
+                            }
                             root.confirm-kind = 0;
                         }
-                    }
-                }
-
-                // The countdown itself: a few seconds to get hands on (or
-                // off) the wheel before the force actually starts.
-                // Cancelling here means the sim never fires.
-                if root.countdown-kind != 0: Text {
-                    text: root.countdown-kind == 1 ? "Simulate force feedback" : "Simulate TrueForce texture";
-                    font-size: 15px;
-                    font-weight: 700;
-                    color: Theme.text-color;
-                }
-                if root.countdown-kind != 0: Text {
-                    text: "Starting in \{root.countdown-seconds}... Keep hands and objects clear of the rim.";
-                    font-size: 13px;
-                    color: Theme.text-color;
-                    wrap: word-wrap;
-                }
-                if root.countdown-kind != 0: HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
-                    Button {
-                        text: "Cancel";
-                        clicked => { root.countdown-kind = 0; }
                     }
                 }
             }

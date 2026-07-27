@@ -1,5 +1,7 @@
 use crate::app::{App, Focus};
 use crate::curve_editor::CurveEditor;
+use crate::wheel_test::TestView;
+use logi_wheel_core::fftest::StepState;
 use logi_wheel_core::sysfs::SysfsIo;
 use logi_wheel_core::{shaping, Category, Device, Mode, Value};
 use ratatui::buffer::Buffer;
@@ -200,18 +202,46 @@ pub(crate) fn info_content_height<S: SysfsIo>(app: &App<S>) -> u16 {
     let monitor = match &app.test.dev {
         // The empty state: 5 text lines plus the block's two borders.
         None => 7,
-        // The gauges block (13) plus the button tester: the recent-press
-        // line, one line per wheel button, and two borders. The button
-        // count is model-aware (a G923 shows its own 18 captured buttons,
-        // not the RS50 diagram's 21; see `evtest::button_codes_for_model`),
-        // so this must match whatever `draw_monitor` actually renders.
+        // The gauges block, the button tester (the recent-press line, one
+        // line per wheel button, and two borders - the button count is
+        // model-aware, see `evtest::button_codes_for_model`), and the
+        // "Force feedback test" panel below it - must match whatever
+        // `draw_monitor` actually renders.
         Some(_) => {
-            13 + 3 + logi_wheel_core::evtest::button_codes_for_model(app.device.model()).len() as u16
+            monitor_top_height(&app.test)
+                + 3
+                + logi_wheel_core::evtest::button_codes_for_model(app.device.model()).len() as u16
+                + test_plan_height(&app.test)
         }
     };
     // The identity block renders regardless of `no_wheel` now (see
     // `draw_settings`), so its height always counts here too.
     settings_height(app).saturating_add(monitor)
+}
+
+/// `draw_monitor`'s top block (device/monitor/steering/pedals/D-pad):
+/// eleven content lines, one more while `open_error` is set (the block's
+/// only remaining variable line now that the sim countdown and status
+/// live in their own "Force feedback test" panel below), plus the
+/// block's two borders.
+fn monitor_top_height(t: &TestView) -> u16 {
+    11 + u16::from(t.open_error.is_some()) + 2
+}
+
+/// The "Force feedback test" panel's height: a single hint line before
+/// anything is confirmed, or a header line plus one row per step in the
+/// confirmed kind's table (kept on screen after the run ends - see
+/// `TestView::sim_kind`'s doc comment - so this does not shrink back down
+/// once a sequence has played), plus the block's two borders. Derived
+/// from the same data `draw_test_plan` renders, so scrolling always
+/// clamps to exactly what is drawn (same pattern as
+/// `setup_content_height`).
+fn test_plan_height(t: &TestView) -> u16 {
+    let lines = match t.sim_kind {
+        None => 1,
+        Some(kind) => 1 + kind.steps().len() as u16,
+    };
+    lines + 2
 }
 
 /// Render a composed view that may be taller than its viewport: `render`
@@ -948,9 +978,10 @@ fn position_bar(value: i32, width: usize) -> String {
 }
 
 /// Render the Info page's live input monitor: the steering/pedal state
-/// read off the wheel's evdev node, the light-up button list, and the
-/// guarded force-sim status. Mirrors the GUI's Info page in text form.
-/// Renders into `draw_scrolled`'s buffer, like the other composed views.
+/// read off the wheel's evdev node, the light-up button list, and (below
+/// them, `draw_test_plan`) the guarded force-sim plan and progress.
+/// Mirrors the GUI's Info page in text form. Renders into
+/// `draw_scrolled`'s buffer, like the other composed views.
 fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
     use logi_wheel_core::evtest;
 
@@ -978,7 +1009,13 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(13), Constraint::Min(3)])
+        .constraints([
+            Constraint::Length(monitor_top_height(t)),
+            Constraint::Length(
+                3 + logi_wheel_core::evtest::button_codes_for_model(app.device.model()).len() as u16,
+            ),
+            Constraint::Length(test_plan_height(t)),
+        ])
         .split(area);
 
     let deg = t.degrees();
@@ -1030,22 +1067,6 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]));
-    // A confirmed sim's countdown, re-read fresh every frame (the Info
-    // page polls at ~30 Hz while the monitor is live, so this ticks down
-    // visibly in real time): the wheel does not move until it reaches the
-    // sim itself, and 's' cancels it outright.
-    if let Some(secs) = t.countdown_seconds_left() {
-        top.push(Line::from(Span::styled(
-            format!("Starting in {secs}... keep hands and objects clear of the rim (s cancels)"),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
-    }
-    if let Some(line) = t.sim_status_line() {
-        top.push(Line::from(Span::styled(
-            format!("{line} (s to stop)"),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )));
-    }
     if let Some(err) = &t.open_error {
         top.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
     }
@@ -1087,6 +1108,56 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
     List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Buttons (highlighted while held)"))
         .render(rows[1], buf);
+
+    draw_test_plan(buf, t, rows[2]);
+}
+
+/// Render the "Force feedback test" panel: before anything is confirmed,
+/// a one-line hint naming the keys; once a sequence has been confirmed,
+/// its whole plan as one row per step - label, duration, and live state
+/// (pending/counting down/playing/done/skipped, straight off
+/// `TestView::sim_progress`, the same state machine the GUI renders) -
+/// shown in full up front and left in place after the run ends, which is
+/// the core of the request this replaces a single overwriting status
+/// line with. Every row's state is also spelled out as its own word
+/// (never color alone), matching `StepState::status_text`.
+fn draw_test_plan(buf: &mut Buffer, t: &TestView, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    match t.sim_kind {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "f: simulate force feedback   t: simulate TrueForce texture",
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        Some(kind) => {
+            let progress = t.sim_progress();
+            let header = if t.sim_running() {
+                format!("{}: running (s to stop)", kind.label())
+            } else {
+                format!("{}: not running (f/t to run again)", kind.label())
+            };
+            lines.push(Line::from(Span::styled(header, Style::default().add_modifier(Modifier::BOLD))));
+            for (step, state) in kind.steps().iter().zip(progress.states.iter()) {
+                let style = match state {
+                    StepState::Pending => Style::default().fg(Color::Gray),
+                    StepState::Countdown(_) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    StepState::Playing => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    StepState::Done => Style::default().fg(Color::Cyan),
+                    StepState::Skipped => Style::default().fg(Color::DarkGray),
+                };
+                let secs = f32::from(step.duration_ms) / 1000.0;
+                lines.push(Line::from(Span::styled(
+                    format!("  {:<9} {} ({secs:.1}s)", state.status_text(), step.label),
+                    style,
+                )));
+            }
+        }
+    }
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Force feedback test"))
+        .render(area, buf);
 }
 
 /// Render the modal curve editor over `area`: a left field panel and a right
@@ -1684,5 +1755,68 @@ mod tests {
         assert!(text.contains("G1 (Logo)"), "the button tester becomes reachable:\n{text}");
         assert!(text.contains("more above"), "{text}");
         assert!(!text.contains("more below"), "{text}");
+    }
+
+    #[test]
+    fn test_plan_shows_every_row_pending_the_instant_it_is_confirmed() {
+        // The task's core acceptance check: confirming a simulation shows
+        // the FULL ordered list of steps, with durations, before anything
+        // plays - not a single line naming only the current step. Tall
+        // enough (and wide enough for the longest label) that nothing
+        // wraps or scrolls out of the unclipped screen buffer.
+        let mut term = Terminal::new(TestBackend::new(140, 90)).unwrap();
+        let mut a = wheel_app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.reload();
+        a.test.dev = Some(logi_wheel_core::evtest::WheelInput {
+            event_path: "/nonexistent/event99".to_string(),
+            name: "Logitech RS50 Base".to_string(),
+        });
+        a.on_key(crossterm::event::KeyCode::Char('f'));
+        a.on_key(crossterm::event::KeyCode::Char('y'));
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        for step in logi_wheel_core::fftest::FORCE_SEQUENCE {
+            assert!(text.contains(step.label), "row for {:?} missing:\n{text}", step.label);
+        }
+        assert!(text.contains("pending"), "at least one row starts pending:\n{text}");
+    }
+
+    #[test]
+    fn test_plan_rows_reflect_the_progress_state_machine_and_stay_after_a_run() {
+        // Drive the state machine directly (no real device, no real
+        // sleeping) the way the shared `fftest::SequenceProgress` renders
+        // it: one row done, one skipped, one still pending. A finished
+        // row must stay on screen, not disappear once its state moves
+        // past "playing". Tall enough that the whole page (including the
+        // trailing "Force feedback test" panel) renders unclipped.
+        let mut term = Terminal::new(TestBackend::new(140, 90)).unwrap();
+        let mut a = wheel_app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.reload();
+        a.test.dev = Some(logi_wheel_core::evtest::WheelInput {
+            event_path: "/nonexistent/event99".to_string(),
+            name: "Logitech RS50 Base".to_string(),
+        });
+        a.on_key(crossterm::event::KeyCode::Char('f'));
+        a.on_key(crossterm::event::KeyCode::Char('y'));
+
+        // Wait out the background thread (a nonexistent device fails to
+        // open almost immediately), then overwrite the progress by hand
+        // to exercise a mid-run-looking state without any real FF I/O.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while a.test.sim_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut progress = logi_wheel_core::fftest::SequenceProgress::new(logi_wheel_core::fftest::FORCE_SEQUENCE);
+        progress.apply(&logi_wheel_core::fftest::SequenceEvent::Done { row: 0, total: 10 });
+        progress.apply(&logi_wheel_core::fftest::SequenceEvent::Skipped(&[(1, "skip-me")]));
+        *a.test.sim_progress_for_test() = progress;
+
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(text.contains("done"), "the finished row must still be shown:\n{text}");
+        assert!(text.contains("skipped"), "the skipped row must still be shown:\n{text}");
+        assert!(text.contains("pending"), "the untouched rows stay pending:\n{text}");
     }
 }

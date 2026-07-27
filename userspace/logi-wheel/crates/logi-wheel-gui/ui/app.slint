@@ -5,12 +5,12 @@ import { CurveEditor, CurvePoint } from "curve_editor.slint";
 import { RgbStrip, LedColor } from "rgb_strip.slint";
 import { SlotTextEditor, SlotNameRow } from "slot_text.slint";
 import { Setup, SetupGame, AddableGame } from "setup.slint";
-import { InfoPage, TestButton, TestAxis, TestCallout } from "info_page.slint";
+import { InfoPage, TestButton, TestAxis, TestCallout, TestPlanRow } from "info_page.slint";
 import { ComputerProfiles } from "computer_profiles.slint";
 import { LedPreview } from "led_preview.slint";
 export { SettingRow } from "widgets.slint";
 export { SetupGame, AddableGame } from "setup.slint";
-export { TestButton, TestAxis, TestCallout } from "info_page.slint";
+export { TestButton, TestAxis, TestCallout, TestPlanRow } from "info_page.slint";
 export { CurvePoint } from "curve_editor.slint";
 export { LedColor } from "rgb_strip.slint";
 export { SlotNameRow } from "slot_text.slint";
@@ -162,12 +162,15 @@ export component App inherits Window {
     in property <[TestCallout]> test-callouts: [];
     in property <bool> test-sim-running: false;
     in property <string> test-sim-error: "";
-    // The current step's label while a sequence plays (set from Rust on
-    // every step; see `fftest::step_status_text`), or the just-finished
-    // sequence's one-line summary once it stops. Replaces the old fixed
-    // "force playing..." text now that each simulation is a multi-step
-    // sequence rather than one 2s effect.
+    // The running (or just-finished) sequence's one-line summary (set
+    // from Rust): "starting...", or how the run ended once it stops.
+    // Per-step detail lives in `test-sim-plan` below.
     in property <string> test-sim-status: "";
+    // The confirmed sequence's whole plan, one row per step - see
+    // `TestPlanRow`. Pushed the instant a simulation is confirmed (every
+    // row pending) and again on every step event; stays populated after
+    // the run ends, until the next simulation replaces it.
+    in property <[TestPlanRow]> test-sim-plan: [];
     callback test-rescan();
     // Only ever fired by the Info page's confirm dialog (see
     // `info_page.slint`); each plays a labelled multi-step sequence (see
@@ -524,6 +527,7 @@ export component App inherits Window {
                     sim-running: root.test-sim-running;
                     sim-error: root.test-sim-error;
                     sim-status: root.test-sim-status;
+                    sim-plan: root.test-sim-plan;
                     open-url(url) => { root.open-url(url); }
                     copy-value(text) => { root.info-copy(text); }
                     rescan() => { root.test-rescan(); }

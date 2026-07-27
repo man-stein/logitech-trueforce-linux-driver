@@ -880,14 +880,45 @@ fn start_test_monitor(
 /// effect through its single cleanup site, then clears the cell.
 type SimCancelCell = Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>;
 
+/// Render `progress` (one `fftest::StepState` per row of `steps`, in
+/// order) as the `TestPlanRow` list the Info page's `sim-plan` binds to.
+/// The one place both the initial "every row pending" plan and every
+/// later update funnel through, so the rendered rows and the shared
+/// `fftest::SequenceProgress` state machine can never drift apart.
+fn plan_rows(steps: &'static [fftest::SimStep], progress: &fftest::SequenceProgress) -> slint::ModelRc<TestPlanRow> {
+    let rows: Vec<TestPlanRow> = steps
+        .iter()
+        .zip(progress.states.iter())
+        .map(|(step, state)| {
+            let code = match state {
+                fftest::StepState::Pending => 0,
+                fftest::StepState::Countdown(_) => 1,
+                fftest::StepState::Playing => 2,
+                fftest::StepState::Done => 3,
+                fftest::StepState::Skipped => 4,
+            };
+            TestPlanRow {
+                label: step.label.into(),
+                duration_text: format!("{:.1}s", f32::from(step.duration_ms) / 1000.0).into(),
+                status_text: state.status_text().into(),
+                state: code,
+            }
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
 /// Run one confirmed test sequence against the discovered wheel, off the
-/// UI thread, pushing each step's label (or a skip notice) into
-/// `test-sim-status` as it plays and the final summary (and any error)
-/// back into the Test page's properties once it ends. `model` resolves
-/// each step's logical direction to the raw value its engine expects
-/// (see `fftest::resolve_direction`). A missing device is a silent
-/// no-op: the buttons are disabled without a wheel, so this only races an
-/// unplug.
+/// UI thread. The full plan (every row pending) is pushed into
+/// `test-sim-plan` synchronously, before the thread even opens the
+/// device - see `plan_rows` - so the whole plan is visible the instant
+/// the sequence is confirmed; the thread then folds every step event
+/// into the same shared `fftest::SequenceProgress` and re-renders the
+/// plan on each one, and posts the final summary (and any error) back
+/// into the Test page's properties once it ends. `model` resolves each
+/// step's logical direction to the raw value its engine expects (see
+/// `fftest::resolve_direction`). A missing device is a silent no-op: the
+/// buttons are disabled without a wheel, so this only races an unplug.
 fn run_test_sim(
     app_weak: slint::Weak<App>,
     device_cell: &Arc<Mutex<Option<evtest::WheelInput>>>,
@@ -903,27 +934,32 @@ fn run_test_sim(
     app.set_test_sim_running(true);
     app.set_test_sim_error("".into());
     app.set_test_sim_status(format!("{}: starting...", kind.label()).into());
+    let steps = kind.steps();
+    let progress = Arc::new(Mutex::new(fftest::SequenceProgress::new(steps)));
+    app.set_test_sim_plan(plan_rows(steps, &progress.lock().unwrap()));
+
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     *cancel_cell.lock().unwrap() = Some(cancel.clone());
     let cancel_cell = cancel_cell.clone();
     let weak = app.as_weak();
     let step_weak = app.as_weak();
+    let progress_for_thread = progress.clone();
     std::thread::spawn(move || {
-        // Every step's label (and the once-only skip notice) is posted
-        // here, on the same background thread run_test_sequence runs on;
-        // each post hops to the UI thread itself before touching the
-        // Slint property, same as the completion step below.
+        // Every event updates the same shared SequenceProgress on this
+        // background thread; only that plain (Send) snapshot crosses the
+        // hop to the UI thread, where `plan_rows` builds the actual
+        // Slint model - a `ModelRc` is `Rc`-backed and cannot itself
+        // cross threads, unlike the state it is built from.
         let on_event = move |ev: SequenceEvent| {
-            let text = match ev {
-                SequenceEvent::Skipped(labels) => {
-                    format!("skipping (not supported by this wheel): {}", labels.join(", "))
-                }
-                SequenceEvent::Step { index, total, step } => fftest::step_status_text(index, total, step),
+            let progress = {
+                let mut p = progress_for_thread.lock().unwrap();
+                p.apply(&ev);
+                p.clone()
             };
             let step_weak = step_weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(app) = step_weak.upgrade() {
-                    app.set_test_sim_status(text.into());
+                    app.set_test_sim_plan(plan_rows(steps, &progress));
                 }
             });
         };
@@ -931,7 +967,7 @@ fn run_test_sim(
         // cancel flag only shortens the wait inside run_test_sequence,
         // which cleans up on every path), so the UI state resets exactly
         // once.
-        let outcome = testio::run_test_sequence(&wheel.event_path, kind.steps(), model, &cancel, on_event);
+        let outcome = testio::run_test_sequence(&wheel.event_path, steps, model, &cancel, on_event);
         *cancel_cell.lock().unwrap() = None;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
