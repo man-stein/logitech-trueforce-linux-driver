@@ -1293,6 +1293,27 @@ mod tests {
     }
 
     #[test]
+    fn a_setting_the_wheel_says_is_unsupported_also_renders_unavailable() {
+        // Same "Unavailable" presentation as a missing file, but this time
+        // the sysfs attribute exists (an RS50's pedal MCU has the file for
+        // wheel_throttle_sensitivity) and the wheel answers EOPNOTSUPP on
+        // read: the bug this task fixes was that this case rendered as a
+        // live control at a fake 0 instead.
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set_read_errno("wheel_throttle_sensitivity", 95);
+        let vm = crate::viewmodel::ViewModel::with_io(fs);
+        let row = vm
+            .rows_for(Category::Pedals)
+            .into_iter()
+            .find(|r| r.attr == "wheel_throttle_sensitivity")
+            .unwrap();
+        let sr = to_setting_row(&row);
+        assert!(!sr.available);
+        assert_eq!(sr.display, "");
+    }
+
+    #[test]
     fn rows_model_attaches_the_error_to_only_the_matching_row() {
         let fs = FakeSysfs::new();
         fs.set("wheel_mode", "desktop");

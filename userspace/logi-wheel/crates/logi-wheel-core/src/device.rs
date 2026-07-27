@@ -361,6 +361,30 @@ impl<S: SysfsIo> Device<S> {
         spec.kind.parse(&raw)
     }
 
+    /// Whether `attr` is actually usable on this wheel, distinguishing two
+    /// different "not there" shapes a frontend must present the same way:
+    /// the sysfs file missing entirely (`Ok(None)`, same as `available`
+    /// returning `false`), and the file present but the wheel/firmware
+    /// answering EOPNOTSUPP on a live read (also `Ok(None)`: the pedal MCU
+    /// on an RS50 exposes `wheel_throttle_sensitivity` et al. as files, but
+    /// the feature does not exist on that sub-device, so every read of them
+    /// comes back `Error::Unsupported`). Any other read error (permissions,
+    /// a transient I/O failure) is not "unsupported" and is passed through
+    /// as `Err` so a caller keeps whatever error handling it already has for
+    /// those; only `Error::Unsupported` collapses to `Ok(None)` here. One
+    /// `exists` check plus, at most, one `read` - no extra round trip beyond
+    /// what a plain `available`-then-`read` pair already costs.
+    pub fn read_supported(&self, attr: &str) -> Result<Option<Value>, Error> {
+        if !self.io.exists(attr) {
+            return Ok(None);
+        }
+        match self.read(attr) {
+            Ok(v) => Ok(Some(v)),
+            Err(Error::Unsupported) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn write(&self, attr: &str, v: &Value) -> Result<(), Error> {
         let spec = Self::spec(attr).ok_or(Error::Invalid)?;
         if spec.access == Access::ReadOnly {
@@ -483,6 +507,39 @@ mod tests {
         let d = Device::with_io(fs);
         d.ensure_desktop_mode().unwrap();
         assert_eq!(d.current_mode().unwrap(), Mode::Desktop);
+    }
+
+    #[test]
+    fn read_supported_returns_the_value_for_a_normal_attr() {
+        assert_eq!(dev().read_supported("wheel_range").unwrap(), Some(Value::Int(900)));
+    }
+
+    #[test]
+    fn read_supported_is_none_for_a_missing_attr() {
+        assert_eq!(dev().read_supported("wheel_brake_force").unwrap(), None);
+    }
+
+    #[test]
+    fn read_supported_is_none_when_the_attr_exists_but_the_wheel_says_unsupported() {
+        // The RS50 pedal MCU's story: `wheel_throttle_sensitivity` exists as
+        // a sysfs file, but the wheel has no such feature on that
+        // sub-device, so every read comes back EOPNOTSUPP.
+        let fs = FakeSysfs::new();
+        fs.set_read_errno("wheel_throttle_sensitivity", 95);
+        let d = Device::with_io(fs);
+        assert!(d.available("wheel_throttle_sensitivity"), "the file itself is there");
+        assert_eq!(d.read_supported("wheel_throttle_sensitivity").unwrap(), None);
+    }
+
+    #[test]
+    fn read_supported_propagates_a_non_unsupported_read_error() {
+        // A permission error (or any other read failure) is not "this
+        // feature doesn't exist"; it must come back as an `Err`, not
+        // collapse to `Ok(None)` the way `Unsupported` does.
+        let fs = FakeSysfs::new();
+        fs.set_read_errno("wheel_range", 13); // EACCES
+        let d = Device::with_io(fs);
+        assert!(matches!(d.read_supported("wheel_range"), Err(Error::Io(_))));
     }
 
     #[test]

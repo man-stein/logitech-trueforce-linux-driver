@@ -105,8 +105,21 @@ impl<S: SysfsIo> ViewModel<S> {
             .iter()
             .filter(|spec| spec.category == cat)
             .map(|spec| {
-                let available = self.device.available(spec.attr);
-                let value = if available { self.device.read(spec.attr).ok() } else { None };
+                // `read_supported` collapses both "file missing" and "file
+                // present but the wheel/firmware says EOPNOTSUPP" (e.g. an
+                // RS50's pedal-curve/sensitivity attrs, which exist as
+                // files but have no feature behind them on that MCU) to
+                // `Ok(None)`, so both present the same way here: an
+                // unavailable, greyed-out row rather than one that looks
+                // live at a fake 0. Any other read error (permissions, a
+                // transient I/O failure) is not "unsupported" and must not
+                // be presented that way, so it keeps today's behavior: the
+                // row stays available with no value.
+                let (available, value) = match self.device.read_supported(spec.attr) {
+                    Ok(Some(v)) => (true, Some(v)),
+                    Ok(None) => (false, None),
+                    Err(_) => (true, None),
+                };
                 let mode_ok = match spec.mode_req {
                     ModeReq::Any => true,
                     ModeReq::DesktopOnly => mode == Some(Mode::Desktop),
@@ -266,6 +279,46 @@ mod tests {
     fn rows_for_a_category_come_from_the_registry() {
         let rows = vm().rows_for(Category::Ffb);
         assert!(rows.iter().any(|r| r.attr == "wheel_strength" && r.label == "FFB strength"));
+    }
+
+    #[test]
+    fn rows_for_marks_an_attr_unavailable_when_the_wheel_says_unsupported() {
+        // The RS50 bug this guards against: the pedal-curve/sensitivity
+        // sysfs files exist, but the pedal MCU has no such feature, so
+        // every read answers EOPNOTSUPP. Before this row also checked the
+        // read outcome, `available` came only from the file's existence,
+        // so the GUI rendered these as live, editable controls sitting at
+        // a fake 0.
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set_read_errno("wheel_throttle_sensitivity", 95); // EOPNOTSUPP
+        let vm = ViewModel::with_io(fs);
+        let row = vm
+            .rows_for(Category::Pedals)
+            .into_iter()
+            .find(|r| r.attr == "wheel_throttle_sensitivity")
+            .unwrap();
+        assert!(!row.available, "must present as unavailable, not a live 0");
+        assert!(row.value.is_none());
+    }
+
+    #[test]
+    fn rows_for_keeps_a_permission_error_available_not_unsupported() {
+        // A non-EOPNOTSUPP read failure (permissions, a transient I/O
+        // error) is a different problem than "this feature doesn't exist",
+        // and must not be relabeled "Unavailable": it keeps today's
+        // behavior of an available row with no value.
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set_read_errno("wheel_throttle_sensitivity", 13); // EACCES
+        let vm = ViewModel::with_io(fs);
+        let row = vm
+            .rows_for(Category::Pedals)
+            .into_iter()
+            .find(|r| r.attr == "wheel_throttle_sensitivity")
+            .unwrap();
+        assert!(row.available, "a permission error is not treated as unsupported");
+        assert!(row.value.is_none());
     }
 
     fn g923_vm() -> ViewModel<FakeSysfs> {
