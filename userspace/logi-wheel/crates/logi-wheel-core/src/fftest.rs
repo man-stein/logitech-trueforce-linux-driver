@@ -21,11 +21,15 @@
 //! advertises for both engines (`mainline/hid-logitech-hidpp.c`'s
 //! `hidpp_dd_ff_effects`/DD `set_bit` list, and `mainline/dd-lg4ff.c`'s
 //! `dd_lg4ff_wheel_effects` for the G923's classic engine): `FF_CONSTANT`,
-//! `FF_RAMP`, `FF_SPRING`, `FF_DAMPER`, `FF_INERTIA`, `FF_PERIODIC` with
-//! the sine/square/sawtooth waveforms, an envelope (attack/fade) demo, a
-//! two-effect mix that exercises the classic engine's slot-0 summing,
-//! `FF_GAIN`, and `FF_AUTOCENTER`. `FF_FRICTION` is deliberately left out:
-//! see [`FORCE_SEQUENCE`]'s doc comment.
+//! `FF_RAMP`, `FF_SPRING`, `FF_DAMPER`, `FF_FRICTION`, `FF_INERTIA`,
+//! `FF_PERIODIC` with the sine/square/triangle/sawtooth waveforms, an
+//! envelope (attack/fade) demo, a two-effect mix that exercises the
+//! classic engine's slot-0 summing, `FF_GAIN`, and `FF_AUTOCENTER`. The
+//! DD wheels (RS50, G PRO) advertise every one of those; the G923's
+//! classic engine advertises the same set minus `FF_FRICTION`
+//! (hardware-probed on a live G923, 2026-07-27), so the friction step is
+//! the one row a G923 run always shows as skipped. `FF_SAW_DOWN` stays
+//! out of the table too; see [`FF_SAW_UP`]'s doc comment for why.
 //!
 //! What lives here vs. per front-end:
 //! - the step tables ([`FORCE_SEQUENCE`], [`TEXTURE_SEQUENCE`]) and the
@@ -78,13 +82,35 @@ pub const EV_FF: u16 = 0x15;
 pub const FF_PERIODIC: u16 = 0x51;
 pub const FF_CONSTANT: u16 = 0x52;
 pub const FF_SPRING: u16 = 0x53;
+/// `ff_condition_effect`, same struct as [`FF_SPRING`]/[`FF_DAMPER`]/
+/// [`FF_INERTIA`] (see [`StepEffect::Friction`]): resistance to motion
+/// that does not scale with speed, unlike [`FF_DAMPER`]. Advertised by
+/// the DD engine; the G923's classic engine does not advertise it
+/// (hardware-probed on a live G923, 2026-07-27), so a friction step is
+/// the one row a G923 run always skips.
+pub const FF_FRICTION: u16 = 0x54;
 pub const FF_DAMPER: u16 = 0x55;
 pub const FF_INERTIA: u16 = 0x56;
 pub const FF_RAMP: u16 = 0x57;
 /// `ff_periodic_effect.waveform` values [`StepEffect::Periodic`] uses.
 pub const FF_SQUARE: u16 = 0x58;
+/// A linear ramp up then down each period: smoother than [`FF_SQUARE`]'s
+/// instant flips, more evenly shaped than [`FF_SAW_UP`]'s one-way ramp.
+pub const FF_TRIANGLE: u16 = 0x59;
 pub const FF_SINE: u16 = 0x5a;
 pub const FF_SAW_UP: u16 = 0x5b;
+
+// No `FF_SAW_DOWN` (0x5c) constant here on purpose: both engines
+// advertise it (see the module doc and `mainline/dd-lg4ff.c`'s
+// `dd_lg4ff_wheel_effects`), but `FORCE_SEQUENCE` does not carry a
+// dedicated step for it. `FF_SAW_UP`'s step already conveys the
+// "ratcheting" shape a sawtooth makes; a mirrored ramp-down step would
+// exercise a different `ff_effect.type` bit but not teach the user
+// anything a hand on the rim can actually distinguish, the way sine vs.
+// square vs. triangle vs. sawtooth can. `ffb-proxy`'s `sink` module
+// still defines and uses `FF_SAW_DOWN` for real game effects; this
+// crate's test suite just has no step that needs its own constant for it.
+
 /// Not an effect type: the `EV_FF` code for the device-gain write.
 pub const FF_GAIN: u16 = 0x60;
 /// Not an effect type: the `EV_FF` code for the device-autocenter write.
@@ -318,17 +344,27 @@ pub enum StepEffect {
     /// `ff_condition_effect`: resistance proportional to turning speed.
     /// Same positive-both-sides requirement as [`StepEffect::Spring`].
     Damper { right_coeff: i16, left_coeff: i16, right_sat: u16, left_sat: u16 },
+    /// `ff_condition_effect`: resistance to motion that does NOT scale
+    /// with speed, unlike [`StepEffect::Damper`] - a constant drag the
+    /// instant the wheel moves at all, rather than growing the faster it
+    /// turns. Same struct and sign requirement as [`StepEffect::Spring`]/
+    /// [`StepEffect::Damper`] (see `hidpp_dd_ff_effect_tick`'s
+    /// `FF_FRICTION` case, a Karnopp-style model). Only the DD engine
+    /// advertises `FF_FRICTION`; the G923's classic engine does not
+    /// (hardware-probed live), so this is the step a G923 run skips.
+    Friction { right_coeff: i16, left_coeff: i16, right_sat: u16, left_sat: u16 },
     /// `ff_condition_effect`: resistance proportional to turning
     /// acceleration - the simulated mass a quick flick of the wheel has
     /// to fight against. Same struct and sign requirement as
-    /// [`StepEffect::Spring`]/[`StepEffect::Damper`] (all three, plus
-    /// `FF_FRICTION`, share `ff_condition_effect` - see
-    /// `hidpp_dd_ff_effect_tick`'s `FF_INERTIA` case and
+    /// [`StepEffect::Spring`]/[`StepEffect::Damper`]/
+    /// [`StepEffect::Friction`] (all four share `ff_condition_effect` -
+    /// see `hidpp_dd_ff_effect_tick`'s `FF_INERTIA` case and
     /// `dd_lg4ff_wheel_effects`).
     Inertia { right_coeff: i16, left_coeff: i16, right_sat: u16, left_sat: u16 },
-    /// `ff_periodic_effect`: a waveform vibration (sine/square/sawtooth -
-    /// see [`FF_SINE`]/[`FF_SQUARE`]/[`FF_SAW_UP`]), optionally
-    /// attack/fade-shaped by `envelope` same as [`StepEffect::Constant`].
+    /// `ff_periodic_effect`: a waveform vibration (sine/square/triangle/
+    /// sawtooth - see [`FF_SINE`]/[`FF_SQUARE`]/[`FF_TRIANGLE`]/
+    /// [`FF_SAW_UP`]), optionally attack/fade-shaped by `envelope` same as
+    /// [`StepEffect::Constant`].
     Periodic { waveform: u16, period_ms: u16, magnitude: i16, envelope: Envelope },
 }
 
@@ -342,6 +378,7 @@ impl StepEffect {
             StepEffect::Ramp { .. } => FF_RAMP,
             StepEffect::Spring { .. } => FF_SPRING,
             StepEffect::Damper { .. } => FF_DAMPER,
+            StepEffect::Friction { .. } => FF_FRICTION,
             StepEffect::Inertia { .. } => FF_INERTIA,
             StepEffect::Periodic { .. } => FF_PERIODIC,
         }
@@ -454,6 +491,7 @@ fn effect_to_ff(effect: &StepEffect, direction: Side, duration_ms: u16, model: W
         }
         StepEffect::Spring { right_coeff, left_coeff, right_sat, left_sat }
         | StepEffect::Damper { right_coeff, left_coeff, right_sat, left_sat }
+        | StepEffect::Friction { right_coeff, left_coeff, right_sat, left_sat }
         | StepEffect::Inertia { right_coeff, left_coeff, right_sat, left_sat } => {
             // ff_condition_effect: right_saturation:u16 @0,
             // left_saturation:u16 @2, right_coeff:i16 @4, left_coeff:i16
@@ -512,29 +550,39 @@ pub fn build_ff_effect(step: &SimStep, model: WheelModel) -> FfEffect {
 /// pulse and one right pulse of equal duration already self-cancel
 /// positionally).
 ///
-/// Covers every `FF_*` effect type both engines advertise
-/// (`hid-logitech-hidpp.c`'s DD `set_bit` list and `dd-lg4ff.c`'s
-/// `dd_lg4ff_wheel_effects` for the G923's classic engine): constant,
-/// ramp, the three condition effects (spring/damper/inertia), three
-/// periodic waveforms (sine/square/sawtooth), an envelope (attack/fade)
+/// Covers every `FF_*` effect type the DD engine advertises
+/// (`hid-logitech-hidpp.c`'s DD `set_bit` list): constant, ramp, all four
+/// condition effects (spring/damper/friction/inertia), four periodic
+/// waveforms (sine/square/triangle/sawtooth), an envelope (attack/fade)
 /// demo, a two-effect mix (the only step that exercises the classic
-/// engine's slot-0 summing rather than one effect at a time), a gain
-/// demo (`FF_GAIN`) and an autocenter demo (`FF_AUTOCENTER`).
+/// engine's slot-0 summing rather than one effect at a time), a gain demo
+/// (`FF_GAIN`) and an autocenter demo (`FF_AUTOCENTER`).
 ///
-/// `FF_FRICTION` is deliberately not included: hardware capture on the
-/// owner's G923 found it not advertised there, and on the DD engine (and
-/// the lg4ff table's `capabilities` field for this wheel) an uploaded
-/// friction effect is internally recast as a damper anyway (see
-/// `dd_lg4ff_upload_effect`'s `DD_LG4FF_CAP_FRICTION` check), so a
-/// dedicated friction step would either always be skipped or duplicate
-/// the damper step under a different name - not worth either.
+/// The G923's classic engine (`dd-lg4ff.c`'s `dd_lg4ff_wheel_effects`)
+/// advertises that same set minus `FF_FRICTION` (hardware-probed on a
+/// live G923, 2026-07-27), so on a G923 the friction step is always
+/// skipped - the one row [`ff_type_supported`]'s capability check ever
+/// takes out of this table. `FF_SAW_DOWN` gets no step of its own: see
+/// [`FF_SAW_UP`]'s doc comment for why one sawtooth direction is enough.
 ///
 /// Every step's own [`SimStep::countdown`] is [`STEP_COUNTDOWN_LONG`] if
 /// the step needs the user to actually turn the wheel once it starts
-/// (spring, damper, inertia, autocenter), else [`STEP_COUNTDOWN_SHORT`]
-/// (holding the rim is enough). Total run time (all thirteen steps' own
-/// durations plus their countdowns, nothing else) is pinned by a test
-/// below to stay under a minute.
+/// (spring, damper, friction, inertia, autocenter), else
+/// [`STEP_COUNTDOWN_SHORT`] (holding the rim is enough). Total run time
+/// (all fifteen steps' own durations plus their countdowns, nothing else)
+/// is pinned by a test below to stay under the task's ~70 s budget for a
+/// DD wheel where nothing is skipped, and comes in lower still on a G923,
+/// where the friction step's own duration and countdown are never spent.
+///
+/// Condition effects (spring/damper/friction/inertia) always play one at
+/// a time here - each is its own step, uploaded, played, stopped and
+/// erased before the next step's countdown ever starts (see
+/// [`run_effect_step`]) - so at most one of the classic engine's three
+/// condition slots (1-3; slot 0 is constant/ramp/periodic) is ever in use
+/// at once. Nothing in this table risks the 3-slot ceiling; a future step
+/// that plays a condition effect concurrently with another (the way
+/// [`StepAction::Mixed`] does for constant+periodic) would need to check
+/// that explicitly.
 pub const FORCE_SEQUENCE: &[SimStep] = &[
     SimStep {
         label: "Constant force, left - hold the rim and feel it pull",
@@ -572,6 +620,18 @@ pub const FORCE_SEQUENCE: &[SimStep] = &[
     SimStep {
         label: "Damper - turn the wheel, feel the resistance to motion",
         action: StepAction::Effect(StepEffect::Damper {
+            right_coeff: SIM_LEVEL_60,
+            left_coeff: SIM_LEVEL_60,
+            right_sat: SIM_SATURATION_60,
+            left_sat: SIM_SATURATION_60,
+        }),
+        duration_ms: 3500,
+        direction: Side::None,
+        countdown: STEP_COUNTDOWN_LONG,
+    },
+    SimStep {
+        label: "Friction - turn the wheel, feel a steady drag that doesn't grow with speed (unlike the damper)",
+        action: StepAction::Effect(StepEffect::Friction {
             right_coeff: SIM_LEVEL_60,
             left_coeff: SIM_LEVEL_60,
             right_sat: SIM_SATURATION_60,
@@ -621,6 +681,18 @@ pub const FORCE_SEQUENCE: &[SimStep] = &[
         label: "Sawtooth - hold the rim, a ratcheting texture",
         action: StepAction::Effect(StepEffect::Periodic {
             waveform: FF_SAW_UP,
+            period_ms: 25,
+            magnitude: SIM_LEVEL_60,
+            envelope: ENVELOPE_NONE,
+        }),
+        duration_ms: 2000,
+        direction: Side::Right,
+        countdown: STEP_COUNTDOWN_SHORT,
+    },
+    SimStep {
+        label: "Triangle wave - hold the rim, smoother ramps than the square, more even than the sawtooth",
+        action: StepAction::Effect(StepEffect::Periodic {
+            waveform: FF_TRIANGLE,
             period_ms: 25,
             magnitude: SIM_LEVEL_60,
             envelope: ENVELOPE_NONE,
@@ -1307,8 +1379,8 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn force_sequence_has_the_thirteen_specified_steps_in_order() {
-        assert_eq!(FORCE_SEQUENCE.len(), 13);
+    fn force_sequence_has_the_fifteen_specified_steps_in_order() {
+        assert_eq!(FORCE_SEQUENCE.len(), 15);
         let types: Vec<Option<u16>> = FORCE_SEQUENCE
             .iter()
             .map(|s| match &s.action {
@@ -1324,19 +1396,21 @@ mod tests {
                 Some(FF_RAMP),
                 Some(FF_SPRING),
                 Some(FF_DAMPER),
+                Some(FF_FRICTION),
                 Some(FF_INERTIA),
                 Some(FF_PERIODIC), // sine
                 Some(FF_PERIODIC), // square
                 Some(FF_PERIODIC), // sawtooth
+                Some(FF_PERIODIC), // triangle
                 Some(FF_PERIODIC), // envelope demo
                 None,              // mixed: constant + sine
                 None,              // gain demo
                 None,              // autocenter demo
             ]
         );
-        assert!(matches!(FORCE_SEQUENCE[10].action, StepAction::Mixed(..)), "row 10 is the mixed step");
-        assert!(matches!(FORCE_SEQUENCE[11].action, StepAction::GainDemo { .. }), "row 11 is the gain demo");
-        assert!(matches!(FORCE_SEQUENCE[12].action, StepAction::Autocenter { .. }), "row 12 is the autocenter demo");
+        assert!(matches!(FORCE_SEQUENCE[12].action, StepAction::Mixed(..)), "row 12 is the mixed step");
+        assert!(matches!(FORCE_SEQUENCE[13].action, StepAction::GainDemo { .. }), "row 13 is the gain demo");
+        assert!(matches!(FORCE_SEQUENCE[14].action, StepAction::Autocenter { .. }), "row 14 is the autocenter demo");
     }
 
     #[test]
@@ -1386,8 +1460,10 @@ mod tests {
     }
 
     #[test]
-    fn force_sequence_spring_damper_inertia_use_a_true_restoring_pair_and_the_long_countdown() {
-        for row in [3, 4, 5] {
+    fn force_sequence_spring_damper_friction_inertia_use_a_true_restoring_pair_and_the_long_countdown() {
+        // Spring (3), damper (4), friction (5), inertia (6): grouped
+        // together, right next to each other, each its own step.
+        for row in [3, 4, 5, 6] {
             let step = &FORCE_SEQUENCE[row];
             assert_eq!(step.direction, Side::None, "row {row}: condition effects ignore direction");
             assert_eq!(step.countdown, STEP_COUNTDOWN_LONG, "row {row}: an active 'turn the wheel' step");
@@ -1395,6 +1471,7 @@ mod tests {
             let (right_coeff, left_coeff, right_sat, left_sat) = match single_effect(step) {
                 StepEffect::Spring { right_coeff, left_coeff, right_sat, left_sat }
                 | StepEffect::Damper { right_coeff, left_coeff, right_sat, left_sat }
+                | StepEffect::Friction { right_coeff, left_coeff, right_sat, left_sat }
                 | StepEffect::Inertia { right_coeff, left_coeff, right_sat, left_sat } => {
                     (*right_coeff, *left_coeff, *right_sat, *left_sat)
                 }
@@ -1411,22 +1488,34 @@ mod tests {
             assert!(right_sat > 0);
             assert_eq!(right_sat, left_sat);
         }
-        assert!(FORCE_SEQUENCE[5].label.contains("FF_INERTIA"));
+        assert!(matches!(single_effect(&FORCE_SEQUENCE[5]), StepEffect::Friction { .. }), "row 5 is friction");
+        assert!(FORCE_SEQUENCE[5].label.to_lowercase().contains("friction"));
+        // The task's distinguishing point: the label must call out how
+        // friction differs from the damper (constant drag vs. speed-
+        // scaled resistance), not just name the effect.
+        assert!(FORCE_SEQUENCE[5].label.contains("damper"), "label: {}", FORCE_SEQUENCE[5].label);
+        assert!(FORCE_SEQUENCE[6].label.contains("FF_INERTIA"));
     }
 
     #[test]
-    fn force_sequence_periodic_steps_cover_sine_square_and_sawtooth() {
-        let waveforms: Vec<u16> = [6, 7, 8]
+    fn force_sequence_periodic_steps_cover_sine_square_sawtooth_and_triangle() {
+        let waveforms: Vec<u16> = [7, 8, 9, 10]
             .iter()
             .map(|&row| match single_effect(&FORCE_SEQUENCE[row]) {
                 StepEffect::Periodic { waveform, .. } => *waveform,
                 other => panic!("row {row}: expected Periodic, got {other:?}"),
             })
             .collect();
-        assert_eq!(waveforms, vec![FF_SINE, FF_SQUARE, FF_SAW_UP]);
-        assert!(FORCE_SEQUENCE[7].label.contains("notchier") && FORCE_SEQUENCE[7].label.contains("harsher"));
-        assert!(FORCE_SEQUENCE[8].label.contains("ratchet"));
-        for row in [6, 7, 8] {
+        assert_eq!(waveforms, vec![FF_SINE, FF_SQUARE, FF_SAW_UP, FF_TRIANGLE]);
+        assert!(FORCE_SEQUENCE[8].label.contains("notchier") && FORCE_SEQUENCE[8].label.contains("harsher"));
+        assert!(FORCE_SEQUENCE[9].label.contains("ratchet"));
+        // The triangle step's label must place it relative to both its
+        // neighbors, per the task: smoother than the square, more even
+        // than the sawtooth.
+        assert!(FORCE_SEQUENCE[10].label.to_lowercase().contains("triangle"));
+        assert!(FORCE_SEQUENCE[10].label.contains("smoother") && FORCE_SEQUENCE[10].label.contains("square"));
+        assert!(FORCE_SEQUENCE[10].label.contains("even") && FORCE_SEQUENCE[10].label.contains("sawtooth"));
+        for row in [7, 8, 9, 10] {
             assert!((2000..=2500).contains(&FORCE_SEQUENCE[row].duration_ms), "row {row}");
             assert_eq!(FORCE_SEQUENCE[row].countdown, STEP_COUNTDOWN_SHORT, "row {row}: passive, hold the rim");
         }
@@ -1434,74 +1523,96 @@ mod tests {
 
     #[test]
     fn force_sequence_envelope_demo_shapes_a_periodic_effect_with_a_nonzero_attack_and_fade() {
-        let StepEffect::Periodic { envelope, .. } = single_effect(&FORCE_SEQUENCE[9]) else {
+        let StepEffect::Periodic { envelope, .. } = single_effect(&FORCE_SEQUENCE[11]) else {
             panic!("expected the envelope demo to be a Periodic step");
         };
         assert!(envelope.attack_length > 0, "attack must be nonzero to actually fade in");
         assert!(envelope.fade_length > 0, "fade must be nonzero to actually fade out");
-        assert!(FORCE_SEQUENCE[9].label.contains("fade"));
-        assert!((2000..=2500).contains(&FORCE_SEQUENCE[9].duration_ms));
+        assert!(FORCE_SEQUENCE[11].label.contains("fade"));
+        assert!((2000..=2500).contains(&FORCE_SEQUENCE[11].duration_ms));
     }
 
     #[test]
     fn force_sequence_mixed_step_plays_a_constant_and_a_periodic_together() {
-        let StepAction::Mixed(a, b) = &FORCE_SEQUENCE[10].action else { panic!("expected a Mixed step") };
+        let StepAction::Mixed(a, b) = &FORCE_SEQUENCE[12].action else { panic!("expected a Mixed step") };
         assert!(matches!(a, StepEffect::Constant { .. }), "first effect is the steady pull");
         assert!(matches!(b, StepEffect::Periodic { .. }), "second effect is the vibration on top");
-        assert!(FORCE_SEQUENCE[10].label.contains("vibration on top"));
+        assert!(FORCE_SEQUENCE[12].label.contains("vibration on top"));
     }
 
     #[test]
     fn force_sequence_gain_demo_uses_a_reduced_gain_well_below_full() {
-        let StepAction::GainDemo { effect, demo_gain } = &FORCE_SEQUENCE[11].action else {
+        let StepAction::GainDemo { effect, demo_gain } = &FORCE_SEQUENCE[13].action else {
             panic!("expected a GainDemo step")
         };
         assert!(matches!(effect, StepEffect::Constant { .. }));
         assert!(*demo_gain > 0 && *demo_gain < SIM_GAIN_FULL / 2, "clearly reduced, not just slightly");
-        assert!(FORCE_SEQUENCE[11].label.contains("30 percent"));
+        assert!(FORCE_SEQUENCE[13].label.contains("30 percent"));
     }
 
     #[test]
     fn force_sequence_autocenter_demo_uses_the_long_countdown_and_a_device_level_event() {
-        let StepAction::Autocenter { level } = &FORCE_SEQUENCE[12].action else {
+        let StepAction::Autocenter { level } = &FORCE_SEQUENCE[14].action else {
             panic!("expected an Autocenter step")
         };
         assert!(*level > 0 && *level < SIM_GAIN_FULL, "a real but non-maximal strength");
-        assert_eq!(FORCE_SEQUENCE[12].direction, Side::None);
-        assert_eq!(FORCE_SEQUENCE[12].countdown, STEP_COUNTDOWN_LONG, "an active 'turn the wheel' step");
-        assert_eq!(FORCE_SEQUENCE[12].duration_ms, 4000, "the task's specified ~4s hold");
-        assert!(FORCE_SEQUENCE[12].label.contains("turn the wheel"));
+        assert_eq!(FORCE_SEQUENCE[14].direction, Side::None);
+        assert_eq!(FORCE_SEQUENCE[14].countdown, STEP_COUNTDOWN_LONG, "an active 'turn the wheel' step");
+        assert_eq!(FORCE_SEQUENCE[14].duration_ms, 4000, "the task's specified ~4s hold");
+        assert!(FORCE_SEQUENCE[14].label.contains("turn the wheel"));
     }
 
     #[test]
     fn force_sequence_countdown_is_long_only_for_the_turn_the_wheel_steps() {
         let long_rows: Vec<usize> =
             FORCE_SEQUENCE.iter().enumerate().filter(|(_, s)| s.countdown == STEP_COUNTDOWN_LONG).map(|(i, _)| i).collect();
-        // Spring, damper, inertia, autocenter - exactly the steps that
-        // need the user to actually turn the wheel once it starts.
-        assert_eq!(long_rows, vec![3, 4, 5, 12]);
+        // Spring, damper, friction, inertia, autocenter - exactly the
+        // steps that need the user to actually turn the wheel once it
+        // starts.
+        assert_eq!(long_rows, vec![3, 4, 5, 6, 14]);
         assert!(
             FORCE_SEQUENCE.iter().enumerate().filter(|(i, _)| !long_rows.contains(i)).all(|(_, s)| s.countdown == STEP_COUNTDOWN_SHORT),
             "every other row uses the short, passive countdown"
         );
     }
 
+    /// Every step's own duration plus its own countdown, nothing else (no
+    /// separate pre-sequence wait exists) - what a user actually
+    /// experiences end to end for the rows in `rows`.
+    fn total_ms_for(rows: impl Iterator<Item = usize>) -> u64 {
+        rows.map(|row| {
+            let s = &FORCE_SEQUENCE[row];
+            let countdown_ms = s.countdown.ticks * u64::try_from(s.countdown.tick.as_millis()).unwrap();
+            u64::from(s.duration_ms) + countdown_ms
+        })
+        .sum()
+    }
+
     #[test]
-    fn force_sequence_total_time_stays_under_a_minute() {
-        // Every step's own duration plus its own countdown, nothing else
-        // (no separate pre-sequence wait exists any more) - what a user
-        // actually experiences end to end.
-        let total_ms: u64 = FORCE_SEQUENCE
-            .iter()
-            .map(|s| {
-                let countdown_ms = s.countdown.ticks * u64::try_from(s.countdown.tick.as_millis()).unwrap();
-                u64::from(s.duration_ms) + countdown_ms
-            })
-            .sum();
-        assert!(total_ms < 60_000, "total_ms={total_ms}, must stay under a minute");
-        // Comfortably under, not just barely - regression guard against
-        // a future step quietly pushing it over.
-        assert!(total_ms > 45_000, "total_ms={total_ms} looks suspiciously short for 13 steps");
+    fn force_sequence_total_time_stays_under_the_tasks_70s_budget_on_a_dd_wheel() {
+        // A DD wheel (RS50/G PRO) skips nothing: every one of the fifteen
+        // rows plays, friction included.
+        let total_ms = total_ms_for(0..FORCE_SEQUENCE.len());
+        assert!(total_ms < 70_000, "total_ms={total_ms}, must stay under the task's ~70s budget");
+        // Comfortably under, not just barely - regression guard against a
+        // future step quietly pushing it over, and against one quietly
+        // shrinking the table back down.
+        assert!(total_ms > 60_000, "total_ms={total_ms} looks suspiciously short for 15 steps");
+    }
+
+    #[test]
+    fn force_sequence_total_time_is_lower_still_on_a_g923_which_skips_friction() {
+        // A G923 run never spends the friction row's own duration or
+        // countdown: `run_sequence` skips it outright (see
+        // `run_sequence_skips_friction_on_a_g923_like_bitmap_lacking_ff_
+        // friction` below for the runner-level proof), so the G923's real
+        // total is the DD total minus exactly that row.
+        let dd_total_ms = total_ms_for(0..FORCE_SEQUENCE.len());
+        let friction_row_ms = total_ms_for(std::iter::once(5));
+        let g923_total_ms = dd_total_ms - friction_row_ms;
+        assert!(g923_total_ms < dd_total_ms, "skipping a row must shorten the run");
+        assert!(g923_total_ms < 65_000, "g923_total_ms={g923_total_ms}");
+        assert!(g923_total_ms > 55_000, "g923_total_ms={g923_total_ms} looks suspiciously short");
     }
 
     #[test]
@@ -1576,7 +1687,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "not a single Effect action")]
     fn build_ff_effect_panics_on_a_non_effect_step() {
-        build_ff_effect(&FORCE_SEQUENCE[12], WheelModel::Rs50);
+        build_ff_effect(&FORCE_SEQUENCE[14], WheelModel::Rs50); // the autocenter demo
     }
 
     #[test]
@@ -1678,6 +1789,7 @@ mod tests {
         FF_RAMP,
         FF_SPRING,
         FF_DAMPER,
+        FF_FRICTION,
         FF_INERTIA,
         FF_PERIODIC,
         FF_GAIN,
@@ -1885,8 +1997,8 @@ mod tests {
 
     #[test]
     fn step_status_text_names_the_step_and_its_position() {
-        let text = step_status_text(1, 13, &FORCE_SEQUENCE[1]);
-        assert_eq!(text, "step 2/13: Constant force, right - hold the rim and feel it pull");
+        let text = step_status_text(1, 15, &FORCE_SEQUENCE[1]);
+        assert_eq!(text, "step 2/15: Constant force, right - hold the rim and feel it pull");
     }
 
     // -----------------------------------------------------------------
@@ -1936,6 +2048,81 @@ mod tests {
         assert_eq!(outcome.ran, 0);
         assert_eq!(outcome.skipped, vec!["mixed"]);
         assert_eq!(device.uploads, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // The friction step: capability-gated exactly like every other step,
+    // which is what makes it play on a DD wheel and skip on a G923.
+    // -----------------------------------------------------------------
+
+    /// A one-step table shaped like `FORCE_SEQUENCE`'s friction row, but
+    /// zero-duration/zero-countdown so a test can actually run it through
+    /// `run_sequence` without sleeping out real time.
+    const FRICTION_ONLY: &[SimStep] = &[SimStep {
+        label: "friction",
+        action: StepAction::Effect(StepEffect::Friction {
+            right_coeff: 100,
+            left_coeff: 100,
+            right_sat: 100,
+            left_sat: 100,
+        }),
+        duration_ms: 0,
+        direction: Side::None,
+        countdown: Countdown::NONE,
+    }];
+
+    #[test]
+    fn run_sequence_plays_friction_on_a_dd_like_bitmap_that_advertises_ff_friction() {
+        // DD wheels (RS50/G PRO) advertise FF_FRICTION alongside every
+        // other condition effect - ALL_TYPES models exactly that.
+        let mut device = MockDevice::supporting(ALL_TYPES);
+        let cancel = AtomicBool::new(false);
+        let outcome = run_sequence(&mut device, FRICTION_ONLY, RUNNER_TEST_MODEL, &cancel, |_| {});
+        assert_eq!(outcome.end, SequenceEnd::Completed);
+        assert_eq!(outcome.ran, 1, "friction plays when the device advertises it");
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(device.uploads, 1);
+        assert_eq!(device.erases, 1, "no leaked slot");
+    }
+
+    #[test]
+    fn run_sequence_skips_friction_on_a_g923_like_bitmap_lacking_ff_friction() {
+        // The G923's classic engine advertises the same set as a DD wheel
+        // minus FF_FRICTION (hardware-probed on a live G923): every
+        // ALL_TYPES entry except that one.
+        let g923_like: Vec<u16> = ALL_TYPES.iter().copied().filter(|&t| t != FF_FRICTION).collect();
+        let mut device = MockDevice::supporting(&g923_like);
+        let cancel = AtomicBool::new(false);
+        let mut skip_report = None;
+        let outcome = run_sequence(&mut device, FRICTION_ONLY, RUNNER_TEST_MODEL, &cancel, |ev| {
+            if let SequenceEvent::Skipped(rows) = ev {
+                skip_report = Some(rows.to_vec());
+            }
+        });
+        assert_eq!(outcome.end, SequenceEnd::Completed, "an all-skipped run still completes cleanly");
+        assert_eq!(outcome.ran, 0, "friction never plays without FF_FRICTION");
+        assert_eq!(outcome.skipped, vec!["friction"]);
+        assert_eq!(skip_report, Some(vec![(0, "friction")]));
+        assert_eq!(device.uploads, 0, "never even attempted");
+    }
+
+    #[test]
+    fn force_sequences_own_friction_row_is_supported_on_dd_bits_and_skipped_on_g923_bits() {
+        // Same check, but against the real FORCE_SEQUENCE row (5) and
+        // StepAction::supported directly, rather than a stand-in table -
+        // confirms the actual shipped step, not just a lookalike.
+        let friction_row = &FORCE_SEQUENCE[5];
+        assert!(matches!(single_effect(friction_row), StepEffect::Friction { .. }));
+
+        let mut dd_bits = [0u8; FF_BITS_LEN];
+        for &t in ALL_TYPES {
+            dd_bits[usize::from(t) / 8] |= 1 << (usize::from(t) % 8);
+        }
+        assert!(friction_row.action.supported(&dd_bits), "DD wheels advertise FF_FRICTION");
+
+        let mut g923_bits = dd_bits;
+        g923_bits[usize::from(FF_FRICTION) / 8] &= !(1 << (usize::from(FF_FRICTION) % 8));
+        assert!(!friction_row.action.supported(&g923_bits), "G923 lacks FF_FRICTION, must be skipped");
     }
 
     // -----------------------------------------------------------------
