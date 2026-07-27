@@ -1,4 +1,4 @@
-import { Button, Palette } from "std-widgets.slint";
+import { Button, Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 // One cell of the Info page's button tester grid: the wheel button's
@@ -309,10 +309,16 @@ export component InfoPage inherits Rectangle {
         // the live steering angle, callout tints riding on it) with the
         // full button list BESIDE it, wrapped into columns so every
         // button is visible at once; pedals and the sims stack below.
-        // The Flickable is only the fallback for very short windows: at
-        // the default window size everything fits without scrolling.
-        if root.available: Flickable {
+        // ScrollView (not a bare Flickable) so the vertical scrollbar
+        // becomes visible whenever a short window forces this section to
+        // scroll, instead of silently accepting the mouse wheel with no
+        // sign there is more below; at the default window size everything
+        // fits and the scrollbar stays out of the way (`as-needed`
+        // policy, the widget's default). `viewport-width` is pinned to
+        // the visible width so nothing ever scrolls sideways.
+        if root.available: ScrollView {
             vertical-stretch: 1;
+            viewport-width: self.visible-width;
             viewport-height: max(monitor-column.preferred-height, self.height);
 
             monitor-column := VerticalLayout {
