@@ -48,40 +48,39 @@ see [G923 support](#g923-support)).
 
 Six pieces, all built from this repository:
 
-- **The kernel driver** (`hid-logitech-dd`) is the core. It exposes force
-  feedback through the standard Linux evdev interface and every wheel setting
-  under `/sys/.../wheel_*`, and coexists with the in-tree Logitech driver
-  everywhere else - no blanket module blacklisting. It also drives the G923
-  (see [G923 support](#g923-support)).
+- **The kernel driver** (`hid-logitech-dd`) makes the wheel work: games get
+  standard Linux force feedback, and every wheel setting appears under
+  `/sys/.../wheel_*`. Your other Logitech devices stay on their usual drivers.
+  It also drives the G923 (see [G923 support](#g923-support)).
 
-- **logi-wheel**, a terminal settings app: a native-Linux stand-in for the parts of
-  G HUB that configure the wheel, with typed, validated edits and a G HUB-style
-  curve editor. So you do not have to `echo` values into sysfs by hand.
+- **logi-wheel** lets you change wheel settings from a terminal: everything
+  G HUB configures on Windows, with validated edits and a G HUB-style curve
+  editor, so you never have to `echo` values into sysfs by hand.
 
-- **logi-wheel-gui**, the same settings surface as a desktop app (Slint): every
-  wheel setting, a LIGHTSYNC editor with per-slot colors and animation
-  direction (changes apply to the wheel immediately), per-game TrueForce shim
-  and simulated-TrueForce management on a Setup page that finds your sims across
-  Steam (Proton and native), Lutris and Heroic and lets you add one it does not
-  recognise, computer-side profile presets, and an Info / Testing page with a
-  live input tester (rotating wheel diagram, button and pedal readouts) and
-  guarded, cancelable force simulations.
+- **logi-wheel-gui** puts the same settings in a desktop app. Every wheel
+  setting, a
+  LIGHTSYNC editor with per-slot colors and animation direction (changes reach
+  the wheel immediately), and computer-side profile presets. Its Setup page
+  finds your sims across Steam (Proton and native), Lutris and Heroic (you can
+  add one it misses) and turns the per-game TrueForce helpers on and off. Its
+  Info / Testing page shows live input (rotating wheel diagram, button and
+  pedal readouts) and runs cancelable force tests.
 
   ![logi-wheel-gui settings](docs/images/logi-wheel.png)
 
-- **logi-ffb**, a DirectInput force-feedback proxy for Wine/Proton sims that lose
-  force feedback on the `PROTON_ENABLE_HIDRAW=1` path (see below).
+- **logi-ffb** restores force feedback in DirectInput sims under Wine/Proton
+  (Le Mans Ultimate, for example). One launch option and it works: see
+  [Force feedback in games](#force-feedback-in-games).
 
-- **logi-tf-sim**, a background daemon that synthesizes TrueForce engine
-  haptics from a game's own UDP telemetry, for titles with no native
-  TrueForce - and feeds the same telemetry to the wheel's rev-light strip as
-  a live RPM display. Auto-detects supported games (DiRT Rally 2.0 and the
-  classic Codemasters format, Automobilista 2 / Project CARS 2, F1, BeamNG.drive
-  and EA Sports WRC); enable and tune it per game from the Setup page.
+- **logi-tf-sim** gives you TrueForce engine haptics and a live RPM rev-light
+  display in games with no native TrueForce, using the game's own UDP
+  telemetry. Supported games are auto-detected (DiRT Rally 2.0 and the classic
+  Codemasters format, Automobilista 2 / Project CARS 2, F1, BeamNG.drive and
+  EA Sports WRC); enable and tune it per game from the Setup page.
 
-- **libtrueforce**, a native-Linux C library reimplementing Logitech's TrueForce
-  SDK, for apps that want to drive TrueForce without Wine (a telemetry-driven
-  haptic generator, for example). Optional; not needed for the Proton recipe.
+- **libtrueforce** lets native Linux apps drive TrueForce without Wine: a C
+  library reimplementing Logitech's TrueForce SDK. Optional; not needed for
+  the Proton recipe.
 
 The distribution packages install the driver plus the `logi-wheel`, `logi-wheel-gui`,
 `logi-ffb` and `logi-tf-sim` tools; `libtrueforce` has its own build under
@@ -138,42 +137,40 @@ wiki page, and the one-time TrueForce SDK setup is on
 
 The AUR and Debian packages are DKMS-based and rebuild automatically on kernel
 upgrades. After installing, plug in the wheel and check `dmesg` for a line naming
-your wheel model. The wheel settings are writable with no extra setup once the udev rule is
-installed (it needs no group membership).
+your wheel model. The packages install a udev rule, so settings are writable
+right away, no group membership needed.
 
 ## Force feedback in games
 
 - **Native and most Proton sims:** force feedback works out of the box; games see
   a standard Linux wheel. No setup beyond binding controls in game.
 
-- **TrueForce haptics** (the high-frequency texture layer, on top of normal FFB)
-  in SDK-aware sims needs Logitech's signed SDK DLLs staged into the game's Proton
-  prefix, plus `PROTON_ENABLE_HIDRAW=1`. The one-time recipe is on the
+- **TrueForce haptics** (the high-frequency texture layer, on top of normal
+  FFB) in SDK-aware sims: stage Logitech's signed SDK DLLs into the game's
+  Proton prefix and launch with `PROTON_ENABLE_HIDRAW=1`. The one-time recipe
+  is on the
   [Force feedback in games](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games)
   wiki page. Verified end to end on **Assetto Corsa Competizione** and
-  **Assetto Corsa EVO**. This recipe is for the RS50 and G PRO only: on the
-  G923 the SDK path does not work and `PROTON_ENABLE_HIDRAW` must stay
-  unset - see [G923 support](#g923-support).
+  **Assetto Corsa EVO**. RS50 and G PRO only: on the G923 the SDK path does
+  not work and `PROTON_ENABLE_HIDRAW` must stay unset - see
+  [G923 support](#g923-support).
 
-- **DirectInput sims** (Le Mans Ultimate, for example) lose force feedback with
-  `PROTON_ENABLE_HIDRAW=1` because the real wheel advertises no PID collection.
-  The fix is to prepend **`logi-ffb`** to the launch command (`logi-ffb
-  %command%` in Steam launch options): it presents a virtual wheel that does
-  carry a PID collection, sets `PROTON_ENABLE_HIDRAW=1` on the game itself so
-  Wine drives that PID collection directly, and forwards the effects to the
-  real wheel. You do not set the hidraw variable by hand. The virtual wheel
-  appears as "logi-ffb Virtual Wheel" (its own name and IDs, not the real
-  wheel's), so a game may need a one-time manual binding to it. `logi-ffb` is
-  hardware-validated but wants an in-game tester; if you have such a sim,
-  reports are very welcome.
-
-- **Simulated TrueForce** for games without native support: enable the game
-  in Setup's "Simulated TrueForce" panel, switch on the game's own UDP
-  telemetry setting, and `logi-tf-sim` synthesizes engine haptics from live
-  RPM and throttle - and drives the rev LEDs to match. Intensity and felt
-  rev rate (pitch) are tunable; a consent-gated test sweep lets you feel it
-  without a game. Hardware-verified with synthetic sweeps; in-game reports
+- **DirectInput sims** (Le Mans Ultimate, for example): put `logi-ffb
+  %command%` in the game's Steam launch options. It presents a virtual wheel
+  the game can drive force feedback on and passes the forces through to the
+  real one; do not set `PROTON_ENABLE_HIDRAW` yourself, `logi-ffb` handles it.
+  The game sees a "logi-ffb Virtual Wheel" (its own name and IDs, not the real
+  wheel's), so it may need a one-time manual binding. Hardware-validated, but
+  still waiting on an in-game tester; if you run such a sim, reports are very
   welcome.
+
+- **Simulated TrueForce** for games without native support: enable the game in
+  Setup's "Simulated TrueForce" panel and switch on the game's own UDP
+  telemetry setting. `logi-tf-sim` then plays engine haptics from live RPM and
+  throttle, and drives the rev LEDs to match. Intensity and felt rev rate
+  (pitch) are tunable, and a built-in test sweep (the app asks before running
+  it) lets you feel the effect without launching a game.
+  Hardware-verified with those test sweeps; in-game reports welcome.
 
 ## Configuring the wheel
 
@@ -196,23 +193,22 @@ cd userspace/logi-wheel && cargo build --release
 ./target/release/logi-wheel-gui    # desktop app; ./target/release/logi-wheel for the TUI
 ```
 
-**logi-wheel is the recommended way to configure these wheels** - it is built for
-them specifically and covers everything the driver exposes. Everything it sets
-is also available as plain sysfs attributes under
-`/sys/class/hidraw/hidrawX/device/wheel_*`, so you can script them directly; the
-complete reference is in [**docs/SYSFS_API.md**](docs/SYSFS_API.md). If you
+**logi-wheel is the recommended way to configure these wheels**: it covers
+every setting. Everything it sets is also a plain sysfs attribute under
+`/sys/class/hidraw/hidrawX/device/wheel_*`, so you can script it directly; the
+complete reference is [**docs/SYSFS_API.md**](docs/SYSFS_API.md). If you
 already run [Oversteer](https://github.com/berarma/oversteer) across a
-collection of Logitech wheels, the driver also exposes its expected attribute
-names, so it recognizes the basics here too.
+collection of Logitech wheels, it recognizes the basics here too, since the
+attribute names it expects are exposed as well.
 
 ## Verified game support
 
 **Assetto Corsa Competizione** and **Assetto Corsa EVO** are verified end to end
 under Proton: steering, full force feedback, and TrueForce at once (with
-`PROTON_ENABLE_HIDRAW=1` and Steam Input disabled). Most other sims either work
-out of the box with standard force feedback or need the `logi-ffb` proxy for
-their DirectInput feedback; the full per-game table, and which needs what, is on
-the [Force feedback in games](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games)
+`PROTON_ENABLE_HIDRAW=1` and Steam Input disabled). Most other sims work out
+of the box with standard force feedback, or need `logi-ffb` in their launch
+options; the full per-game table, and which needs what, is on the
+[Force feedback in games](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games)
 wiki page.
 
 A couple of game-side behaviors (rotation-range reset at session start, and
@@ -222,12 +218,12 @@ keeping hands clear during AC EVO map loads) are covered under
 ## Troubleshooting
 
 - **No force feedback / no `wheel_*` files (`range`/`gain` on a G923; wheel
-  stuck on `hid-generic`):** the
-  module did not bind. Confirm it is loaded (`lsmod | grep hid_logitech_dd`),
-  replug the wheel, and check `dmesg`. `./tools/setup.sh doctor` diagnoses this.
-- **Force feedback pulls the wrong way** (a native game and a Wine/Proton game can
-  want opposite signs): toggle **Invert constant force** in logi-wheel (the
-  `wheel_ffb_constant_sign` attribute).
+  stuck on `hid-generic`):** the driver did not bind. Run `./tools/setup.sh
+  doctor` to diagnose, or check by hand: `lsmod | grep hid_logitech_dd`,
+  replug the wheel, read `dmesg`.
+- **Force feedback pulls the wrong way** (native and Wine/Proton games can
+  disagree about direction): toggle **Invert constant force** in logi-wheel
+  (the `wheel_ffb_constant_sign` attribute).
 - **A game stops seeing the wheel after a driver reload:** restart Steam fully;
   its device list goes stale across reloads.
 - **Rotation snaps to 90° at session start:** some sims reset it via their own SDK
@@ -247,16 +243,16 @@ in games, configuring the wheel, simulated TrueForce, troubleshooting) and a
 specification, libtrueforce, and the internals of `logi-ffb` and the
 simulated-TrueForce daemon).
 
-One reference is worth pinning to your installed version, so it stays in the
-repo: the exact `wheel_*` attribute list for scripting in
-[**docs/SYSFS_API.md**](docs/SYSFS_API.md). The protocol and button-mapping
-references live under [`docs/`](docs/) as well.
+The `wheel_*` attribute reference for scripting,
+[**docs/SYSFS_API.md**](docs/SYSFS_API.md), ships in the repo so it always
+matches your installed version. The protocol and button-mapping references
+live under [`docs/`](docs/) as well.
 
 ## Contributing
 
 Contributions are welcome: code, testing on hardware this project cannot reach
 (a real G PRO, a DirectInput sim with `logi-ffb`), and USB captures of wheel
-variants that are not yet fully supported. This driver is forked from
+variants that are not yet fully supported. The kernel driver is a fork of
 [JacKeTUs/hid-logitech-hidpp](https://github.com/JacKeTUs/hid-logitech-hidpp);
 changes that apply to other Logitech devices are worth contributing upstream too.
 Open an issue with your kernel version, distribution, and relevant `dmesg` output.
@@ -278,11 +274,11 @@ redistributed here; you supply them from your own G HUB installation.
 - Upstream Linux [hid-logitech-hidpp](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-logitech-hidpp.c)
   by Benjamin Tissoires and contributors.
 - [Oversteer](https://github.com/berarma/oversteer) by Bernat Arlandis, prior art
-  for Linux wheel configuration; this driver exposes Oversteer-compatible
-  attribute names.
+  for Linux wheel configuration; the Oversteer-compatible attribute names are
+  exposed for it.
 - [new-lg4ff](https://github.com/berarma/new-lg4ff), also by Bernat Arlandis:
-  source of the classic force-feedback engine ported into this driver's G923
-  PlayStation-edition support.
+  source of the classic force-feedback engine that drives the PlayStation G923
+  here.
 - [TF4ALL](https://github.com/Mhytee/Trueforce-For-All) by Mhytee, a Windows
   SimHub plugin whose protocol analysis (issue #20) confirmed the G923 shares
   the RS50/G PRO TrueForce stream protocol.
