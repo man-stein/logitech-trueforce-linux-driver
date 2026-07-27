@@ -5,6 +5,22 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.20.1 - 2026-07-28
+
+- **Pedal settings worked only when no accessory was attached.** The driver
+  asked the pedal unit for its response-curve feature at a fixed HID++
+  sub-device index. Attaching the RS Shifter and Handbrake shifts that
+  numbering, so the pedals answered elsewhere and all nine pedal settings
+  (throttle, brake and clutch sensitivity, deadzones and curves) reported
+  "not supported" on hardware that supports them. The index is now
+  discovered at runtime, confirmed by the axis count the pedal unit
+  reports. Fixed on an RS50 with the accessory attached.
+- **The desktop app showed unsupported settings as editable zeros.** A
+  setting the wheel rejects now reads as unavailable, matching the terminal
+  app, instead of a slider sitting at 0 that silently does nothing.
+- **A flaky test** in the terminal app's simulation suite no longer fails on
+  fast machines.
+
 ## 0.20.0 - 2026-07-26
 
 ### Added
