@@ -31,11 +31,16 @@
 //! `direction=0x4000` == east convention, and `hidpp_dd_condition_force`'s
 //! restoring-force sign, which needs a POSITIVE coefficient on both
 //! sides - a negative pair would build an anti-spring, not a centering
-//! one).
+//! one) - for the DD engine. The G923's classic (lg4ff-style) engine does
+//! not share that convention: see [`Side`] and [`resolve_direction`].
+//! Every step table here stores a logical [`Side`] (`Right`/`Left`/`None`),
+//! never a raw evdev direction value directly, and [`build_ff_effect`]
+//! resolves it against the playing wheel's [`WheelModel`] at upload time.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::device::WheelModel;
 use crate::evtest::EVENT_SIZE;
 
 // ---------------------------------------------------------------------------
@@ -70,18 +75,57 @@ const FF_UNION_SIZE: usize = 32;
 pub const FF_BITS_LEN: usize = 32;
 
 /// evdev direction for "east" (`0x4000`, i.e. 90 degrees on evdev's
-/// circular direction scale): the driver's documented convention for "a
-/// positive level/magnitude produces a positive (rightward) force" (see
-/// `hidpp_dd_project_constant`'s doc comment - direction 0 produces zero
-/// force for a signed level, which is why every directional step here
-/// uses one of these two, never 0).
-pub const RIGHT_DIRECTION: u16 = 0x4000;
+/// circular direction scale). On the DD engine this is the documented
+/// convention for "a positive level/magnitude produces a positive
+/// (rightward) force" (see `hidpp_dd_project_constant`'s doc comment -
+/// direction 0 produces zero force for a signed level, which is why
+/// every directional step here resolves to one of these two raw values,
+/// never 0 - see [`Side`]/[`resolve_direction`]).
+const DIRECTION_EAST: u16 = 0x4000;
 /// evdev direction for "west" (`0xC000`, 270 degrees): flips the sign of
-/// the same positive level/magnitude, producing the opposite (leftward)
-/// pull. Condition effects (spring/damper) ignore `direction` entirely
+/// the same positive level/magnitude relative to [`DIRECTION_EAST`].
+/// Condition effects (spring/damper) ignore `direction` entirely
 /// (`hidpp_dd_condition_force` reads only the condition fields), so their
-/// steps set it to 0.
-pub const LEFT_DIRECTION: u16 = 0xC000;
+/// steps use [`Side::None`], which resolves to 0.
+const DIRECTION_WEST: u16 = 0xC000;
+
+/// Which side of center a directional step pulls the wheel toward,
+/// independent of engine. Resolved to a raw evdev `direction` value only
+/// at upload time, via [`resolve_direction`], because the DD and G923
+/// (classic/lg4ff) engines disagree on which raw value means which side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Right,
+    Left,
+    /// Condition effects (spring/damper): direction is meaningless, always
+    /// resolves to 0.
+    None,
+}
+
+/// Resolve `side` to the raw `ff_effect.direction` value for a wheel of
+/// `model`. Two force engines, two conventions:
+/// - the DD engine (RS50, G PRO, and `Unknown` - assumed DD-shaped, same
+///   as everywhere else `WheelModel` gates DD vs. classic behavior) uses
+///   `hidpp_dd_project_constant`'s documented convention as-is:
+///   [`DIRECTION_EAST`] (0x4000) is rightward, [`DIRECTION_WEST`] (0xC000)
+///   is leftward.
+/// - the G923's classic (lg4ff-style) engine does the opposite in
+///   practice, hardware-verified 2026-07-27 on the owner's G923 across
+///   three separate measurements (the original constant-force
+///   validation, the TrueForce mirror sign test's baseline push, and this
+///   sequence's own step 1): an effect with `direction=0x4000` and a
+///   POSITIVE level rotates the wheel LEFT, not right. So a G923's
+///   "right" step must carry [`DIRECTION_WEST`] and its "left" step
+///   [`DIRECTION_EAST`] - the DD engine's values, swapped.
+pub fn resolve_direction(side: Side, model: WheelModel) -> u16 {
+    match (side, model) {
+        (Side::None, _) => 0,
+        (Side::Right, WheelModel::G923) => DIRECTION_WEST,
+        (Side::Right, _) => DIRECTION_EAST,
+        (Side::Left, WheelModel::G923) => DIRECTION_EAST,
+        (Side::Left, _) => DIRECTION_WEST,
+    }
+}
 
 /// ~30% of the `i16` force/magnitude range, the level every step in both
 /// sequences uses (moderate, per the task's "keep amplitude moderate"
@@ -194,7 +238,8 @@ impl StepEffect {
 }
 
 /// One step of a test sequence: what to play, for how long, in which
-/// direction, and the human label a front-end shows while it plays.
+/// logical direction, and the human label a front-end shows while it
+/// plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimStep {
     /// Shown by both front-ends while this step plays (see
@@ -204,16 +249,20 @@ pub struct SimStep {
     /// `ff_effect.replay.length`, and how long [`run_sequence`] plays the
     /// step before moving on (or ending, if `cancel` flips first).
     pub duration_ms: u16,
-    /// `ff_effect.direction`; irrelevant (left 0) for the condition
-    /// effects (spring/damper - see the module doc).
-    pub direction: u16,
+    /// The logical side this step pulls toward; [`Side::None`] for the
+    /// condition effects (spring/damper - see the module doc). Resolved
+    /// to a raw `ff_effect.direction` value by [`build_ff_effect`], which
+    /// needs the playing wheel's model to do it (see [`resolve_direction`]).
+    pub direction: Side,
 }
 
-/// Build the kernel `ff_effect` for `step`, id `-1` (a fresh upload; the
-/// kernel assigns one, which is why every step gets erased before the
-/// next one uploads - see [`run_sequence`] - rather than ever updating an
-/// existing id).
-pub fn build_ff_effect(step: &SimStep) -> FfEffect {
+/// Build the kernel `ff_effect` for `step` on a wheel of `model` (which
+/// resolves `step.direction`'s logical [`Side`] to the raw value this
+/// model's engine expects - see [`resolve_direction`]), id `-1` (a fresh
+/// upload; the kernel assigns one, which is why every step gets erased
+/// before the next one uploads - see [`run_sequence`] - rather than ever
+/// updating an existing id).
+pub fn build_ff_effect(step: &SimStep, model: WheelModel) -> FfEffect {
     let mut u = [0u8; FF_UNION_SIZE];
     match step.effect {
         StepEffect::Constant { level } => {
@@ -247,7 +296,7 @@ pub fn build_ff_effect(step: &SimStep) -> FfEffect {
     FfEffect {
         type_: step.effect.ff_type(),
         id: -1,
-        direction: step.direction,
+        direction: resolve_direction(step.direction, model),
         trigger_button: 0,
         trigger_interval: 0,
         replay_length: step.duration_ms,
@@ -256,30 +305,45 @@ pub fn build_ff_effect(step: &SimStep) -> FfEffect {
     }
 }
 
-/// The force-feedback sequence: six steps exercising constant force both
-/// directions, a rising ramp, centering spring, damper resistance and a
-/// sine vibration. Total nominal playback (excluding [`STEP_GAP`] between
-/// steps and the countdown before the sequence starts) is ~10.4 s; with
-/// five inter-step gaps that lands the whole run around 12 s, matching
-/// the task's "thorough, ~12-15 s" target instead of one 2 s pin-and-stop.
+/// One 0.45 s constant-force pulse toward `side`, at the sequence's
+/// standard moderate level. Building block for [`FORCE_SEQUENCE`]'s
+/// alternating-pulse opening (see its doc comment for why this replaced
+/// two long one-directional constant steps).
+const fn pulse(label: &'static str, side: Side) -> SimStep {
+    SimStep { label, effect: StepEffect::Constant { level: SIM_LEVEL_30 }, duration_ms: 450, direction: side }
+}
+
+/// The force-feedback sequence: ten steps opening with six short
+/// alternating constant-force pulses (left/right, repeated three times),
+/// then a rising ramp, centering spring, damper resistance and a sine
+/// vibration.
+///
+/// The pulses replace what used to be two long (1.2 s) one-directional
+/// constant steps: unopposed at ~30% level for that long, the wheel
+/// simply walked to the end stop and parked there (a lock, not a feel
+/// test) - reported live on a G923 as "rotated fully right, then fully
+/// left". Short pulses that alternate direction every 0.45 s instead rock
+/// the wheel around wherever it started, which is what a force-feedback
+/// demonstration is supposed to show. Each pulse is still its own full
+/// upload/play/stop/erase cycle (see [`run_sequence`]), same as every
+/// other step.
+///
+/// Total nominal playback (excluding [`STEP_GAP`] between steps and the
+/// countdown before the sequence starts) is ~10.7 s; with nine inter-step
+/// gaps that lands the whole run around 14.3 s, inside the task's
+/// "thorough, ~12-15 s" target.
 pub const FORCE_SEQUENCE: &[SimStep] = &[
-    SimStep {
-        label: "Constant force, left",
-        effect: StepEffect::Constant { level: SIM_LEVEL_30 },
-        duration_ms: 1200,
-        direction: LEFT_DIRECTION,
-    },
-    SimStep {
-        label: "Constant force, right",
-        effect: StepEffect::Constant { level: SIM_LEVEL_30 },
-        duration_ms: 1200,
-        direction: RIGHT_DIRECTION,
-    },
+    pulse("Constant force, left pulse", Side::Left),
+    pulse("Constant force, right pulse", Side::Right),
+    pulse("Constant force, left pulse", Side::Left),
+    pulse("Constant force, right pulse", Side::Right),
+    pulse("Constant force, left pulse", Side::Left),
+    pulse("Constant force, right pulse", Side::Right),
     SimStep {
         label: "Ramp, rising force",
         effect: StepEffect::Ramp { start: 0, end: SIM_LEVEL_30 },
         duration_ms: 1500,
-        direction: RIGHT_DIRECTION,
+        direction: Side::Right,
     },
     SimStep {
         label: "Spring / centering - turn the wheel and feel it pull back toward center",
@@ -290,7 +354,7 @@ pub const FORCE_SEQUENCE: &[SimStep] = &[
             left_sat: SIM_SATURATION_30,
         },
         duration_ms: 2500,
-        direction: 0,
+        direction: Side::None,
     },
     SimStep {
         label: "Damper - turn the wheel and feel the resistance to motion",
@@ -301,13 +365,13 @@ pub const FORCE_SEQUENCE: &[SimStep] = &[
             left_sat: SIM_SATURATION_30,
         },
         duration_ms: 2500,
-        direction: 0,
+        direction: Side::None,
     },
     SimStep {
         label: "Sine vibration",
         effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 25, magnitude: SIM_LEVEL_30 },
         duration_ms: 1500,
-        direction: RIGHT_DIRECTION,
+        direction: Side::Right,
     },
 ];
 
@@ -322,25 +386,25 @@ pub const TEXTURE_SEQUENCE: &[SimStep] = &[
         label: "Low rumble (~10 Hz) - a slow, heavy pulse",
         effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 100, magnitude: SIM_LEVEL_30 },
         duration_ms: 2000,
-        direction: RIGHT_DIRECTION,
+        direction: Side::Right,
     },
     SimStep {
         label: "Buzz (~25 Hz) - a coarse, gritty texture",
         effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 40, magnitude: SIM_LEVEL_30 },
         duration_ms: 2000,
-        direction: RIGHT_DIRECTION,
+        direction: Side::Right,
     },
     SimStep {
         label: "Mid-high texture (~50 Hz) - a finer grain",
         effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 20, magnitude: SIM_LEVEL_30 },
         duration_ms: 2000,
-        direction: RIGHT_DIRECTION,
+        direction: Side::Right,
     },
     SimStep {
         label: "High-frequency texture (~100 Hz) - a fine, tight buzz",
         effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 10, magnitude: SIM_LEVEL_30 },
         duration_ms: 2000,
-        direction: RIGHT_DIRECTION,
+        direction: Side::Right,
     },
 ];
 
@@ -476,14 +540,16 @@ pub enum SequenceEvent<'a> {
     Step { index: usize, total: usize, step: &'a SimStep },
 }
 
-/// Run `steps` against `device`: skip any whose [`StepEffect::ff_type`]
-/// the device's [`FfDevice::ff_bits`] does not advertise, then for each
-/// runnable step upload, play, wait out its `duration_ms` (or until
-/// `cancel` flips), stop, and erase - always all four, on every path,
-/// before the next step ever uploads, so no effect slot leaks. A short
-/// `step_gap` between steps (itself cancellable) lets the wheel settle
-/// and the label change register; pass [`Duration::ZERO`] to skip it
-/// (tests do, to stay fast).
+/// Run `steps` against `device`, resolving each step's logical [`Side`]
+/// against `model` (see [`resolve_direction`] - this is the one place the
+/// DD/G923 direction-sign divergence actually matters to playback): skip
+/// any whose [`StepEffect::ff_type`] the device's [`FfDevice::ff_bits`]
+/// does not advertise, then for each runnable step upload, play, wait out
+/// its `duration_ms` (or until `cancel` flips), stop, and erase - always
+/// all four, on every path, before the next step ever uploads, so no
+/// effect slot leaks. A short `step_gap` between steps (itself
+/// cancellable) lets the wheel settle and the label change register;
+/// pass [`Duration::ZERO`] to skip it (tests do, to stay fast).
 ///
 /// Cancellable at any point: before a step starts, during its play wait,
 /// or during the gap after it - in every case the sequence stops right
@@ -492,6 +558,7 @@ pub enum SequenceEvent<'a> {
 pub fn run_sequence(
     device: &mut impl FfDevice,
     steps: &[SimStep],
+    model: WheelModel,
     cancel: &AtomicBool,
     step_gap: Duration,
     mut on_event: impl FnMut(SequenceEvent),
@@ -525,7 +592,7 @@ pub fn run_sequence(
         }
         on_event(SequenceEvent::Step { index: i + 1, total, step });
 
-        let effect = build_ff_effect(step);
+        let effect = build_ff_effect(step, model);
         let id = match device.upload(&effect) {
             Ok(id) => id,
             Err(e) => return SequenceOutcome { end: e.into_end(), ran: i, skipped },
@@ -594,7 +661,7 @@ mod tests {
     fn ff_effect_layout_matches_kernel_abi() {
         assert_eq!(std::mem::size_of::<FfEffect>(), 48);
         assert_eq!(std::mem::align_of::<FfEffect>(), 8);
-        let e = build_ff_effect(&FORCE_SEQUENCE[0]);
+        let e = build_ff_effect(&FORCE_SEQUENCE[0], WheelModel::Rs50);
         let union_offset = (&e.u as *const _ as usize) - (&e as *const _ as usize);
         assert_eq!(union_offset, 16);
     }
@@ -614,40 +681,49 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn force_sequence_has_the_six_specified_steps_in_order() {
-        assert_eq!(FORCE_SEQUENCE.len(), 6);
+    fn force_sequence_has_the_ten_specified_steps_in_order() {
+        assert_eq!(FORCE_SEQUENCE.len(), 10);
         let types: Vec<u16> = FORCE_SEQUENCE.iter().map(|s| s.effect.ff_type()).collect();
-        assert_eq!(types, vec![FF_CONSTANT, FF_CONSTANT, FF_RAMP, FF_SPRING, FF_DAMPER, FF_PERIODIC]);
-        // Total nominal (gap-free) playback stays near the task's ~12-15s
-        // budget once the (cancellable) inter-step gaps are added back.
+        assert_eq!(
+            types,
+            vec![
+                FF_CONSTANT, FF_CONSTANT, FF_CONSTANT, FF_CONSTANT, FF_CONSTANT, FF_CONSTANT,
+                FF_RAMP, FF_SPRING, FF_DAMPER, FF_PERIODIC,
+            ]
+        );
+        // Nominal (gap-free) playback plus the nine cancellable inter-step
+        // gaps must land in the task's ~12-15s "thorough" budget.
         let total_ms: u32 = FORCE_SEQUENCE.iter().map(|s| u32::from(s.duration_ms)).sum();
-        assert!((8_000..=13_000).contains(&total_ms), "total_ms={total_ms}");
+        let gap_ms = u32::try_from(STEP_GAP.as_millis()).unwrap();
+        let with_gaps = total_ms + (FORCE_SEQUENCE.len() as u32 - 1) * gap_ms;
+        assert!((12_000..=15_000).contains(&with_gaps), "with_gaps={with_gaps}");
     }
 
     #[test]
-    fn force_sequence_left_and_right_constants_are_opposite_directions_same_level() {
-        let left = &FORCE_SEQUENCE[0];
-        let right = &FORCE_SEQUENCE[1];
-        assert!(left.label.contains("left"));
-        assert!(right.label.contains("right"));
-        assert_eq!(left.direction, LEFT_DIRECTION);
-        assert_eq!(right.direction, RIGHT_DIRECTION);
-        assert_ne!(left.direction, right.direction);
-        let (StepEffect::Constant { level: l }, StepEffect::Constant { level: r }) =
-            (left.effect, right.effect)
-        else {
-            panic!("expected two Constant steps");
-        };
-        // The direction encodes the side; the level itself (and hence
-        // magnitude) is identical and positive, per the driver's
-        // direction=0x4000-is-east convention (see the module doc).
-        assert_eq!(l, r);
-        assert!(l > 0);
+    fn force_sequence_opens_with_six_short_alternating_pulses_of_equal_moderate_level() {
+        // Replaces the old two long (1.2s) one-directional constant
+        // steps, which walked the wheel to the end stop and parked it
+        // there instead of demonstrating anything - see FORCE_SEQUENCE's
+        // doc comment. Each pulse is short (0.45s) and the side
+        // alternates every pulse, so the wheel rocks around its starting
+        // position instead of pinning to a lock.
+        let pulses = &FORCE_SEQUENCE[0..6];
+        for (i, step) in pulses.iter().enumerate() {
+            let (expected_side, expected_word) =
+                if i % 2 == 0 { (Side::Left, "left") } else { (Side::Right, "right") };
+            assert_eq!(step.direction, expected_side, "pulse {i} side");
+            assert!(step.label.contains(expected_word), "pulse {i} label: {}", step.label);
+            assert_eq!(step.duration_ms, 450, "pulse {i} duration");
+            let StepEffect::Constant { level } = step.effect else {
+                panic!("expected a Constant pulse")
+            };
+            assert_eq!(level, SIM_LEVEL_30, "pulse {i} level");
+        }
     }
 
     #[test]
     fn force_sequence_ramp_rises_from_zero() {
-        let StepEffect::Ramp { start, end } = FORCE_SEQUENCE[2].effect else {
+        let StepEffect::Ramp { start, end } = FORCE_SEQUENCE[6].effect else {
             panic!("expected a Ramp step");
         };
         assert_eq!(start, 0);
@@ -656,8 +732,8 @@ mod tests {
 
     #[test]
     fn force_sequence_spring_and_damper_use_a_true_restoring_pair() {
-        for step in [&FORCE_SEQUENCE[3], &FORCE_SEQUENCE[4]] {
-            assert_eq!(step.direction, 0, "condition effects ignore direction");
+        for step in [&FORCE_SEQUENCE[7], &FORCE_SEQUENCE[8]] {
+            assert_eq!(step.direction, Side::None, "condition effects ignore direction");
             let (right_coeff, left_coeff, right_sat, left_sat) = match step.effect {
                 StepEffect::Spring { right_coeff, left_coeff, right_sat, left_sat }
                 | StepEffect::Damper { right_coeff, left_coeff, right_sat, left_sat } => {
@@ -680,11 +756,49 @@ mod tests {
 
     #[test]
     fn force_sequence_sine_step_is_periodic_sine_with_moderate_magnitude() {
-        let StepEffect::Periodic { waveform, magnitude, .. } = FORCE_SEQUENCE[5].effect else {
+        let StepEffect::Periodic { waveform, magnitude, .. } = FORCE_SEQUENCE[9].effect else {
             panic!("expected a Periodic step");
         };
         assert_eq!(waveform, FF_SINE);
         assert!(magnitude > 0 && magnitude < i16::MAX / 2, "moderate, not full-scale");
+    }
+
+    #[test]
+    fn resolve_direction_is_swapped_on_the_g923_but_not_on_dd_wheels() {
+        // DD wheels (RS50, G PRO, and Unknown - treated as DD-shaped, same
+        // as everywhere else WheelModel gates DD vs. classic behavior)
+        // keep today's values: hidpp_dd_project_constant's documented
+        // convention, direction=0x4000 is rightward.
+        for model in [WheelModel::Rs50, WheelModel::GPro, WheelModel::Unknown] {
+            assert_eq!(resolve_direction(Side::Right, model), 0x4000, "{model:?} right");
+            assert_eq!(resolve_direction(Side::Left, model), 0xC000, "{model:?} left");
+        }
+        // The G923's classic (lg4ff-style) engine does the opposite in
+        // practice (hardware-verified 2026-07-27): its "left" pulls with
+        // the DD engine's "right" value, and vice versa.
+        assert_eq!(resolve_direction(Side::Left, WheelModel::G923), 0x4000);
+        assert_eq!(resolve_direction(Side::Right, WheelModel::G923), 0xC000);
+        // Condition effects ignore direction on every model.
+        for model in [WheelModel::Rs50, WheelModel::GPro, WheelModel::Unknown, WheelModel::G923] {
+            assert_eq!(resolve_direction(Side::None, model), 0, "{model:?} condition effect");
+        }
+    }
+
+    #[test]
+    fn build_ff_effect_resolves_the_force_sequences_pulse_directions_per_model() {
+        // The task's exact acceptance check: on a G923 the "left" step
+        // must carry 0x4000 and "right" must carry 0xC000; on an RS50
+        // (the primary DD device) it is the reverse - today's values,
+        // unchanged.
+        let left = &FORCE_SEQUENCE[0];
+        let right = &FORCE_SEQUENCE[1];
+        assert!(left.label.contains("left"));
+        assert!(right.label.contains("right"));
+
+        assert_eq!(build_ff_effect(left, WheelModel::Rs50).direction, 0xC000, "Rs50 left: today's value");
+        assert_eq!(build_ff_effect(right, WheelModel::Rs50).direction, 0x4000, "Rs50 right: today's value");
+        assert_eq!(build_ff_effect(left, WheelModel::G923).direction, 0x4000, "G923 left: swapped");
+        assert_eq!(build_ff_effect(right, WheelModel::G923).direction, 0xC000, "G923 right: swapped");
     }
 
     #[test]
@@ -706,14 +820,14 @@ mod tests {
 
     #[test]
     fn build_ff_effect_matches_the_step_it_was_built_from() {
-        let e = build_ff_effect(&FORCE_SEQUENCE[1]);
+        let e = build_ff_effect(&FORCE_SEQUENCE[1], WheelModel::Rs50);
         assert_eq!(e.type_, FF_CONSTANT);
         assert_eq!(e.id, -1, "fresh upload, kernel assigns the id");
-        assert_eq!(e.direction, RIGHT_DIRECTION);
+        assert_eq!(e.direction, 0x4000, "Rs50 right pulse: today's convention");
         assert_eq!(e.replay_length, FORCE_SEQUENCE[1].duration_ms);
         assert_eq!(i16::from_le_bytes([e.u.0[0], e.u.0[1]]), SIM_LEVEL_30);
 
-        let spring = build_ff_effect(&FORCE_SEQUENCE[3]);
+        let spring = build_ff_effect(&FORCE_SEQUENCE[7], WheelModel::Rs50);
         assert_eq!(spring.type_, FF_SPRING);
         assert_eq!(u16::from_le_bytes([spring.u.0[0], spring.u.0[1]]), SIM_SATURATION_30);
         assert_eq!(i16::from_le_bytes([spring.u.0[4], spring.u.0[5]]), SIM_LEVEL_30, "right_coeff");
@@ -804,17 +918,25 @@ mod tests {
     /// exact same code paths as the real sequences without sleeping out
     /// their real durations.
     const QUICK_STEPS: &[SimStep] = &[
-        SimStep { label: "one", effect: StepEffect::Constant { level: 100 }, duration_ms: 0, direction: RIGHT_DIRECTION },
-        SimStep { label: "two", effect: StepEffect::Ramp { start: 0, end: 100 }, duration_ms: 0, direction: RIGHT_DIRECTION },
-        SimStep { label: "three", effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 10, magnitude: 100 }, duration_ms: 0, direction: RIGHT_DIRECTION },
+        SimStep { label: "one", effect: StepEffect::Constant { level: 100 }, duration_ms: 0, direction: Side::Right },
+        SimStep { label: "two", effect: StepEffect::Ramp { start: 0, end: 100 }, duration_ms: 0, direction: Side::Right },
+        SimStep { label: "three", effect: StepEffect::Periodic { waveform: FF_SINE, period_ms: 10, magnitude: 100 }, duration_ms: 0, direction: Side::Right },
     ];
+
+    /// The model every runner test plays against; the runner's own model-
+    /// resolution logic is covered separately (`resolve_direction_is_
+    /// swapped_on_the_g923_but_not_on_dd_wheels`,
+    /// `build_ff_effect_resolves_the_force_sequences_pulse_directions_per_
+    /// model`), so these tests just need any fixed model to exercise the
+    /// upload/play/stop/erase machinery.
+    const RUNNER_TEST_MODEL: WheelModel = WheelModel::Rs50;
 
     #[test]
     fn run_sequence_completes_every_step_with_no_leaked_effect_slot() {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         let cancel = AtomicBool::new(false);
         let mut seen = Vec::new();
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::ZERO, |ev| {
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |ev| {
             if let SequenceEvent::Step { index, total, step } = ev {
                 seen.push((index, total, step.label));
             }
@@ -837,7 +959,7 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT]);
         let cancel = AtomicBool::new(false);
         let mut skip_report = None;
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::ZERO, |ev| {
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |ev| {
             if let SequenceEvent::Skipped(labels) = ev {
                 skip_report = Some(labels.to_vec());
             }
@@ -855,7 +977,7 @@ mod tests {
     fn run_sequence_skipping_every_step_runs_nothing_and_still_completes() {
         let mut device = MockDevice::supporting(&[]);
         let cancel = AtomicBool::new(false);
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
         assert_eq!(outcome.end, SequenceEnd::Completed);
         assert_eq!(outcome.ran, 0);
         assert_eq!(outcome.skipped.len(), 3);
@@ -867,7 +989,7 @@ mod tests {
     fn run_sequence_cancelled_before_it_starts_runs_nothing() {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         let cancel = AtomicBool::new(true);
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
         assert_eq!(outcome.end, SequenceEnd::Cancelled);
         assert_eq!(outcome.ran, 0);
         assert_eq!(device.uploads, 0);
@@ -882,7 +1004,7 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         let cancel = AtomicBool::new(false);
         let mut seen = Vec::new();
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::ZERO, |ev| {
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |ev| {
             if let SequenceEvent::Step { index, step, .. } = ev {
                 seen.push(step.label);
                 if index == 2 {
@@ -907,7 +1029,7 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         device.cancel_after_erases = Some((1, cancel.clone()));
         let mut seen = Vec::new();
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::from_millis(50), |ev| {
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::from_millis(50), |ev| {
             if let SequenceEvent::Step { step, .. } = ev {
                 seen.push(step.label);
             }
@@ -924,7 +1046,7 @@ mod tests {
         let mut device = MockDevice::supporting(&[FF_CONSTANT, FF_RAMP, FF_PERIODIC]);
         device.gone_after_uploads = Some(2); // the second step's upload
         let cancel = AtomicBool::new(false);
-        let outcome = run_sequence(&mut device, QUICK_STEPS, &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, QUICK_STEPS, RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
         assert_eq!(outcome.end, SequenceEnd::DeviceGone);
         assert_eq!(outcome.ran, 1, "only the first step ever completed");
         assert_eq!(device.uploads, 2, "the failed upload still counts as attempted");
@@ -956,7 +1078,7 @@ mod tests {
         }
         let mut device = FailGain;
         let cancel = AtomicBool::new(false);
-        let outcome = run_sequence(&mut device, &QUICK_STEPS[..1], &cancel, Duration::ZERO, |_| {});
+        let outcome = run_sequence(&mut device, &QUICK_STEPS[..1], RUNNER_TEST_MODEL, &cancel, Duration::ZERO, |_| {});
         assert_eq!(outcome.end, SequenceEnd::Failed("permission denied".to_string()));
         assert_eq!(outcome.ran, 0);
         assert!(outcome.summary().contains("permission denied"));
@@ -964,7 +1086,7 @@ mod tests {
 
     #[test]
     fn step_status_text_names_the_step_and_its_position() {
-        let text = step_status_text(2, 6, &FORCE_SEQUENCE[1]);
-        assert_eq!(text, "step 2/6: Constant force, right");
+        let text = step_status_text(2, 10, &FORCE_SEQUENCE[1]);
+        assert_eq!(text, "step 2/10: Constant force, right pulse");
     }
 }

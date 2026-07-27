@@ -782,12 +782,15 @@ fn stop_test_monitor(reader_cell: &Arc<Mutex<Option<testio::Reader>>>) {
 /// the Test page. Discovery and the one-off `wheel_range` read run off
 /// the UI thread (same pattern as `scan_games`); the result lands back
 /// via `slint::invoke_from_event_loop`, which also stores the running
-/// reader in `reader_cell` and the found device in `device_cell` (what
-/// the sim buttons play against). Called at page-open and on Rescan.
+/// reader in `reader_cell`, the found device in `device_cell` (what the
+/// sim buttons play against) and the model in `model_cell` (what a sim
+/// run resolves its steps' directions against - see `fftest::resolve_
+/// direction`). Called at page-open and on Rescan.
 fn start_test_monitor(
     app_weak: slint::Weak<App>,
     reader_cell: Arc<Mutex<Option<testio::Reader>>>,
     device_cell: Arc<Mutex<Option<evtest::WheelInput>>>,
+    model_cell: Arc<Mutex<WheelModel>>,
 ) {
     stop_test_monitor(&reader_cell);
     std::thread::spawn(move || {
@@ -811,6 +814,7 @@ fn start_test_monitor(
             }
             Err(_) => (WheelModel::default(), 900),
         };
+        *model_cell.lock().unwrap() = model;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = app_weak.upgrade() else { return };
             app.set_test_scanned(true);
@@ -879,12 +883,15 @@ type SimCancelCell = Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>;
 /// Run one confirmed test sequence against the discovered wheel, off the
 /// UI thread, pushing each step's label (or a skip notice) into
 /// `test-sim-status` as it plays and the final summary (and any error)
-/// back into the Test page's properties once it ends. A missing device
-/// is a silent no-op: the buttons are disabled without a wheel, so this
-/// only races an unplug.
+/// back into the Test page's properties once it ends. `model` resolves
+/// each step's logical direction to the raw value its engine expects
+/// (see `fftest::resolve_direction`). A missing device is a silent
+/// no-op: the buttons are disabled without a wheel, so this only races an
+/// unplug.
 fn run_test_sim(
     app_weak: slint::Weak<App>,
     device_cell: &Arc<Mutex<Option<evtest::WheelInput>>>,
+    model: WheelModel,
     cancel_cell: &SimCancelCell,
     kind: testio::SimKind,
 ) {
@@ -924,7 +931,7 @@ fn run_test_sim(
         // cancel flag only shortens the wait inside run_test_sequence,
         // which cleans up on every path), so the UI state resets exactly
         // once.
-        let outcome = testio::run_test_sequence(&wheel.event_path, kind.steps(), &cancel, on_event);
+        let outcome = testio::run_test_sequence(&wheel.event_path, kind.steps(), model, &cancel, on_event);
         *cancel_cell.lock().unwrap() = None;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
@@ -1327,10 +1334,13 @@ fn main() -> Result<(), slint::PlatformError> {
     };
 
     // The Test page's reader thread (`None` while the page is closed or no
-    // wheel was found), the evdev node the sim buttons play against, and
-    // the playing sim's cancel flag (see `SimCancelCell`).
+    // wheel was found), the evdev node the sim buttons play against, the
+    // wheel's model at last discovery (needed to resolve a sim step's
+    // direction against the right engine - see `fftest::resolve_
+    // direction`), and the playing sim's cancel flag (see `SimCancelCell`).
     let test_reader: Arc<Mutex<Option<testio::Reader>>> = Arc::new(Mutex::new(None));
     let test_device: Arc<Mutex<Option<evtest::WheelInput>>> = Arc::new(Mutex::new(None));
+    let test_model: Arc<Mutex<WheelModel>> = Arc::new(Mutex::new(WheelModel::default()));
     let test_sim_cancel: SimCancelCell = Arc::new(Mutex::new(None));
 
     {
@@ -1340,6 +1350,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         let test_reader = test_reader.clone();
         let test_device = test_device.clone();
+        let test_model = test_model.clone();
         app.on_select_category(move |index| {
             let Some(app) = app_weak.upgrade() else { return };
             // The trailing "Setup" row: show that page and stop, without
@@ -1362,7 +1373,12 @@ fn main() -> Result<(), slint::PlatformError> {
             // request below, which fetches the identity rows); leaving it
             // stops the reader so no fd stays open behind other pages.
             if cat == Category::Info {
-                start_test_monitor(app_weak.clone(), test_reader.clone(), test_device.clone());
+                start_test_monitor(
+                    app_weak.clone(),
+                    test_reader.clone(),
+                    test_device.clone(),
+                    test_model.clone(),
+                );
             } else {
                 stop_test_monitor(&test_reader);
             }
@@ -2186,24 +2202,34 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         let test_reader = test_reader.clone();
         let test_device = test_device.clone();
+        let test_model = test_model.clone();
         app.on_test_rescan(move || {
-            start_test_monitor(app_weak.clone(), test_reader.clone(), test_device.clone());
+            start_test_monitor(
+                app_weak.clone(),
+                test_reader.clone(),
+                test_device.clone(),
+                test_model.clone(),
+            );
         });
     }
     {
         let app_weak = app.as_weak();
         let test_device = test_device.clone();
+        let test_model = test_model.clone();
         let test_sim_cancel = test_sim_cancel.clone();
         app.on_test_sim_constant(move || {
-            run_test_sim(app_weak.clone(), &test_device, &test_sim_cancel, testio::SimKind::Force);
+            let model = *test_model.lock().unwrap();
+            run_test_sim(app_weak.clone(), &test_device, model, &test_sim_cancel, testio::SimKind::Force);
         });
     }
     {
         let app_weak = app.as_weak();
         let test_device = test_device.clone();
+        let test_model = test_model.clone();
         let test_sim_cancel = test_sim_cancel.clone();
         app.on_test_sim_texture(move || {
-            run_test_sim(app_weak.clone(), &test_device, &test_sim_cancel, testio::SimKind::Texture);
+            let model = *test_model.lock().unwrap();
+            run_test_sim(app_weak.clone(), &test_device, model, &test_sim_cancel, testio::SimKind::Texture);
         });
     }
     {
@@ -2226,7 +2252,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // the way in, so start the reader here too, or the page would sit on
     // "Scanning /dev/input for the wheel..." forever.
     if get(&current_category) == Category::Info {
-        start_test_monitor(app.as_weak(), test_reader.clone(), test_device.clone());
+        start_test_monitor(app.as_weak(), test_reader.clone(), test_device.clone(), test_model.clone());
     }
 
     let outcome = app.run();

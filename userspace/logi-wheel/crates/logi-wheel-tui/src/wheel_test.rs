@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use logi_wheel_core::evtest::{self, TestEvent, WheelInput, EVENT_SIZE};
 use logi_wheel_core::fftest::{self, DeviceError, FfDevice, FfEffect, SequenceEvent};
 pub use logi_wheel_core::fftest::SimKind;
+use logi_wheel_core::WheelModel;
 
 /// How long a confirmed sequence waits before it actually starts, giving
 /// the user time to get hands on (or off) the wheel.
@@ -53,6 +54,12 @@ pub struct TestView {
     pub steering_raw: i32,
     /// `wheel_range` at last rescan (degrees, lock to lock).
     pub range: u32,
+    /// The connected wheel's model at last rescan, read by the caller
+    /// through its `Device` (same as `range`). Threaded into every
+    /// sequence run so `fftest::run_sequence` resolves each step's
+    /// direction against the right engine's convention (see
+    /// `fftest::resolve_direction`).
+    pub model: WheelModel,
     /// Currently-held buttons (evdev codes).
     pub pressed: BTreeSet<u16>,
     /// Most recent presses, newest first, capped at 8 (release keeps
@@ -94,6 +101,7 @@ impl Default for TestView {
             open_error: None,
             steering_raw: evtest::AXIS_MAX / 2,
             range: 900,
+            model: WheelModel::default(),
             pressed: BTreeSet::new(),
             recent: Vec::new(),
             hat: (0, 0),
@@ -109,14 +117,16 @@ impl Default for TestView {
 }
 
 impl TestView {
-    /// Re-run discovery (stopping any active monitor first). `range` is
-    /// the wheel's configured rotation range, read by the caller through
-    /// its `Device` (the sysfs side and the evdev side are independent).
-    pub fn rescan(&mut self, range: u32) {
+    /// Re-run discovery (stopping any active monitor first). `range` and
+    /// `model` are the wheel's configured rotation range and model, read
+    /// by the caller through its `Device` (the sysfs side and the evdev
+    /// side are independent).
+    pub fn rescan(&mut self, range: u32, model: WheelModel) {
         self.stop_monitor();
         self.dev = evtest::discover_wheel_input();
         self.scanned = true;
         self.range = range;
+        self.model = model;
         self.open_error = None;
     }
 
@@ -266,6 +276,7 @@ impl TestView {
         self.sim_running.store(true, Ordering::Relaxed);
         self.sim_cancel.store(false, Ordering::Relaxed);
         let steps = kind.steps();
+        let model = self.model;
         *self.sim_step_status.lock().unwrap() = format!("{}: starting...", kind.label());
         *self.sim_final.lock().unwrap() = None;
 
@@ -275,7 +286,7 @@ impl TestView {
         let step_status = self.sim_step_status.clone();
         let final_status = self.sim_final.clone();
         std::thread::spawn(move || {
-            let outcome = run_test_sequence(&path, steps, &cancel, &step_status);
+            let outcome = run_test_sequence(&path, steps, model, &cancel, &step_status);
             *final_status.lock().unwrap() = Some(format!("test: {} {}", kind.label(), outcome.summary()));
             running.store(false, Ordering::Relaxed);
         });
@@ -430,13 +441,16 @@ impl FfDevice for EvdevFf {
 
 /// Open `path` and run `steps` against it end to end (see
 /// `fftest::run_sequence`), posting each step's label (or the skip list)
-/// into `step_status` as it goes. Blocking; the caller runs it on its own
+/// into `step_status` as it goes. `model` resolves each step's logical
+/// direction to the raw value its engine expects (see
+/// `fftest::resolve_direction`). Blocking; the caller runs it on its own
 /// thread. An open failure is folded into the same `SequenceOutcome`
 /// shape a mid-run failure would produce, so callers have one path to
 /// handle either.
 fn run_test_sequence(
     path: &str,
     steps: &'static [fftest::SimStep],
+    model: WheelModel,
     cancel: &AtomicBool,
     step_status: &Arc<Mutex<String>>,
 ) -> fftest::SequenceOutcome {
@@ -452,7 +466,7 @@ fn run_test_sequence(
         }
     };
     let mut device = EvdevFf { file };
-    fftest::run_sequence(&mut device, steps, cancel, fftest::STEP_GAP, |ev| {
+    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_GAP, |ev| {
         let text = match ev {
             SequenceEvent::Skipped(labels) => {
                 format!("skipping (not supported by this wheel): {}", labels.join(", "))
@@ -631,8 +645,13 @@ mod tests {
         // same as one unplugged mid-sequence.
         let cancel = AtomicBool::new(false);
         let status = Arc::new(Mutex::new(String::new()));
-        let outcome =
-            run_test_sequence("/nonexistent/event99", fftest::FORCE_SEQUENCE, &cancel, &status);
+        let outcome = run_test_sequence(
+            "/nonexistent/event99",
+            fftest::FORCE_SEQUENCE,
+            WheelModel::Rs50,
+            &cancel,
+            &status,
+        );
         assert_eq!(outcome.end, fftest::SequenceEnd::DeviceGone);
         assert_eq!(outcome.ran, 0);
     }

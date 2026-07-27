@@ -285,13 +285,16 @@ impl FfDevice for EvdevFf {
 
 /// Open `path` and run `steps` against it end to end (see
 /// `fftest::run_sequence`), reporting progress through `on_event` as it
-/// goes. Blocking; callers run it on its own thread and cancel by setting
-/// the shared flag. An open failure is folded into the same
-/// `SequenceOutcome` shape a mid-run failure would produce, so callers
-/// have one path to handle either.
+/// goes. `model` resolves each step's logical direction to the raw value
+/// its engine expects (see `fftest::resolve_direction`). Blocking;
+/// callers run it on its own thread and cancel by setting the shared
+/// flag. An open failure is folded into the same `SequenceOutcome` shape
+/// a mid-run failure would produce, so callers have one path to handle
+/// either.
 pub fn run_test_sequence(
     path: &str,
     steps: &'static [fftest::SimStep],
+    model: logi_wheel_core::WheelModel,
     cancel: &AtomicBool,
     on_event: impl FnMut(SequenceEvent),
 ) -> fftest::SequenceOutcome {
@@ -307,7 +310,7 @@ pub fn run_test_sequence(
         }
     };
     let mut device = EvdevFf { file };
-    fftest::run_sequence(&mut device, steps, cancel, fftest::STEP_GAP, on_event)
+    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_GAP, on_event)
 }
 
 #[cfg(test)]
@@ -328,7 +331,13 @@ mod tests {
     fn run_test_sequence_against_a_missing_node_ends_quietly_as_device_gone() {
         let cancel = AtomicBool::new(false);
         let outcome =
-            run_test_sequence("/nonexistent/event99", fftest::FORCE_SEQUENCE, &cancel, |_| {});
+            run_test_sequence(
+                "/nonexistent/event99",
+                fftest::FORCE_SEQUENCE,
+                logi_wheel_core::WheelModel::Rs50,
+                &cancel,
+                |_| {},
+            );
         assert_eq!(outcome.end, fftest::SequenceEnd::DeviceGone);
         assert_eq!(outcome.ran, 0);
     }

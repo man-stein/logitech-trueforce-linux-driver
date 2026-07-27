@@ -1023,7 +1023,7 @@ impl<S: SysfsIo> App<S> {
     /// wheel input exists).
     pub fn rescan_input(&mut self) {
         let range = self.wheel_range();
-        self.test.rescan(range);
+        self.test.rescan(range, self.device.model());
         if self.test.dev.is_some() {
             self.test.start_monitor();
         }
