@@ -5,17 +5,17 @@
 #
 # One source package, three binary packages:
 #   logitech-trueforce-dkms  the kernel module source + both udev rules
-#   logi-dd                  the headless toolset (TUI, logi-ffb,
+#   logi-wheel                  the headless toolset (TUI, logi-ffb,
 #                            logi-tf-sim, shim installer)
-#   logi-dd-gui              the graphical settings app + desktop entry
+#   logi-wheel-gui              the graphical settings app + desktop entry
 
 include /usr/share/dpkg/pkg-info.mk
 
 NAME := logitech-trueforce
 VER  := $(DEB_VERSION_UPSTREAM)
 DRV  := $(CURDIR)/debian/logitech-trueforce-dkms
-DD   := $(CURDIR)/debian/logi-dd
-GUI  := $(CURDIR)/debian/logi-dd-gui
+TUI  := $(CURDIR)/debian/logi-wheel
+GUI  := $(CURDIR)/debian/logi-wheel-gui
 SRC  := $(DRV)/usr/src/$(NAME)-$(VER)
 
 %:
@@ -23,15 +23,15 @@ SRC  := $(DRV)/usr/src/$(NAME)-$(VER)
 
 override_dh_auto_build:
 	dh_auto_build
-	# The userspace companions: logi-ffb (DirectInput FFB proxy), logi-dd
+	# The userspace companions: logi-ffb (DirectInput FFB proxy), logi-wheel
 	# (settings TUI), logi-tf-sim (simulated-TrueForce daemon; its build.rs
 	# compiles the in-repo libtrueforce.a with gcc+make, both
-	# build-essential), and logi-dd-gui (Slint settings GUI,
+	# build-essential), and logi-wheel-gui (Slint settings GUI,
 	# GPL-3.0-or-later). The whole workspace now needs a current rustc
 	# anyway (the lockfile's TUI dependencies require >= 1.88, Slint 1.17
 	# requires >= 1.92), so the GUI no longer gets a tolerated-failure
 	# build: it is a declared binary package and must build.
-	cargo build --release --manifest-path userspace/logi-dd/Cargo.toml
+	cargo build --release --manifest-path userspace/logi-wheel/Cargo.toml
 
 override_dh_install:
 	# Module source DKMS compiles in /usr/src (the .c keeps its historical
@@ -47,9 +47,9 @@ override_dh_install:
 	# TrueForce-in-Proton shim installer (no-op unless the user stages the
 	# proprietary SDK DLLs; resolves the SDK dir via --sdk-dir /
 	# $$LOGITECH_TRUEFORCE_SDK_DIR / ~/.local/share/logitech-trueforce/sdk).
-	# Renamed on install, so it cannot come from logi-dd.install.
+	# Renamed on install, so it cannot come from logi-wheel.install.
 	install -D -m 0755 tools/install-tf-shim.sh \
-		$(DD)/usr/bin/logitech-trueforce-install-shim
+		$(TUI)/usr/bin/logitech-trueforce-install-shim
 	# Everything else (udev rules, binaries, desktop entry, icon) comes
 	# from the per-package debian/<pkg>.install lists.
 	dh_install

@@ -1458,7 +1458,7 @@ directions (Left-to-Right, Right-to-Left) leave all 10 LEDs independent.
 
 This is application behaviour, not protocol-level enforcement - the wire
 format still carries all 10 colours - but a UI that mirrors these directions
-(as G Hub and `logi-dd` do) must send a palindrome so the animation looks
+(as G Hub and `logi-wheel` do) must send a palindrome so the animation looks
 right. The `wheel_led_colors` sysfs attribute always takes 10 colours.
 
 ### 9.9 Linux Driver Implementation

@@ -1,0 +1,20 @@
+[package]
+name = "tf-sim"
+description = "Simulated TrueForce daemon: synthesizes engine haptics from game UDP telemetry"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "logi-tf-sim"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Test-only: pins the front-ends' format-compatible tf-sim.conf
+# reader/writer (logi_wheel_core::tfsim) against this crate's own writer;
+# see tests/frontend_compat.rs.
+logi-wheel-core = { path = "../logi-wheel-core" }

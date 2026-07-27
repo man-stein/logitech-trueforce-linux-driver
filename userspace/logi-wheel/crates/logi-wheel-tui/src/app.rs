@@ -1,0 +1,4477 @@
+use crate::color_picker::{ColorPicker, PickerOutcome};
+use crate::curve_editor::CurveEditor;
+use crate::edit;
+use crate::wheel_test::{SimKind, TestView};
+use logi_wheel_core::games::{self, SetupAction};
+use logi_wheel_core::profiles;
+use logi_wheel_core::setting::Access;
+use logi_wheel_core::shaping::{self, ShapingRole};
+use logi_wheel_core::launchers::{self, DiscoveredGame};
+use logi_wheel_core::lightsync;
+use logi_wheel_core::steam;
+use logi_wheel_core::sysfs::SysfsIo;
+use logi_wheel_core::tfsim;
+use logi_wheel_core::{Category, Device, DeviceInfo, Error, Kind, Mode, ModeReq, Value, WheelModel};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+/// One rendered settings row. `attr`/`label` are owned strings rather than
+/// registry `&'static str`s because the desktop Profiles page also renders
+/// synthetic rows for the computer-side profile store, named after the
+/// saved profiles.
+pub struct Row {
+    pub attr: String,
+    pub label: String,
+    pub value: Result<Value, Error>,
+    pub available: bool,
+}
+
+/// The prefix the desktop Profiles page's saved-profile rows wear:
+/// `profile:<name>`. Not sysfs attributes; `on_key` intercepts them
+/// (Enter applies, `d` arms a delete) before any editor could open.
+pub const PROFILE_ROW_PREFIX: &str = "profile:";
+
+/// The desktop Profiles page's trailing "Save current as..." row. The
+/// dash (no colon) keeps it distinct from every saved-profile row, even
+/// one literally named "new".
+pub const PROFILE_NEW_ATTR: &str = "profile-new";
+
+/// The LIGHTSYNC effect selector's modal state: left/right cycles `index`
+/// through `labels` (the entries `lightsync::dropdown_labels` builds: the
+/// 4 sweeps, the 5 custom slots, plus the raw current effect only while it
+/// is outside 1-9), Enter commits it (one or two device writes; see
+/// `commit_effect_edit`), Esc discards. A separate little state from
+/// `edit::EditState` because the selector's index is a position in a
+/// dynamic label list, not a value any registry `Kind` can bump.
+pub struct EffectEdit {
+    pub index: usize,
+    pub labels: Vec<String>,
+}
+
+/// The `i` info popup's prepared content: the selected setting's label as
+/// the title, then the explainer body (the registry help text, the kind's
+/// range/choices line, the mode requirement). Built once when the popup
+/// opens (see `App::open_info`), so tests can assert the exact content and
+/// a reload can never yank the text from under the open popup.
+pub struct InfoPopup {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+/// The "Add a game" picker's modal state, active while browsing
+/// unrecognised Wine games to shim (the `a` key inside Setup > Your
+/// games). `idx` selects a row in `App::addable`, with one trailing row
+/// (index `addable.len()`) for typing a prefix path by hand; `manual` is
+/// `Some` while that row's text field is open. Enter on a picked row (or
+/// on the committed manual path) installs via the same shim path the `i`
+/// key uses; Esc backs out one level, then closes the picker.
+pub struct AddGamePicker {
+    pub idx: usize,
+    pub manual: Option<String>,
+}
+
+/// The one-line range/unit/choices summary a `Kind` contributes to the
+/// info popup.
+fn kind_detail(kind: &Kind) -> String {
+    match kind {
+        Kind::Percent | Kind::ScaledPercent { .. } => "Range: 0-100 %".to_string(),
+        Kind::IntRange { min, max, unit, .. } => {
+            if unit.is_empty() {
+                format!("Range: {min}-{max}")
+            } else {
+                format!("Range: {min}-{max} {unit}")
+            }
+        }
+        Kind::Enum(variants) => format!("Choices: {}", variants.join(", ")),
+        Kind::Toggle { off, on } => format!("Toggle: {off} / {on}"),
+        Kind::Pair { max } => {
+            format!("Two percentages (lower, upper), together at most {max}%")
+        }
+        Kind::TextField { max_len } => format!("Text, up to {max_len} characters"),
+        Kind::RgbStrip { leds } => format!("{leds} LED colors"),
+        Kind::SlotText { slots, max_len } => {
+            format!("{slots} slots, names up to {max_len} characters each")
+        }
+        Kind::Curve => "Response curve; Enter opens the curve editor".to_string(),
+        Kind::Action => "Action; Enter runs it".to_string(),
+    }
+}
+
+/// The index of the synthetic "Setup" sidebar entry, one past the last real
+/// device category. It is not part of `logi_wheel_core::Category`: Setup shows
+/// the game helpers (logi-ffb, the TrueForce SDK shim), not a device
+/// setting, so `cat_idx` reaching this value means "show the Setup body"
+/// rather than "look up `Category::ALL[cat_idx]`". It is the only synthetic
+/// entry: the live input tester lives on the Info category's page.
+pub const SETUP_INDEX: usize = Category::ALL.len();
+
+/// Which pane the arrow keys act on: the category sidebar (Up/Down move
+/// between views, loading each live) or the view's content (Up/Down move
+/// the row/section/scroll cursor). Tab toggles; Esc steps content focus
+/// back to the sidebar; the digit jumps land on content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Sidebar,
+    Content,
+}
+
+/// The Setup view's sections, in render order. Up/Down move a section
+/// cursor; the selected section expands to its full body while the others
+/// render compactly (header + one status line), so the page fits typical
+/// terminals. Games and Simulated TF carry inner state (a game cursor,
+/// the daemon toggles): Enter/Right steps inside, Esc/Left back out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupSection {
+    Ffb,
+    Sdk,
+    SimTf,
+    Games,
+}
+
+impl SetupSection {
+    // The per-game action list first (the main task, selected and expanded
+    // on entry), then the global helpers (logi-ffb, the TrueForce files
+    // folder, the Simulated TrueForce daemon), matching the GUI Setup
+    // page's accordion order.
+    pub const ALL: [SetupSection; 4] = [
+        SetupSection::Games,
+        SetupSection::Ffb,
+        SetupSection::Sdk,
+        SetupSection::SimTf,
+    ];
+    pub fn label(&self) -> &'static str {
+        match self {
+            SetupSection::Games => "Your games",
+            SetupSection::Ffb => "Force feedback helper (logi-ffb)",
+            SetupSection::Sdk => "TrueForce files",
+            SetupSection::SimTf => "Simulated TrueForce",
+        }
+    }
+}
+
+/// The SDK folder field's prefill: `$LOGITECH_TRUEFORCE_SDK_DIR` when set,
+/// else `~/.local/share/logitech-trueforce/sdk` (the installer script's
+/// own default). Editable in the view (the `s` key); the concrete outcome
+/// shown next to it always comes from the full resolution
+/// (`App::resolve_sdk`), which checks this and every other candidate.
+fn sdk_field_prefill() -> String {
+    if let Some(dir) = std::env::var_os("LOGITECH_TRUEFORCE_SDK_DIR") {
+        if !dir.is_empty() {
+            return dir.to_string_lossy().into_owned();
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join(".local/share/logitech-trueforce/sdk").to_string_lossy().into_owned()
+}
+
+pub struct App<S: SysfsIo> {
+    pub device: Device<S>,
+    pub cat_idx: usize,
+    /// Which pane the arrow keys act on; see `Focus`. Starts on the
+    /// sidebar so Up/Down browse the categories right away.
+    pub focus: Focus,
+    /// Whether the `?` help overlay is on screen; any key closes it. Its
+    /// content comes from `crate::keymap` (one source of truth with the
+    /// footer), never hand-written strings.
+    pub help: bool,
+    pub row_idx: usize,
+    pub rows: Vec<Row>,
+    pub status: String,
+    pub edit: Option<edit::EditState>,
+    /// The modal curve editor, active while shaping a `Kind::Curve` attribute.
+    pub curve_edit: Option<CurveEditor>,
+    /// The modal LED color picker, active while `wheel_led_colors` (the
+    /// only `Kind::RgbStrip` attribute) is being edited.
+    pub color_picker: Option<ColorPicker>,
+    /// The LIGHTSYNC effect selector, active while the Effect row is being
+    /// cycled.
+    pub effect_edit: Option<EffectEdit>,
+    /// The `i` info popup (the selected setting's explainer), `Some` while
+    /// it is on screen; any key closes it. Settings views only: Setup's
+    /// `i` keeps its game-install meaning.
+    pub info_popup: Option<InfoPopup>,
+    /// The "Add a game" picker, `Some` while it is on screen; see
+    /// `AddGamePicker`.
+    pub add_game: Option<AddGamePicker>,
+    pub quit: bool,
+    /// `logi-ffb`'s resolved path (`PATH`, else next to this executable;
+    /// see `logi_wheel_core::helpers`), or `None` if it was not found at
+    /// startup. The Setup body shows the path.
+    pub ffb_path: Option<PathBuf>,
+    /// The TrueForce SDK shim installer's resolved path (`PATH`, else the
+    /// checkout's `tools/install-tf-shim.sh` above this executable), or
+    /// `None` if it was not found at startup.
+    pub shim_binary: Option<PathBuf>,
+    /// The per-axis shaping view toggles: pure per-session view state
+    /// (never persisted, never a sysfs write). While an axis's toggle is
+    /// off (simple, the default) its block shows the sensitivity row and
+    /// hides the curve row; while on, the other way around. Deadzones show
+    /// either way. Each axis is rendered as a synthetic toggle row
+    /// (`shaping::toggle_attr`) heading its block on the Steering/Pedals
+    /// pages; Enter on that row (or 'a' anywhere in the axis's block)
+    /// flips it.
+    pub shaping_toggles: shaping::AxisToggles,
+    /// The Setup view's SDK folder field text (see `sdk_field_prefill` for
+    /// the startup value, `s` in the Setup view to edit it). The field is
+    /// only the first candidate; `sdk_resolved` holds the actual outcome.
+    pub sdk_dir: String,
+    /// The resolved SDK directory (`steam::resolve_sdk_dir` over the
+    /// field, `$LOGITECH_TRUEFORCE_SDK_DIR`, the repo `sdk/` next to the
+    /// resolved installer, and the XDG default), or `None` when no
+    /// candidate holds the DLLs. Recomputed at startup and on every field
+    /// commit; per-game installs pass it explicitly as `--sdk-dir`, so the
+    /// status line and the install can never diverge.
+    pub sdk_resolved: Option<PathBuf>,
+    /// The SDK-dir line editor's draft, `Some` while the Setup view's `s`
+    /// edit is active: type to append, Backspace to erase, Enter commits
+    /// (re-checking `sdk_valid`), Esc discards.
+    pub sdk_edit: Option<String>,
+    /// The Setup view's section cursor (an index into
+    /// `SetupSection::ALL`): the selected section expands, the rest render
+    /// compactly. Kept across view switches, like the games scan.
+    pub setup_section_idx: usize,
+    /// Whether the selected Setup section's inner state is entered
+    /// (Enter/Right on Games or Simulated TF): the section's own keys only
+    /// act inside, and Esc/Left steps back to the section level first.
+    pub setup_inside: bool,
+    /// The games the Setup view lists, `scan_games`'s last result: every
+    /// launcher-discovered game (`launchers::discover`) the compat registry
+    /// recognises, plus any unrecognised one that already has the shim
+    /// (`launchers::keep_for_setup`); `game_idx` is the selected row.
+    pub games: Vec<DiscoveredGame>,
+    pub game_idx: usize,
+    /// Whether `scan_games` ran at least once, so the view can tell "no
+    /// games found" apart from "not scanned yet" (the scan is lazy: it
+    /// first runs when the Setup view is entered).
+    pub games_scanned: bool,
+    /// The unrecognised, unshimmed Wine games the "Add a game" picker (`a`)
+    /// offers (`launchers::is_addable`), same scan as `games`.
+    pub addable: Vec<DiscoveredGame>,
+    /// `logi-tf-sim`'s resolved path (`PATH`, else next to this
+    /// executable), or `None` if it was not found at startup. The Setup
+    /// body's Simulated TrueForce block shows the path; start/test do
+    /// nothing without it.
+    pub tf_bin: Option<PathBuf>,
+    /// Where tf-sim.conf lives (`tfsim::default_path()`); overridable in
+    /// tests. Every edit writes ONE key here (preserving the rest of the
+    /// file) and reloads `tf_cfg`.
+    pub tf_conf: PathBuf,
+    /// The last-loaded tf-sim configuration: the Setup view's master
+    /// line and the per-game cells render from this.
+    pub tf_cfg: tfsim::Config,
+    /// The proc root the daemon probe scans (`/proc`); overridable in
+    /// tests.
+    pub proc_root: PathBuf,
+    /// Whether the logi-tf-sim daemon probed as running; refreshed on
+    /// every Setup entry and after start/stop (the `d` key there).
+    pub tf_daemon: bool,
+    /// The master-intensity line editor's draft, `Some` while the Setup
+    /// view's `e` edit is active (digits, Backspace, Enter commits 0-100,
+    /// Esc discards).
+    pub tf_intensity_edit: Option<String>,
+    /// The pitch line editor's draft, same lifecycle as
+    /// `tf_intensity_edit` (the `p` key; commits 10-200).
+    pub tf_pitch_edit: Option<String>,
+    /// A test sweep waiting for its y/n confirmation (armed by `t` in the
+    /// Setup view). Nothing plays without the explicit `y`: the sweep
+    /// drives the wheel with real haptic force.
+    pub tf_sweep_confirm: bool,
+    /// The running `logi-tf-sim --sweep` child, `None` while no sweep
+    /// plays. Spawned non-blocking (unlike the shim runs, it must stay
+    /// stoppable); the main loop reaps it via `tick_tf_sweep`, and `s`
+    /// SIGTERMs it early (clean stop packets).
+    tf_sweep: Option<std::process::Child>,
+    /// The Test view's whole state (discovery, live monitor, sims); see
+    /// `wheel_test::TestView`.
+    pub test: TestView,
+    /// Where the computer-side profile store lives
+    /// (`profiles::default_dir()`); overridable in tests.
+    pub profiles_dir: PathBuf,
+    /// The new-profile name prompt's draft, `Some` while the desktop
+    /// Profiles page's `n` (or the Save row's Enter) is active: type to
+    /// append, Backspace to erase, Enter saves, Esc discards.
+    pub profile_name_edit: Option<String>,
+    /// A profile delete waiting for its y/n confirmation (the profile's
+    /// name); armed by `d` on a saved-profile row.
+    pub profile_delete_confirm: Option<String>,
+    /// A shim run queued by `on_key` for the main loop to execute:
+    /// `(installer args, verb for the status line)`. The run blocks, so
+    /// instead of running inside the key handler, where the "running..."
+    /// status could never be drawn first, the loop takes this via
+    /// `take_pending_shim`, draws once, then calls `run_shim`.
+    pending_shim: Option<(Vec<String>, &'static str)>,
+    /// Whether the wrapped device probes as absent (no registry attribute
+    /// readable): the shell stays up with empty device categories and a
+    /// red header note, Setup and the Info monitor keep working, and `r`
+    /// queues a re-discovery. Refreshed by `adopt_device`.
+    pub no_wheel: bool,
+    /// A re-discovery queued by `r` in the no-wheel state; the main loop
+    /// takes it (`take_retry_request`), runs `Device::discover()` (which
+    /// only exists for the real sysfs type) and hands any find back via
+    /// `adopt_device`.
+    retry_requested: bool,
+    /// Where the loaded kernel module's version stamp lives
+    /// (`driver::MODULE_VERSION_PATH`); overridable in tests. The Info
+    /// view's Driver row and the `c` status print read through this, so
+    /// they always show the stamp of the module actually loaded right now.
+    pub driver_version_path: PathBuf,
+    /// Cached HID++ firmware string for a classic (G923) wheel's Info row
+    /// (`Device::classic_firmware` is a real, timed-out USB round trip, not
+    /// a sysfs read, so it is queried once per Info-page visit/rescan
+    /// rather than on every `reload()`/draw; see `g923_firmware_queried`).
+    /// `None` while unqueried, still unavailable, or on any other model.
+    pub g923_firmware: Option<String>,
+    /// Whether `g923_firmware` has been queried since the last rescan (`r`
+    /// on the Info page): `reload()` only fires the query while this is
+    /// false, so a drift-triggered or category-switch reload never repeats
+    /// it; the Info page's own `r` resets it to force a fresh read.
+    g923_firmware_queried: bool,
+    /// Cached `Device::info()` snapshot (wheel name/serial/firmware/mode),
+    /// refreshed by `reload()` (view entry, drift-triggered reload, the
+    /// Info view's `r`) rather than read fresh on every draw: the header
+    /// and the Info page's Wheel row used to call `device.info()` straight
+    /// from `ui::draw`, which re-scans `/sys/class/input` for the wheel
+    /// name on every frame while the live monitor keeps the draw loop
+    /// running at ~30 Hz. `None` when the last read failed (no wheel).
+    device_info: Option<DeviceInfo>,
+    /// The Info/Testing view's viewport scroll offset, in lines: the two
+    /// composed views (Info/Testing and Setup) render more content than a
+    /// small terminal can show, so PgUp/PgDn (plus Up/Down on Info, which
+    /// has no list selection) move a per-view offset instead of clipping
+    /// silently. Clamped to the content height (see `scroll_view`), reset
+    /// on every view switch (`move_cat`).
+    pub info_scroll: u16,
+    /// The Setup view's viewport scroll offset; same lifecycle as
+    /// `info_scroll`, but only PgUp/PgDn move it (Up/Down keep selecting
+    /// games there).
+    pub setup_scroll: u16,
+    /// The body height of the last draw, recorded by `ui::draw` (a `Cell`:
+    /// the draw pass only holds `&App`), so the scroll keys can clamp the
+    /// offset to what actually fits and size a page step.
+    pub body_height: std::cell::Cell<u16>,
+    /// The last `(wheel_profile, wheel_mode)` observation, for external-
+    /// change detection: the wheel's physical profile button (or another
+    /// tool writing sysfs) changes settings without any key passing through
+    /// `on_key`, and `check_drift` (run by the main loop's idle ticks)
+    /// reloads the view when this pair moves. Resynced by every `reload`,
+    /// so the app's own edits never read as drift.
+    last_drift: Option<(Option<Value>, Option<Value>)>,
+}
+
+/// Whether `device` looks like a real wheel: at least one of its own
+/// settings (the DD `wheel_*` set, or the G923's classic set; see
+/// `Device::settings`) is present. Mirrors `Device::discover`'s attribute
+/// probe without insisting on one specific attribute (a test fake may
+/// expose any subset).
+fn wheel_present<S: SysfsIo>(device: &Device<S>) -> bool {
+    device.settings().iter().any(|s| device.available(s.attr))
+}
+
+impl<S: SysfsIo> App<S> {
+    pub fn new(device: Device<S>) -> Self {
+        let mut a = App {
+            device,
+            cat_idx: 0,
+            focus: Focus::Sidebar,
+            help: false,
+            row_idx: 0,
+            rows: Vec::new(),
+            status: String::new(),
+            edit: None,
+            curve_edit: None,
+            color_picker: None,
+            effect_edit: None,
+            info_popup: None,
+            add_game: None,
+            quit: false,
+            shaping_toggles: shaping::AxisToggles::default(),
+            ffb_path: logi_wheel_core::helpers::ffb_path(),
+            shim_binary: logi_wheel_core::helpers::installer_path(),
+            sdk_dir: sdk_field_prefill(),
+            sdk_resolved: None,
+            sdk_edit: None,
+            setup_section_idx: 0,
+            setup_inside: false,
+            games: Vec::new(),
+            game_idx: 0,
+            games_scanned: false,
+            addable: Vec::new(),
+            tf_bin: logi_wheel_core::helpers::tf_sim_path(),
+            tf_conf: tfsim::default_path(),
+            tf_cfg: tfsim::Config::load(),
+            proc_root: PathBuf::from("/proc"),
+            tf_daemon: false,
+            tf_intensity_edit: None,
+            tf_pitch_edit: None,
+            tf_sweep_confirm: false,
+            tf_sweep: None,
+            test: TestView::default(),
+            profiles_dir: profiles::default_dir(),
+            profile_name_edit: None,
+            profile_delete_confirm: None,
+            pending_shim: None,
+            no_wheel: false,
+            retry_requested: false,
+            driver_version_path: PathBuf::from(logi_wheel_core::driver::MODULE_VERSION_PATH),
+            g923_firmware: None,
+            g923_firmware_queried: false,
+            device_info: None,
+            info_scroll: 0,
+            setup_scroll: 0,
+            body_height: std::cell::Cell::new(0),
+            last_drift: None,
+        };
+        a.no_wheel = !wheel_present(&a.device);
+        a.sdk_resolved = a.resolve_sdk();
+        a.reload();
+        // Info is the startup view and its live monitor is otherwise only
+        // started when a view change lands on it, which never happens on
+        // the way in; without this the monitor would never scan.
+        if a.is_info() {
+            a.rescan_input();
+        }
+        a
+    }
+
+    /// Resolve the SDK directory the installs use, in the installer's own
+    /// order (the field, `$LOGITECH_TRUEFORCE_SDK_DIR`, the repo `sdk/`
+    /// next to the resolved installer, the XDG default); `None` when no
+    /// candidate holds the DLLs.
+    fn resolve_sdk(&self) -> Option<PathBuf> {
+        steam::resolve_sdk_dir(&self.sdk_dir, self.shim_binary.as_deref())
+    }
+
+    /// Swap in a freshly discovered device (the `r` retry's success path)
+    /// and bring the whole view back to life.
+    pub fn adopt_device(&mut self, device: Device<S>) {
+        self.device = device;
+        self.no_wheel = !wheel_present(&self.device);
+        self.status = if self.no_wheel {
+            "no wheel found (r to retry)".to_string()
+        } else {
+            "wheel found".to_string()
+        };
+        if self.is_info() && !self.no_wheel {
+            self.rescan_input();
+        }
+        self.reload();
+    }
+
+    /// Take the queued re-discovery, if any; see `retry_requested`.
+    pub fn take_retry_request(&mut self) -> bool {
+        std::mem::take(&mut self.retry_requested)
+    }
+
+    pub fn category(&self) -> Category {
+        Category::ALL[self.cat_idx]
+    }
+
+    /// Whether the sidebar should show `cat` at all for the connected
+    /// device: a G923 has no LIGHTSYNC strip or onboard profile slots, so
+    /// those entries would only ever open onto a blank page. See
+    /// `Device::category_has_content`.
+    pub fn category_applicable(&self, cat: Category) -> bool {
+        self.device.category_has_content(cat)
+    }
+
+    /// Whether the synthetic "Setup" sidebar entry is selected.
+    pub fn is_setup(&self) -> bool {
+        self.cat_idx == SETUP_INDEX
+    }
+
+    /// The Setup view's selected section; see `SetupSection`.
+    pub fn setup_section(&self) -> SetupSection {
+        SetupSection::ALL[self.setup_section_idx.min(SetupSection::ALL.len() - 1)]
+    }
+
+    /// Move the Setup section cursor by `d` (clamped at both ends) and
+    /// scroll the view so the newly expanded section is on screen.
+    fn move_setup_section(&mut self, d: i32) {
+        let n = SetupSection::ALL.len() as i32;
+        self.setup_section_idx =
+            ((self.setup_section_idx as i32 + d).clamp(0, n - 1)) as usize;
+        self.ensure_setup_visible();
+    }
+
+    /// Scroll the Setup view so the selected section is visible: its whole
+    /// body when it fits the viewport, its header at minimum.
+    fn ensure_setup_visible(&mut self) {
+        let body = i32::from(self.body_height.get().max(1));
+        let starts = crate::ui::setup_section_starts(self);
+        let total = i32::from(crate::ui::setup_content_height(self));
+        let i = self.setup_section_idx;
+        // +1: the block's top border sits above the first content line
+        // (the first section drags the border itself into view).
+        let start = if i == 0 { 0 } else { i32::from(starts[i]) + 1 };
+        let end = starts.get(i + 1).map(|s| i32::from(*s)).unwrap_or(total - 1);
+        let mut scroll = i32::from(self.setup_scroll);
+        if end >= scroll + body {
+            scroll = end - body + 1;
+        }
+        if start < scroll {
+            scroll = start;
+        }
+        let max = i32::from(self.max_scroll());
+        self.setup_scroll = scroll.clamp(0, max) as u16;
+    }
+
+    /// Whether the Info category is selected (the page that carries the
+    /// live input monitor alongside the identity rows).
+    pub fn is_info(&self) -> bool {
+        !self.is_setup() && self.category() == Category::Info
+    }
+
+    /// Whether the main loop should poll with a short timeout and tick
+    /// the evdev monitor instead of blocking on the next key.
+    pub fn test_polling(&self) -> bool {
+        self.is_info() && self.test.monitoring()
+    }
+
+    /// The Info view's App row: this front-end's own name + version.
+    pub fn app_version_text(&self) -> &'static str {
+        concat!("logi-wheel ", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The Info view's Driver row: the loaded kernel module's version
+    /// stamp (read fresh through `driver_version_path` on every draw, so
+    /// it is current at page load), or the explicit not-loaded marker.
+    pub fn driver_version_text(&self) -> String {
+        logi_wheel_core::driver::module_version_at(&self.driver_version_path)
+            .unwrap_or_else(|| "(module not loaded)".to_string())
+    }
+
+    /// The wheel's configured rotation range for the Test view's degree
+    /// conversion; 900 when unreadable.
+    fn wheel_range(&self) -> u32 {
+        match self.device.read("wheel_range") {
+            Ok(Value::Int(n)) if n > 0 => n as u32,
+            _ => 900,
+        }
+    }
+
+    /// The cached `Device::info()` snapshot the header and the Info page's
+    /// Wheel row render from; see `device_info`'s doc comment for why this
+    /// is cached instead of read straight from the draw path.
+    pub fn info(&self) -> Option<&DeviceInfo> {
+        self.device_info.as_ref()
+    }
+
+    pub fn reload(&mut self) {
+        // Refresh the cached info snapshot every reload (view entry, `r`,
+        // drift-triggered reload): draws in between reuse it via `info()`
+        // instead of re-reading sysfs themselves.
+        self.device_info = self.device.info().ok();
+        // Every reload resyncs the drift baseline: the values on screen are
+        // (about to be) exactly what the device reports now, so only a LATER
+        // external write should count as drift.
+        self.last_drift = Some(self.drift_observation());
+        if self.is_setup() {
+            self.rows.clear();
+            return;
+        }
+        // Without a wheel there is nothing to read: every device category
+        // (Info included) shows its empty state instead of rows.
+        if self.no_wheel {
+            self.rows.clear();
+            self.row_idx = 0;
+            return;
+        }
+        let cat = self.category();
+        // The classic engine's HID++ firmware string takes a real, timed
+        // USB round trip (`Device::classic_firmware`), unlike every other
+        // Info field: query it once per Info-page visit (`g923_firmware_
+        // queried` guards against a drift-triggered reload repeating it
+        // every couple of seconds while the page just sits open), not on
+        // every reload of every category.
+        if cat == Category::Info && !self.g923_firmware_queried && self.device.model() == WheelModel::G923 {
+            self.g923_firmware = self.device.classic_firmware();
+            self.g923_firmware_queried = true;
+        }
+        // `lightsync_rows` hardcodes the wheel_led_* attrs rather than
+        // reading them off a registry, so a wheel whose own settings carry
+        // no Leds entry at all (the G923's classic engine has no LIGHTSYNC
+        // strip) must not get the composed page: it would show an "Effect"/
+        // "Brightness" pair the wheel does not have.
+        let has_leds = self.device.settings().iter().any(|s| s.category == Category::Leds);
+        self.rows = if cat == Category::Leds && has_leds {
+            self.lightsync_rows()
+        } else if cat == Category::Profiles {
+            self.profiles_rows()
+        } else {
+            let rows = self.registry_rows(cat);
+            self.shaping_rows(rows)
+        };
+        if self.row_idx >= self.rows.len() {
+            self.row_idx = self.rows.len().saturating_sub(1);
+        }
+    }
+
+    /// One drift observation: what `wheel_profile`/`wheel_mode` read right
+    /// now, an unreadable one as `None` (absent on this wheel, or the wheel
+    /// is gone).
+    fn drift_observation(&self) -> (Option<Value>, Option<Value>) {
+        (self.device.read("wheel_profile").ok(), self.device.read("wheel_mode").ok())
+    }
+
+    /// External-change detection, run by the main loop's idle ticks: when
+    /// `wheel_profile`/`wheel_mode` moved since the last observation (the
+    /// wheel's physical profile button, another tool writing sysfs), reload
+    /// the current view exactly like the refresh key would (the header re-
+    /// reads the mode on every draw already) and say so in the status line.
+    /// Skipped while any editor, prompt or confirmation is open, so a
+    /// reload can never yank state from under one; the check right after it
+    /// closes still catches up. Returns whether a refresh happened.
+    pub fn check_drift(&mut self) -> bool {
+        if self.no_wheel
+            || self.edit.is_some()
+            || self.curve_edit.is_some()
+            || self.color_picker.is_some()
+            || self.effect_edit.is_some()
+            || self.info_popup.is_some()
+            || self.add_game.is_some()
+            || self.help
+            || self.sdk_edit.is_some()
+            || self.profile_name_edit.is_some()
+            || self.profile_delete_confirm.is_some()
+            || self.test.confirm.is_some()
+            || self.test.countdown_active()
+            || self.tf_intensity_edit.is_some()
+            || self.tf_pitch_edit.is_some()
+            || self.tf_sweep_confirm
+        {
+            return false;
+        }
+        let seen = self.drift_observation();
+        let drifted = self.last_drift.as_ref().is_some_and(|last| *last != seen);
+        self.last_drift = Some(seen);
+        if !drifted {
+            return false;
+        }
+        // The wheel may have gone away entirely (both reads turned None):
+        // re-probe so the shell flips to its no-wheel state, same as
+        // `adopt_device`, instead of showing rows that can no longer be read.
+        self.no_wheel = !wheel_present(&self.device);
+        self.reload();
+        self.status = if self.no_wheel {
+            "wheel disconnected (r to retry)".to_string()
+        } else {
+            "profile/mode changed on the wheel; view refreshed".to_string()
+        };
+        true
+    }
+
+    /// One `Row` per registry spec of `cat`, in registry order. Reads from
+    /// `self.device.settings()`, not the bare `REGISTRY` constant, so a
+    /// connected G923 only ever shows its own four classic settings rather
+    /// than every DD wheel row marked unavailable.
+    fn registry_rows(&self, cat: Category) -> Vec<Row> {
+        self.device
+            .settings()
+            .iter()
+            .filter(|s| s.category == cat)
+            .map(|s| Row {
+                attr: s.attr.to_string(),
+                label: s.label.to_string(),
+                available: self.device.available(s.attr),
+                value: self.device.read(s.attr),
+            })
+            .collect()
+    }
+
+    /// The mode-coupled Profiles page. Onboard: the registry rows (Mode,
+    /// the onboard slot picker, the rename editor). Desktop: the Mode row
+    /// followed by the computer-side profile store (one row per saved
+    /// profile: Enter applies, `d` deletes) and the "Save current as..."
+    /// row (`n` or Enter opens the name prompt).
+    ///
+    /// A wheel with no `wheel_mode` row at all (the G923's classic engine
+    /// has no desktop/onboard concept, and no onboard profile store) skips
+    /// straight to the computer-side store with no Mode row above it: it
+    /// still has its own four settings to snapshot, just no onboard half to
+    /// offer alongside them.
+    fn profiles_rows(&self) -> Vec<Row> {
+        let all = self.registry_rows(Category::Profiles);
+        let has_mode = all.iter().any(|r| r.attr == "wheel_mode");
+        if has_mode && matches!(self.device.current_mode(), Ok(Mode::Onboard)) {
+            return all;
+        }
+        let mut rows: Vec<Row> =
+            if has_mode { all.into_iter().filter(|r| r.attr == "wheel_mode").collect() } else { Vec::new() };
+        for name in profiles::list_in(&self.profiles_dir) {
+            rows.push(Row {
+                attr: format!("{PROFILE_ROW_PREFIX}{name}"),
+                label: name,
+                available: true,
+                value: Ok(Value::Text("Enter applies   d deletes".into())),
+            });
+        }
+        rows.push(Row {
+            attr: PROFILE_NEW_ATTR.to_string(),
+            label: "Save current as...".to_string(),
+            available: true,
+            value: Ok(Value::Text("Enter or n names a new profile".into())),
+        });
+        rows
+    }
+
+    /// The saved profile the selected row stands for, if any.
+    fn selected_profile_name(&self) -> Option<String> {
+        self.selected().and_then(|r| r.attr.strip_prefix(PROFILE_ROW_PREFIX)).map(str::to_string)
+    }
+
+    /// Snapshot the wheel's settings as computer profile `name` (the name
+    /// prompt's Enter).
+    fn save_profile(&mut self, name: &str) {
+        self.status = match profiles::save_in(&self.profiles_dir, name, &self.device) {
+            Ok(()) => format!("profile '{}' saved", name.trim()),
+            Err(e) => format!("profile save: {e}"),
+        };
+        self.reload();
+    }
+
+    /// Replay computer profile `name` onto the wheel (Enter on its row).
+    fn apply_profile(&mut self, name: &str) {
+        self.status = match profiles::apply_in(&self.profiles_dir, name, &self.device) {
+            Ok(errors) if errors.is_empty() => format!("profile '{name}' applied"),
+            Ok(errors) => {
+                let (attr, msg) = &errors[0];
+                format!(
+                    "profile '{name}' applied, {} setting(s) failed, first: {attr}: {msg}",
+                    errors.len()
+                )
+            }
+            Err(e) => format!("profile '{name}': {e}"),
+        };
+        self.reload();
+    }
+
+    /// Compose a category's rows for the per-axis shaping toggles: when any
+    /// row is a shaping generator (a sensitivity or a curve; see
+    /// `shaping::role`), insert each axis's synthetic toggle row right
+    /// before that axis's first row (its block heading) and keep only the
+    /// rows `shaping::visible` allows for the current toggles (an axis on
+    /// sensitivity hides its curve, an axis on the curve hides its
+    /// sensitivity, deadzones and everything else stay). Rows for a
+    /// category with no shaping generators pass through untouched, so
+    /// `reload` can call this unconditionally, matching the GUI's
+    /// `compose_shaping`.
+    fn shaping_rows(&self, rows: Vec<Row>) -> Vec<Row> {
+        if !rows.iter().any(|r| shaping::role(&r.attr) != ShapingRole::Neutral) {
+            return rows;
+        }
+        let mut out = Vec::with_capacity(rows.len() + shaping::Axis::ALL.len());
+        let mut headed: Vec<shaping::Axis> = Vec::new();
+        for row in rows {
+            if let Some(ax) = shaping::axis(&row.attr) {
+                if !headed.contains(&ax) {
+                    headed.push(ax);
+                    out.push(Row {
+                        attr: shaping::toggle_attr(ax).to_string(),
+                        label: shaping::toggle_label(ax).to_string(),
+                        available: true,
+                        value: Ok(Value::Bool(self.shaping_toggles.get(ax))),
+                    });
+                }
+            }
+            if shaping::visible(&row.attr, self.shaping_toggles) {
+                out.push(row);
+            }
+        }
+        out
+    }
+
+    /// Whether the on-screen category carries any shaping toggle rows
+    /// (Steering and Pedals do).
+    pub fn has_shaping_toggle(&self) -> bool {
+        self.rows.iter().any(|r| shaping::toggle_axis(&r.attr).is_some())
+    }
+
+    /// Flip one axis's shaping view toggle and re-compose the page. Pure
+    /// view state: nothing is written to the device.
+    pub fn toggle_shaping(&mut self, axis: shaping::Axis) {
+        self.shaping_toggles.toggle(axis);
+        self.status = format!(
+            "{}: {}",
+            shaping::toggle_label(axis),
+            if self.shaping_toggles.get(axis) { "curve editor" } else { "sensitivity" }
+        );
+        self.reload();
+    }
+
+    /// Flip the shaping toggle for the axis the selected row belongs to
+    /// (the 'a' shortcut): works on an axis's toggle row and on any of its
+    /// sensitivity/deadzone/curve rows; a row with no axis does nothing.
+    pub fn toggle_selected_axis(&mut self) {
+        let Some(axis) = self
+            .selected()
+            .and_then(|r| shaping::toggle_axis(&r.attr).or_else(|| shaping::axis(&r.attr)))
+        else {
+            return;
+        };
+        self.toggle_shaping(axis);
+    }
+
+    fn led_row(&self, attr: &str, label: &str) -> Row {
+        Row {
+            attr: attr.to_string(),
+            label: label.to_string(),
+            available: self.device.available(attr),
+            value: self.device.read(attr),
+        }
+    }
+
+    /// The composed LIGHTSYNC page: Effect (the composed selector), the
+    /// global Brightness, then, only while a custom-slot effect (5-9)
+    /// is active, the active slot's fields as an indented group. The
+    /// slot-scoped registry rows stop being top-level rows;
+    /// `wheel_led_slot` itself has no row at all (the selector's CUSTOM
+    /// entries pick the slot). The G PRO rev lights live on the Steering
+    /// page (they sit on the steering rim), not here.
+    fn lightsync_rows(&self) -> Vec<Row> {
+        let mut rows = vec![
+            self.led_row("wheel_led_effect", "Effect"),
+            self.led_row("wheel_led_brightness", "Brightness"),
+        ];
+        if matches!(self.device.read("wheel_led_effect"), Ok(Value::Int(5..=9))) {
+            rows.push(self.led_row("wheel_led_slot_name", "  Slot name"));
+            rows.push(self.led_row("wheel_led_slot_brightness", "  Slot brightness"));
+            rows.push(self.led_row("wheel_led_direction", "  Direction"));
+            rows.push(self.led_row("wheel_led_colors", "  Colors"));
+            rows.push(self.led_row("wheel_led_apply", "  Apply slot"));
+        }
+        rows
+    }
+
+    /// The per-slot names the effect selector's CUSTOM labels show. Only
+    /// the ACTIVE slot's name is readable (`wheel_led_slot_name` reads the
+    /// slot `wheel_led_slot` points at), so every other entry stays empty
+    /// and falls back to the plain "CUSTOM N" label.
+    fn led_slot_names(&self) -> Vec<String> {
+        let mut names = vec![String::new(); lightsync::CUSTOM_SLOTS];
+        if let (Ok(Value::Int(slot)), Ok(Value::Text(name))) =
+            (self.device.read("wheel_led_slot"), self.device.read("wheel_led_slot_name"))
+        {
+            if let Some(entry) = usize::try_from(slot).ok().and_then(|i| names.get_mut(i)) {
+                *entry = name;
+            }
+        }
+        names
+    }
+
+    /// The ACTIVE slot's stored strip colors for the LIGHTSYNC view's
+    /// preview line, mirrored into their played pairs (left half wins)
+    /// when the slot's direction is inside-out/outside-in, so the line
+    /// shows what the wheel plays. `None` while the colors are unreadable
+    /// (no wheel, or a wheel without LIGHTSYNC).
+    pub fn led_preview_colors(&self) -> Option<Vec<logi_wheel_core::Color>> {
+        let mut colors = match self.device.read("wheel_led_colors") {
+            Ok(Value::Rgb(cs)) => cs,
+            _ => return None,
+        };
+        if let Ok(Value::Enum(direction)) = self.device.read("wheel_led_direction") {
+            if lightsync::mirrored(direction) {
+                lightsync::mirror_left_half(&mut colors);
+            }
+        }
+        Some(colors)
+    }
+
+    /// Run one LIGHTSYNC "preview on wheel": show the currently selected
+    /// effect/slot on the physical strip, then restore the previous
+    /// state. The selection commits immediately in this TUI, so the
+    /// device's current effect+slot IS the selection; re-applying it
+    /// (slot first, then the effect: the driver re-applies the slot's
+    /// stored config on that transition) makes the wheel visibly play it,
+    /// and the restore writes the same pair back. A CUSTOM slot then
+    /// plays one animated rev sweep (`wheel_rev_level` 0..10..0, one step
+    /// per `sweep_step`, which must stay above the ~160 ms pacing floor),
+    /// so the slot's colours AND direction show as a live fill; built-in
+    /// effects hold for `hold` (their colours are firmware-owned). The
+    /// restoring effect write also exits the fill back to the idle
+    /// pattern. Only LED state is written, nothing moves. Blocks while it
+    /// shows, so a future caller should draw a status line first (the way
+    /// the shim runs do via `pending_shim`).
+    #[allow(dead_code)] // kept for a future staged slot-editor preview (see the removed 't' binding)
+    pub fn run_led_try(&mut self, hold: std::time::Duration, sweep_step: std::time::Duration) {
+        let effect = match self.device.read("wheel_led_effect") {
+            Ok(Value::Int(n)) => n.clamp(1, 9),
+            _ => {
+                self.status = "preview on wheel: effect unreadable".to_string();
+                return;
+            }
+        };
+        let slot = match self.device.read("wheel_led_slot") {
+            Ok(Value::Int(n)) => n.clamp(0, lightsync::CUSTOM_SLOTS as i32 - 1),
+            _ => 0,
+        };
+        let applied = self
+            .device
+            .write("wheel_led_slot", &Value::Int(slot))
+            .and_then(|()| self.device.write("wheel_led_effect", &Value::Int(effect)));
+        let shown = if applied.is_ok() {
+            // Rev-sweep previews are disabled: the rev fill is the wheel's
+            // own built-in rev display (own palette and fill style), not a
+            // renderer of the active slot, so a sweep previews the wrong
+            // thing (hardware finding, 2026-07-20). The static apply is
+            // pixel-faithful; sweeps return when the rev display's config
+            // semantics are decoded (issue #20 capture). sweep_step is kept
+            // in the signature for that return.
+            let _ = sweep_step;
+            std::thread::sleep(hold);
+            Ok(())
+        } else {
+            Ok(())
+        };
+        // Restore even after a failed apply or sweep, so nothing
+        // half-applied sticks; the first error wins.
+        let restored = self
+            .device
+            .write("wheel_led_slot", &Value::Int(slot))
+            .and_then(|()| self.device.write("wheel_led_effect", &Value::Int(effect)));
+        self.status = match applied.and(shown).and(restored) {
+            Ok(()) => "preview on wheel: done, previous state restored".to_string(),
+            Err(e) => format!("preview on wheel: {e}"),
+        };
+        self.reload();
+    }
+
+    /// One animated rev sweep: `wheel_rev_level` stepping 0..10..0, one
+    /// step per `step`. The fill uses the active slot's colours and
+    /// follows its direction; the caller's `wheel_led_effect` restore
+    /// exits the fill afterwards.
+    #[allow(dead_code)] // returns with the sweep preview once the fill is re-verified after the slot-switch fix
+    fn rev_sweep(&self, step: std::time::Duration) -> Result<(), logi_wheel_core::Error> {
+        for level in (0..=10i32).chain((0..10).rev()) {
+            self.device.write("wheel_rev_level", &Value::Int(level))?;
+            std::thread::sleep(step);
+        }
+        Ok(())
+    }
+
+    /// The selector label for the device's current effect (+ slot when the
+    /// custom effect is active); what the Effect row shows at rest.
+    pub fn lightsync_effect_label(&self) -> String {
+        let effect = match self.device.read("wheel_led_effect") {
+            Ok(Value::Int(n)) => n.clamp(0, u8::MAX as i32) as u8,
+            _ => return "?".to_string(),
+        };
+        let slot = match self.device.read("wheel_led_slot") {
+            Ok(Value::Int(n)) => n.clamp(0, lightsync::CUSTOM_SLOTS as i32 - 1) as u8,
+            _ => 0,
+        };
+        let labels = lightsync::dropdown_labels(&self.led_slot_names(), effect);
+        labels
+            .into_iter()
+            .nth(lightsync::selection_index(effect, slot))
+            .unwrap_or_else(|| "?".to_string())
+    }
+
+    pub fn move_cat(&mut self, d: i32) {
+        // +1 for the trailing Setup entry, past the last real category.
+        let n = (Category::ALL.len() + 1) as i32;
+        let mut idx = self.cat_idx as i32;
+        // Step past any category the connected device has nothing to show
+        // for (e.g. LIGHTSYNC/Profiles on a G923), same as the sidebar
+        // simply not listing it. Bounded by `n`: Setup is always applicable,
+        // so this always lands somewhere within one full lap.
+        for _ in 0..n {
+            idx = (idx + d).rem_euclid(n);
+            if idx as usize == SETUP_INDEX || self.category_applicable(Category::ALL[idx as usize]) {
+                break;
+            }
+        }
+        self.set_cat(idx as usize);
+    }
+
+    /// Switch straight to sidebar entry `idx` (a digit jump, or one
+    /// `move_cat` step) and bring that view to life, exactly like the
+    /// arrow-key path always did.
+    pub fn set_cat(&mut self, idx: usize) {
+        if idx > SETUP_INDEX {
+            return;
+        }
+        self.cat_idx = idx;
+        self.row_idx = 0;
+        // A fresh view always starts at its top, at the section level.
+        self.info_scroll = 0;
+        self.setup_scroll = 0;
+        self.setup_inside = false;
+        // First visit to the Setup view scans the Steam libraries; later
+        // visits keep the last scan (r rescans on demand). The daemon
+        // probe is cheap, so every entry refreshes it.
+        if self.is_setup() {
+            if !self.games_scanned {
+                self.scan_games();
+            }
+            self.tf_probe();
+        }
+        // Every entry to the Info view re-runs the (cheap) evdev discovery
+        // and auto-starts the live monitor when a wheel input is found;
+        // leaving it always stops the monitor loop so no fd stays open
+        // (and no polling keeps running) behind other views.
+        if self.is_info() {
+            self.rescan_input();
+        } else {
+            self.test.stop_monitor();
+        }
+        self.reload();
+    }
+
+    /// (Re-)discover the wheel's evdev node for the Info view's monitor
+    /// and start monitoring right away when one is found (the monitor is
+    /// not toggled by hand; it runs whenever the Info view is open and a
+    /// wheel input exists).
+    pub fn rescan_input(&mut self) {
+        let range = self.wheel_range();
+        self.test.rescan(range);
+        if self.test.dev.is_some() {
+            self.test.start_monitor();
+        }
+    }
+
+    /// Rescan the launchers (Steam, Lutris, Heroic; see `launchers::
+    /// discover`) for installed games, splitting the result into the
+    /// Setup view's "Your games" list (`launchers::keep_for_setup`) and
+    /// the "Add a game" picker's candidates (`launchers::is_addable`).
+    /// Blocking, like every other fs access in this synchronous TUI; a
+    /// scan is a handful of small file reads.
+    pub fn scan_games(&mut self) {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let found = launchers::discover(&home);
+        self.games = found.iter().filter(|&g| launchers::keep_for_setup(g)).cloned().collect();
+        self.addable = found.iter().filter(|&g| launchers::is_addable(g)).cloned().collect();
+        self.games_scanned = true;
+        if self.game_idx >= self.games.len() {
+            self.game_idx = self.games.len().saturating_sub(1);
+        }
+        if let Some(picker) = self.add_game.as_mut() {
+            if picker.idx > self.addable.len() {
+                picker.idx = self.addable.len();
+            }
+        }
+    }
+
+    /// The Setup view's selected game, if the list has any.
+    pub fn selected_game(&self) -> Option<&DiscoveredGame> {
+        self.games.get(self.game_idx)
+    }
+
+    /// The enablement action the selected game needs (see
+    /// [`games::GameCompat::setup_action`]), or `None` when no game is
+    /// selected or the registry does not know it.
+    pub fn selected_game_action(&self) -> Option<SetupAction> {
+        self.selected_game().and_then(|g| games::match_title(&g.name)).map(|c| c.setup_action())
+    }
+
+    /// Take the shim run the last key press queued, if any; see
+    /// `pending_shim`.
+    pub fn take_pending_shim(&mut self) -> Option<(Vec<String>, &'static str)> {
+        self.pending_shim.take()
+    }
+
+    /// Run the TrueForce SDK shim installer with `args` (a per-game
+    /// install, `--prefix <pfx>` plus `--sdk-dir <dir>` when the folder
+    /// validates, or an `--uninstall-prefix <pfx>` remove), blocking: the TUI's event loop is synchronous, so
+    /// there is no worker thread to hand this off to. The main loop calls
+    /// this via the `pending_shim` queue so a "running..." status gets
+    /// drawn first, then rescans the games list so the row's shim status
+    /// updates. Never sudo. A missing binary or a spawn failure lands in
+    /// the status line instead of taking the TUI down.
+    pub fn run_shim(&mut self, args: &[String], verb: &str) {
+        let Some(bin) = self.shim_binary.clone() else {
+            self.status = "shim: installer not found (PATH or the repo's tools/)".to_string();
+            return;
+        };
+        match std::process::Command::new(&bin).args(args).output() {
+            Ok(out) if out.status.success() => {
+                self.status = format!("shim {verb}: ok");
+            }
+            Ok(out) => {
+                let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                let last = combined
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("failed")
+                    .to_string();
+                self.status = format!("shim {verb}: {last}");
+            }
+            Err(e) => {
+                self.status = format!("shim {verb}: failed to run {}: {e}", bin.display());
+            }
+        }
+    }
+
+    /// Reload tf-sim.conf into `tf_cfg` (after every write; tests that
+    /// point `tf_conf` elsewhere call it directly).
+    pub fn tf_reload(&mut self) {
+        self.tf_cfg = tfsim::Config::load_from(&self.tf_conf);
+    }
+
+    /// Re-probe whether the logi-tf-sim daemon is running (a proc comm
+    /// scan; the core probe skips zombies). Run on every Setup entry and
+    /// after the `d` start/stop.
+    pub fn tf_probe(&mut self) {
+        self.tf_daemon =
+            !tfsim::pids_by_comm_in(&self.proc_root, tfsim::DAEMON_COMM).is_empty();
+    }
+
+    /// Whether a test sweep child is alive (spawned and not yet reaped).
+    pub fn tf_sweep_active(&self) -> bool {
+        self.tf_sweep.is_some()
+    }
+
+    /// Advance a ticking force-sim countdown, run by the main loop's
+    /// ticks (the Info page already polls at ~30 Hz while its monitor is
+    /// live, `test_polling`, so the "Starting in N..." status keeps up
+    /// and 's' cancels promptly - no extra poll-timeout wiring needed). A
+    /// no-op before the countdown's deadline or with nothing armed;
+    /// updates the status line once it fires the sim.
+    pub fn tick_sim_countdown(&mut self) {
+        if let Some(status) = self.test.tick_countdown() {
+            self.status = status;
+        }
+    }
+
+    /// Reap the test sweep once it exits; run by the main loop's ticks
+    /// (the sweep is the TUI's only non-blocking child, so the loop polls
+    /// with a short timeout while it plays). A failed run surfaces its
+    /// stderr tail in the status line.
+    pub fn tick_tf_sweep(&mut self) {
+        let Some(child) = self.tf_sweep.as_mut() else { return };
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                self.status = "test sweep: finished".to_string();
+                self.tf_sweep = None;
+            }
+            Ok(Some(status)) => {
+                let mut err = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    use std::io::Read as _;
+                    let _ = pipe.read_to_string(&mut err);
+                }
+                let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+                self.status = if last.is_empty() {
+                    format!("test sweep: {status}")
+                } else {
+                    format!("test sweep: {status}: {last}")
+                };
+                self.tf_sweep = None;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.status = format!("test sweep: {e}");
+                self.tf_sweep = None;
+            }
+        }
+    }
+
+    /// SIGTERM the playing test sweep (the daemon's handler sends the
+    /// wheel clean stop packets on the way out, which a hard kill would
+    /// skip); the main loop's `tick_tf_sweep` reaps it. Returns whether a
+    /// sweep was playing.
+    pub fn tf_stop_sweep(&mut self) -> bool {
+        let Some(child) = self.tf_sweep.as_ref() else { return false };
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGTERM);
+        }
+        self.status = "test sweep: stopping...".to_string();
+        true
+    }
+
+    /// A tf-sim.conf write's aftermath: reload the config on success (the
+    /// view renders from `tf_cfg`), surface the error otherwise.
+    fn tf_report(&mut self, what: &str, result: Result<(), logi_wheel_core::Error>) {
+        self.status = match result {
+            Ok(()) => {
+                self.tf_reload();
+                format!("simulated TF: {what}")
+            }
+            Err(e) => format!("simulated TF: {e}"),
+        };
+    }
+
+    /// Flip tf-sim's master switch (the Setup view's `m`).
+    fn tf_toggle_master(&mut self) {
+        let target = !self.tf_cfg.enabled;
+        let outcome = tfsim::set_enabled_in(&self.tf_conf, target);
+        self.tf_report(if target { "master on" } else { "master off" }, outcome);
+    }
+
+    /// Flip the selected game's simulated-TF switch (the Setup view's
+    /// `g`), for games whose title maps to a tf-sim id; anything else
+    /// gets a status explanation instead of a silent no-op.
+    fn tf_toggle_selected_game(&mut self) {
+        let Some(game) = self.selected_game() else {
+            self.status = "simulated TF: no game selected".to_string();
+            return;
+        };
+        let name = game.name.clone();
+        match tfsim::game_id_for_title(&name) {
+            Some(id) => {
+                let target = !self.tf_cfg.game(id).enabled;
+                let outcome = tfsim::set_game_enabled_in(&self.tf_conf, id, target);
+                self.tf_report(
+                    &format!("{name}: {}", if target { "on" } else { "off" }),
+                    outcome,
+                );
+            }
+            None => {
+                self.status =
+                    format!("simulated TF: no per-game support for {name} yet (planned)");
+            }
+        }
+    }
+
+    /// Poll the daemon probe (up to ~1.2 s) until it reports `expected`,
+    /// so a just-issued start/stop settles before the status line claims
+    /// anything: a daemon needs a moment to appear, and SIGTERM handling
+    /// (clean stop packets) takes a beat too. Blocking, like the shim
+    /// runs; the wait ends early the moment the scan agrees.
+    fn tf_settle(&mut self, expected: bool) {
+        for _ in 0..8 {
+            self.tf_probe();
+            if self.tf_daemon == expected {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        self.tf_probe();
+    }
+
+    /// Start or stop the logi-tf-sim daemon (the Setup view's `d`): a
+    /// running daemon gets SIGTERM, otherwise the resolved binary is
+    /// spawned detached (and reaped by a parked thread so it never
+    /// lingers as a zombie). Both paths settle the probe before
+    /// reporting.
+    fn tf_toggle_daemon(&mut self) {
+        if let Some(pid) =
+            tfsim::pids_by_comm_in(&self.proc_root, tfsim::DAEMON_COMM).into_iter().next()
+        {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            self.tf_settle(false);
+            self.status = if self.tf_daemon {
+                "daemon: still running".to_string()
+            } else {
+                "daemon: stopped".to_string()
+            };
+            return;
+        }
+        let Some(bin) = self.tf_bin.clone() else {
+            self.status = "daemon: logi-tf-sim not found (PATH or next to logi-wheel)".to_string();
+            return;
+        };
+        match std::process::Command::new(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                self.tf_settle(true);
+                self.status = format!("daemon: started ({})", bin.display());
+            }
+            Err(e) => self.status = format!("daemon: failed to start {}: {e}", bin.display()),
+        }
+    }
+
+    /// Spawn `logi-tf-sim --sweep` (already consented to via the y/n
+    /// step): non-blocking, unlike the shim runs, so `s` can stop it
+    /// mid-play; stderr is piped for the failure path's status line.
+    fn tf_spawn_sweep(&mut self) {
+        let Some(bin) = self.tf_bin.clone() else {
+            self.status =
+                "test sweep: logi-tf-sim not found (PATH or next to logi-wheel)".to_string();
+            return;
+        };
+        match std::process::Command::new(&bin)
+            .arg("--sweep")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => {
+                self.tf_sweep = Some(child);
+                self.status = "test sweep: playing (about 6 s; s stops it)".to_string();
+            }
+            Err(e) => self.status = format!("test sweep: failed to run {}: {e}", bin.display()),
+        }
+    }
+
+    /// The intensity/pitch line editors' key handling (exactly one of the
+    /// two drafts is active when this is called): digits build the value,
+    /// Enter commits it into tf-sim.conf when it parses inside the
+    /// field's range, Esc discards.
+    fn tf_edit_key(&mut self, key: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode::*;
+        let is_intensity = self.tf_intensity_edit.is_some();
+        let Some(draft) =
+            self.tf_intensity_edit.as_mut().or(self.tf_pitch_edit.as_mut())
+        else {
+            return;
+        };
+        match key {
+            Enter => {
+                let text = draft.clone();
+                self.tf_intensity_edit = None;
+                self.tf_pitch_edit = None;
+                match text.trim().parse::<u16>() {
+                    Ok(v) if is_intensity && v <= 100 => {
+                        let outcome = tfsim::set_intensity_in(&self.tf_conf, v as u8);
+                        self.tf_report(&format!("intensity {v}%"), outcome);
+                    }
+                    Ok(v) if !is_intensity && (10..=200).contains(&v) => {
+                        let outcome = tfsim::set_pitch_in(&self.tf_conf, v as u8);
+                        self.tf_report(&format!("pitch {v}%"), outcome);
+                    }
+                    _ => {
+                        self.status = if is_intensity {
+                            "intensity: enter 0-100".to_string()
+                        } else {
+                            "pitch: enter 10-200".to_string()
+                        };
+                    }
+                }
+            }
+            Esc => {
+                self.tf_intensity_edit = None;
+                self.tf_pitch_edit = None;
+            }
+            Backspace => {
+                draft.pop();
+            }
+            Char(c) if c.is_ascii_digit() => draft.push(c),
+            _ => {}
+        }
+    }
+
+    /// The full height (in lines) the current composed view wants to
+    /// render: what the scroll offset is clamped against. Only the two
+    /// scrollable views (Info/Testing, Setup) report one; the plain
+    /// settings categories return 0 (no scrolling there).
+    pub fn scroll_content_height(&self) -> u16 {
+        if self.is_setup() {
+            crate::ui::setup_content_height(self)
+        } else if self.is_info() {
+            crate::ui::info_content_height(self)
+        } else {
+            0
+        }
+    }
+
+    /// The highest scroll offset that still shows a full viewport of the
+    /// current view (0 when everything fits). Uses the last drawn body
+    /// height; before any draw the whole content counts as hidden minus
+    /// one line, so the offset can never leave the content.
+    pub fn max_scroll(&self) -> u16 {
+        self.scroll_content_height().saturating_sub(self.body_height.get().max(1))
+    }
+
+    /// One PgUp/PgDn step: a viewport minus one line of overlap (at least
+    /// one line before the first draw recorded a height).
+    pub fn scroll_page(&self) -> i32 {
+        i32::from(self.body_height.get()).saturating_sub(1).max(1)
+    }
+
+    /// Move the current view's scroll offset by `d` lines, clamped to
+    /// [0, `max_scroll`]. A no-op outside the two scrollable views.
+    pub fn scroll_view(&mut self, d: i32) {
+        let max = i32::from(self.max_scroll());
+        let offset = if self.is_setup() {
+            &mut self.setup_scroll
+        } else if self.is_info() {
+            &mut self.info_scroll
+        } else {
+            return;
+        };
+        *offset = (i32::from(*offset) + d).clamp(0, max) as u16;
+    }
+
+    pub fn move_row(&mut self, d: i32) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let n = self.rows.len() as i32;
+        self.row_idx = ((self.row_idx as i32 + d).clamp(0, n - 1)) as usize;
+    }
+
+    pub fn selected(&self) -> Option<&Row> {
+        self.rows.get(self.row_idx)
+    }
+
+    /// Open the `i` info popup for the selected row: the registry help
+    /// text plus the kind's range/choices line and the mode requirement.
+    /// A synthetic row without a registry spec (a per-axis shaping toggle,
+    /// a computer-profile row) shows its view-provided help line instead,
+    /// or "(no details)" when it has none.
+    pub fn open_info(&mut self) {
+        let Some(row) = self.selected() else { return };
+        let title = row.label.trim().to_string();
+        let mut lines = Vec::new();
+        if let Some(spec) = Device::<S>::spec(&row.attr) {
+            lines.push(spec.help.to_string());
+            lines.push(String::new());
+            lines.push(kind_detail(&spec.kind));
+            match spec.mode_req {
+                ModeReq::DesktopOnly => lines.push("Desktop mode only.".to_string()),
+                ModeReq::OnboardOnly => lines.push("Onboard mode only.".to_string()),
+                ModeReq::Any => {}
+            }
+        } else if shaping::toggle_axis(&row.attr).is_some() {
+            lines.push(shaping::TOGGLE_HELP.to_string());
+        } else if let Ok(Value::Text(hint)) = &row.value {
+            // The profile rows carry their key hint as their value text;
+            // it doubles as the popup body.
+            lines.push(if hint.is_empty() { "(no details)".to_string() } else { hint.clone() });
+        } else {
+            lines.push("(no details)".to_string());
+        }
+        self.info_popup = Some(InfoPopup { title, lines });
+    }
+
+    pub fn begin_edit(&mut self) {
+        let (attr, label) = match self.selected() {
+            Some(row) => (row.attr.clone(), row.label.clone()),
+            None => return,
+        };
+        // A per-axis shaping row is view state, not a device attribute:
+        // Enter flips it in place (same as the 'a' shortcut), no editor.
+        if let Some(axis) = shaping::toggle_axis(&attr) {
+            self.toggle_shaping(axis);
+            return;
+        }
+        let Some(spec) = Device::<S>::spec(&attr) else { return };
+        if spec.access == Access::ReadOnly {
+            return;
+        }
+        // The LIGHTSYNC Effect row cycles the selector entries, not the
+        // raw 1-9 value; it gets its own little modal (see `EffectEdit`).
+        if attr == "wheel_led_effect" {
+            let effect = match self.device.read(&attr) {
+                Ok(Value::Int(n)) => n.clamp(0, u8::MAX as i32) as u8,
+                _ => {
+                    self.status = "cannot edit (value unreadable)".into();
+                    return;
+                }
+            };
+            let slot = match self.device.read("wheel_led_slot") {
+                Ok(Value::Int(n)) => n.clamp(0, lightsync::CUSTOM_SLOTS as i32 - 1) as u8,
+                _ => 0,
+            };
+            self.effect_edit = Some(EffectEdit {
+                index: lightsync::selection_index(effect, slot),
+                labels: lightsync::dropdown_labels(&self.led_slot_names(), effect),
+            });
+            return;
+        }
+        if spec.access == Access::Action {
+            self.status = match self.device.write(&attr, &Value::Trigger) {
+                Ok(()) => format!("{label}: done"),
+                Err(e) => format!("{label}: {e}"),
+            };
+            self.reload();
+            return;
+        }
+        // The onboard profile picker: only slots 1-5 (profile 0 is the
+        // desktop state, and this row only shows in onboard mode), so the
+        // editor bumps inside that range regardless of the registry's
+        // wider 0-5 kind.
+        if attr == "wheel_profile" {
+            let cur = match self.rows.get(self.row_idx).map(|r| &r.value) {
+                Some(Ok(Value::Int(n))) => Value::Int((*n).max(1)),
+                _ => Value::Int(1),
+            };
+            let kind = Kind::IntRange { min: 1, max: 5, step: 1, unit: "" };
+            self.edit = Some(edit::EditState::start(spec.attr, kind, &cur));
+            return;
+        }
+        let cur = match self.rows.get(self.row_idx).map(|r| &r.value) {
+            Some(Ok(v)) => v.clone(),
+            _ => {
+                self.status = "cannot edit (value unreadable)".into();
+                return;
+            }
+        };
+        // Curves get the modal point-list editor; the LED strip gets the
+        // modal color picker; everything else the inline field editor.
+        if matches!(spec.kind, Kind::Curve) {
+            self.curve_edit = Some(CurveEditor::from_value(spec.attr, &cur));
+            return;
+        }
+        if matches!(spec.kind, Kind::RgbStrip { .. }) {
+            match ColorPicker::from_value(&cur) {
+                Some(picker) => self.color_picker = Some(picker),
+                None => self.status = "cannot edit (value unreadable)".into(),
+            }
+            return;
+        }
+        self.edit = Some(edit::EditState::start(spec.attr, spec.kind, &cur));
+    }
+
+    /// Commit the effect selector: a sweep/numbered entry writes
+    /// `wheel_led_effect` directly; a CUSTOM entry writes `wheel_led_slot`
+    /// first and then `wheel_led_effect = 5` (the driver re-applies the
+    /// slot's stored config on that transition), the same two-write order
+    /// the GUI uses.
+    pub fn commit_effect_edit(&mut self) {
+        let Some(fe) = self.effect_edit.take() else { return };
+        // The raw current effect only matters when the trailing raw entry
+        // (shown while the device reports an effect outside 1-9) is
+        // re-picked: that entry commits the same value back.
+        let current = match self.device.read("wheel_led_effect") {
+            Ok(Value::Int(n)) => n.clamp(0, i32::from(u8::MAX)) as u8,
+            _ => 1,
+        };
+        let result = match lightsync::index_selection(fe.index, current) {
+            lightsync::Selection::Effect(e) => {
+                self.device.write("wheel_led_effect", &Value::Int(i32::from(e)))
+            }
+            lightsync::Selection::Custom(slot) => self
+                .device
+                .write("wheel_led_slot", &Value::Int(i32::from(slot)))
+                .and_then(|()| self.device.write("wheel_led_effect", &Value::Int(5))),
+        };
+        self.status = match result {
+            Ok(()) => {
+                let label = fe.labels.get(fe.index).map(String::as_str).unwrap_or("?");
+                format!("Effect set: {label}")
+            }
+            Err(e) => format!("Effect: {e}"),
+        };
+        self.reload();
+    }
+
+    /// Commit the "Add a game" picker: queue a shim install for the picked
+    /// row's prefix, or (the trailing manual entry) the typed path, exactly
+    /// the same `pending_shim` path the per-game `i` key uses. An empty
+    /// manual path re-opens the picker on that field instead of installing
+    /// nothing.
+    pub fn commit_add_game(&mut self) {
+        let Some(picker) = self.add_game.take() else { return };
+        let pfx = match picker.manual {
+            Some(draft) => {
+                let trimmed = draft.trim().to_string();
+                if trimmed.is_empty() {
+                    self.status = "add a game: enter a wine prefix path".to_string();
+                    self.add_game = Some(AddGamePicker { idx: picker.idx, manual: Some(draft) });
+                    return;
+                }
+                trimmed
+            }
+            None => match self.addable.get(picker.idx).and_then(|g| g.prefix()) {
+                Some(prefix) => prefix.to_string_lossy().into_owned(),
+                None => return,
+            },
+        };
+        let args = steam::shim_install_args(&pfx, self.sdk_resolved.as_deref());
+        self.pending_shim = Some((args, "install"));
+    }
+
+    /// Commit the color picker's working strip: the same write path the
+    /// old raw hex editor used, so a mirrored direction still mirrors the
+    /// left half before the write.
+    pub fn commit_color_picker(&mut self) {
+        let Some(picker) = self.color_picker.take() else { return };
+        let v = self.mirror_colors_if_needed("wheel_led_colors", Value::Rgb(picker.colors));
+        self.status = match self.device.write("wheel_led_colors", &v) {
+            Ok(()) => "Colors set".to_string(),
+            Err(Error::WrongMode { needed }) => {
+                let m = if needed == Mode::Desktop { "desktop" } else { "onboard" };
+                format!("needs {m} mode: press 'd' to toggle, then retry")
+            }
+            Err(e) => format!("Colors: {e}"),
+        };
+        self.reload();
+    }
+
+    pub fn commit_curve_edit(&mut self) {
+        let Some(ed) = self.curve_edit.take() else { return };
+        let attr = ed.attr;
+        let label = Device::<S>::spec(attr).map(|s| s.label).unwrap_or(attr);
+        match self.device.write(attr, &ed.to_value()) {
+            Ok(()) => self.status = format!("{label} set ({} points)", ed.point_count()),
+            Err(Error::WrongMode { needed }) => {
+                let m = if needed == Mode::Desktop { "desktop" } else { "onboard" };
+                self.status = format!("needs {m} mode: press 'd' to toggle, then retry");
+            }
+            Err(err) => self.status = format!("{label}: {err}"),
+        }
+        self.reload();
+    }
+
+    /// Switch the wheel between desktop and onboard mode (the `d` shortcut).
+    /// A no-op for a wheel with no `wheel_mode` at all (the G923's classic
+    /// engine): there is no mode to switch, so this must not attempt a
+    /// write sysfs does not expose and surface it as a failed status.
+    pub fn toggle_mode(&mut self) {
+        if !self.device.available("wheel_mode") {
+            return;
+        }
+        let (idx, name) = match self.device.current_mode() {
+            Ok(Mode::Desktop) => (1u8, "onboard"),
+            _ => (0u8, "desktop"),
+        };
+        self.status = match self.device.write("wheel_mode", &Value::Enum(idx)) {
+            Ok(()) => format!("switched to {name} mode"),
+            Err(e) => format!("mode switch: {e}"),
+        };
+        self.reload();
+    }
+
+    /// The onboard slot names, parsed from `wheel_profile_names` (one
+    /// `"N: name"` line per slot), keyed by slot number. Empty if the wheel
+    /// does not expose them.
+    pub fn profile_names(&self) -> BTreeMap<u8, String> {
+        let mut m = BTreeMap::new();
+        if let Ok(Value::SlotNames(names)) = self.device.read("wheel_profile_names") {
+            for (i, name) in names.iter().enumerate() {
+                if !name.is_empty() {
+                    m.insert(i as u8 + 1, name.clone());
+                }
+            }
+        }
+        m
+    }
+
+    /// Make a `wheel_led_colors` write match a mirrored direction: when
+    /// the slot's direction is inside-out/outside-in the wheel plays the
+    /// 10 LEDs as 5 pairs, so the left half is mirrored onto the right
+    /// (left wins) before the write. Any other value, attr or direction
+    /// passes through untouched.
+    fn mirror_colors_if_needed(&self, attr: &str, v: Value) -> Value {
+        if attr != "wheel_led_colors" {
+            return v;
+        }
+        let direction = match self.device.read("wheel_led_direction") {
+            Ok(Value::Enum(d)) => d,
+            _ => return v,
+        };
+        match v {
+            Value::Rgb(mut colors) if lightsync::mirrored(direction) => {
+                lightsync::mirror_left_half(&mut colors);
+                Value::Rgb(colors)
+            }
+            v => v,
+        }
+    }
+
+    pub fn commit_edit(&mut self) {
+        let Some(e) = self.edit.take() else { return };
+        let attr = e.attr;
+        let label = Device::<S>::spec(attr).map(|s| s.label).unwrap_or(attr);
+        match e
+            .commit_value()
+            .map(|v| self.mirror_colors_if_needed(attr, v))
+            .and_then(|v| self.device.write(attr, &v))
+        {
+            Ok(()) => {
+                self.status = format!("{label} set");
+            }
+            Err(Error::WrongMode { needed }) => {
+                let m = if needed == Mode::Desktop { "desktop" } else { "onboard" };
+                self.status = format!("needs {m} mode: press 'd' to toggle, then retry");
+            }
+            Err(err) => {
+                self.status = format!("{label}: {err}");
+            }
+        }
+        self.reload();
+    }
+
+    /// Arm a simulation: everything is gated behind the y/n confirmation
+    /// the status line shows; see `on_key`'s Test branch.
+    fn request_sim(&mut self, kind: SimKind) {
+        if self.test.dev.is_none() {
+            self.status = "test: no wheel found (r to rescan)".to_string();
+            return;
+        }
+        if self.test.sim_running() {
+            self.status = "test: a simulation is already playing".to_string();
+            return;
+        }
+        self.test.confirm = Some(kind);
+        self.status = format!(
+            "{}: the wheel WILL move. Keep hands and objects clear of the rim. y continues, any other key cancels",
+            kind.label()
+        );
+    }
+
+    /// The global navigation keys, live in every view once no text-entry
+    /// state is active: the digit jumps (1-7 land on that sidebar entry
+    /// with content focus), Tab (toggle sidebar/content focus), `?` (the
+    /// help overlay) and q (quit, no confirmation). Returns whether the
+    /// key was one of them.
+    fn nav_key(&mut self, key: crossterm::event::KeyCode) -> bool {
+        use crossterm::event::KeyCode::*;
+        match key {
+            Char(c) if c.is_ascii_digit() => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                if (1..=SETUP_INDEX + 1).contains(&n) {
+                    let idx = n - 1;
+                    // A digit whose category the sidebar does not list (no
+                    // applicable content on this device) is simply inert,
+                    // same as there being nothing there to jump to.
+                    if idx == SETUP_INDEX || self.category_applicable(Category::ALL[idx]) {
+                        self.set_cat(idx);
+                        self.focus = Focus::Content;
+                    }
+                }
+                true
+            }
+            Tab => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Content,
+                    Focus::Content => Focus::Sidebar,
+                };
+                true
+            }
+            Char('?') => {
+                self.help = true;
+                true
+            }
+            Char('q') => {
+                self.quit = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The sidebar-focus navigation keys: Up/Down move the category (the
+    /// content pane loads live), Enter/Right hand focus to the content,
+    /// Left/Esc are consumed (nothing sits above the sidebar; Esc never
+    /// quits). Any other key falls through to the view's own handler.
+    fn sidebar_key(&mut self, key: crossterm::event::KeyCode) -> bool {
+        use crossterm::event::KeyCode::*;
+        if self.focus != Focus::Sidebar {
+            return false;
+        }
+        match key {
+            Up => {
+                self.move_cat(-1);
+                true
+            }
+            Down => {
+                self.move_cat(1);
+                true
+            }
+            Enter | Right => {
+                self.focus = Focus::Content;
+                true
+            }
+            Left | Esc => true,
+            _ => false,
+        }
+    }
+
+    pub fn on_key(&mut self, key: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode::*;
+        // The help overlay swallows the key that closes it, whatever it is.
+        if self.help {
+            self.help = false;
+            return;
+        }
+        // The info popup swallows the key that closes it, whatever it is.
+        if self.info_popup.is_some() {
+            self.info_popup = None;
+            return;
+        }
+        if let Some(ce) = self.curve_edit.as_mut() {
+            match key {
+                Enter => self.commit_curve_edit(),
+                Esc => self.curve_edit = None,
+                Up => ce.prev_field(),
+                Down => ce.next_field(),
+                Left => ce.adjust(-1),
+                Right => ce.adjust(1),
+                Char('+') => ce.add_point(),
+                Char('-') => ce.delete_point(),
+                Char('?') => self.help = true,
+                _ => {}
+            }
+            return;
+        }
+        if let Some(picker) = self.color_picker.as_mut() {
+            // ? opens the overlay on top only while no hex draft is open
+            // (hex entry is text input).
+            if picker.hex.is_none() && key == Char('?') {
+                self.help = true;
+                return;
+            }
+            match picker.on_key(key) {
+                PickerOutcome::Open => {}
+                PickerOutcome::Commit => self.commit_color_picker(),
+                PickerOutcome::Cancel => self.color_picker = None,
+            }
+            return;
+        }
+        if let Some(fe) = self.effect_edit.as_mut() {
+            let n = fe.labels.len().max(1);
+            match key {
+                Enter => self.commit_effect_edit(),
+                Esc => self.effect_edit = None,
+                Left => fe.index = (fe.index + n - 1) % n,
+                Right => fe.index = (fe.index + 1) % n,
+                Char('?') => self.help = true,
+                _ => {}
+            }
+            return;
+        }
+        if let Some(picker) = self.add_game.as_mut() {
+            // The manual-path row swallows every key while its text field
+            // is open, same rule as every other line editor here.
+            if let Some(draft) = picker.manual.as_mut() {
+                match key {
+                    Enter => self.commit_add_game(),
+                    Esc => picker.manual = None,
+                    Backspace => {
+                        draft.pop();
+                    }
+                    Char(c) => draft.push(c),
+                    _ => {}
+                }
+                return;
+            }
+            // One past the last addable row is the trailing "type a path
+            // manually" entry.
+            let manual_row = self.addable.len();
+            match key {
+                Up => picker.idx = picker.idx.saturating_sub(1),
+                Down => picker.idx = (picker.idx + 1).min(manual_row),
+                Enter if picker.idx == manual_row => picker.manual = Some(String::new()),
+                Enter => self.commit_add_game(),
+                Esc => self.add_game = None,
+                Char('?') => self.help = true,
+                _ => {}
+            }
+            return;
+        }
+        if let Some(ed) = self.edit.as_mut() {
+            match key {
+                Enter => self.commit_edit(),
+                Esc => self.edit = None,
+                Left => ed.bump(-1),
+                Right => ed.bump(1),
+                Backspace => ed.backspace(),
+                Char(c) => ed.push_char(c),
+                _ => {}
+            }
+            return;
+        }
+        if self.is_info() {
+            // A pending sim confirmation swallows the next key: only 'y'
+            // arms the 5 s countdown (see below), anything else cancels
+            // outright. Nothing ever plays without this explicit step.
+            if let Some(kind) = self.test.confirm.take() {
+                self.status = if matches!(key, Char('y') | Char('Y')) {
+                    self.test.arm_countdown(kind);
+                    format!(
+                        "{}: starting in 5... keep hands and objects clear of the rim (s cancels)",
+                        kind.label()
+                    )
+                } else {
+                    "test: simulation cancelled".to_string()
+                };
+                return;
+            }
+            if self.nav_key(key) || self.sidebar_key(key) {
+                return;
+            }
+            match key {
+                // Content focus steps back to the sidebar (Esc discipline:
+                // nothing modal is open here, so the pane focus is the
+                // topmost thing left).
+                Esc | Left => self.focus = Focus::Sidebar,
+                // The Info/Testing view has no list selection, so Up/Down
+                // scroll the composed view (one line) alongside the page
+                // keys; a small terminal can reach everything this way.
+                Up => self.scroll_view(-1),
+                Down => self.scroll_view(1),
+                PageUp => self.scroll_view(-self.scroll_page()),
+                PageDown => self.scroll_view(self.scroll_page()),
+                Char('d') => self.toggle_mode(),
+                // The Info view's r rescans both sides: the identity rows
+                // (sysfs; a missing wheel queues a re-discovery) and the
+                // monitor's input device (evdev).
+                Char('r') => {
+                    if self.no_wheel {
+                        self.retry_requested = true;
+                    }
+                    // Force a fresh HID++ firmware read on a classic wheel
+                    // (an explicit rescan is exactly the "refresh" moment
+                    // that query is meant for), rather than trusting a
+                    // possibly-stale cached value.
+                    self.g923_firmware_queried = false;
+                    self.rescan_input();
+                    self.reload();
+                    self.status = match &self.test.dev {
+                        Some(d) => format!("input: found {} ({})", d.name, d.event_path),
+                        None => "input: no wheel found (r to rescan)".to_string(),
+                    };
+                }
+                Char('f') => self.request_sim(SimKind::ConstantForce),
+                Char('t') => self.request_sim(SimKind::Texture),
+                // Show serial + firmware + the software versions on the
+                // status line. This TUI has no clipboard mechanism (and
+                // deliberately gains no dependency for one), so the values
+                // are surfaced for a manual terminal copy instead.
+                Char('c') => {
+                    // A G923 has no wheel_serial/wheel_firmware sysfs at
+                    // all; fall back to the same sources the Info page's
+                    // own Wheel/Serial/Firmware rows use for it (the HID
+                    // uniq string, and the cached HID++ query).
+                    let info = self.device.info().ok();
+                    let serial = match self.device.read("wheel_serial") {
+                        Ok(Value::Text(s)) => s.trim().to_string(),
+                        _ => info.as_ref().map(|i| i.serial.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "-".to_string()),
+                    };
+                    let firmware = match self.device.read("wheel_firmware") {
+                        Ok(Value::Text(s)) => s.trim().replace('\n', " / "),
+                        _ => self.g923_firmware.clone().unwrap_or_else(|| "-".to_string()),
+                    };
+                    self.status = format!(
+                        "serial: {}   firmware: {}   app: {}   driver: {}   (shown for manual copy)",
+                        serial,
+                        firmware,
+                        self.app_version_text(),
+                        self.driver_version_text()
+                    );
+                }
+                // Cancel a ticking countdown (the sim never starts), else
+                // stop an already-playing sim; a no-op while neither.
+                Char('s') => {
+                    if self.test.cancel_countdown() {
+                        self.status = "test: countdown cancelled".to_string();
+                    } else if self.test.stop_sim() {
+                        self.status = "test: simulation stopped".to_string();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.is_setup() {
+            // The intensity/pitch line editors swallow every key while
+            // active, same rule as the SDK-dir editor below.
+            if self.tf_intensity_edit.is_some() || self.tf_pitch_edit.is_some() {
+                self.tf_edit_key(key);
+                return;
+            }
+            // A pending sweep confirmation swallows the next key: only
+            // 'y' plays (the wheel produces real haptic force), anything
+            // else cancels. Nothing ever plays without this explicit step.
+            if self.tf_sweep_confirm {
+                self.tf_sweep_confirm = false;
+                if matches!(key, Char('y') | Char('Y')) {
+                    self.tf_spawn_sweep();
+                } else {
+                    self.status = "test sweep: cancelled".to_string();
+                }
+                return;
+            }
+            // The SDK-dir line editor swallows every key while active, so
+            // typing a path cannot trigger the view's shortcuts.
+            if let Some(draft) = self.sdk_edit.as_mut() {
+                match key {
+                    Enter => {
+                        self.sdk_dir = self.sdk_edit.take().unwrap_or_default();
+                        self.sdk_resolved = self.resolve_sdk();
+                        self.status = match &self.sdk_resolved {
+                            Some(dir) => format!("SDK DLLs: found at {}", dir.display()),
+                            None => "SDK DLLs: not found - copy them from a Windows G HUB install; see the README".to_string(),
+                        };
+                    }
+                    Esc => self.sdk_edit = None,
+                    Backspace => {
+                        draft.pop();
+                    }
+                    Char(c) => draft.push(c),
+                    _ => {}
+                }
+                return;
+            }
+            if self.nav_key(key) || self.sidebar_key(key) {
+                return;
+            }
+            let section = self.setup_section();
+            let inside = self.setup_inside;
+            match key {
+                // Esc discipline: an entered section closes first, then
+                // content focus steps back to the sidebar.
+                Esc | Left => {
+                    if self.setup_inside {
+                        self.setup_inside = false;
+                    } else {
+                        self.focus = Focus::Sidebar;
+                    }
+                }
+                // Section level: Up/Down move the section cursor (the view
+                // scrolls along); inside Games they move the game cursor.
+                Up => {
+                    if inside && section == SetupSection::Games {
+                        self.game_idx = self.game_idx.saturating_sub(1);
+                    } else if !inside {
+                        self.move_setup_section(-1);
+                    }
+                }
+                Down => {
+                    if inside && section == SetupSection::Games {
+                        if self.game_idx + 1 < self.games.len() {
+                            self.game_idx += 1;
+                        }
+                    } else if !inside {
+                        self.move_setup_section(1);
+                    }
+                }
+                // Enter a section's inner state (Games, Simulated TF); the
+                // SDK section's Enter opens its one editable field, and the
+                // display-only sections are fully shown already.
+                Enter | Right if !inside => match section {
+                    SetupSection::Games => {
+                        if self.games.is_empty() {
+                            self.status = if self.games_scanned {
+                                "no Proton games found (r rescans)".to_string()
+                            } else {
+                                "scanning Steam libraries...".to_string()
+                            };
+                        } else {
+                            self.setup_inside = true;
+                        }
+                    }
+                    SetupSection::SimTf => self.setup_inside = true,
+                    SetupSection::Sdk => self.sdk_edit = Some(self.sdk_dir.clone()),
+                    SetupSection::Ffb => {}
+                },
+                // PgUp/PgDn keep scrolling as the fallback everywhere.
+                PageUp => self.scroll_view(-self.scroll_page()),
+                PageDown => self.scroll_view(self.scroll_page()),
+                Char('r') => {
+                    self.scan_games();
+                    self.tf_probe();
+                    self.status = format!("rescanned: {} Proton game(s)", self.games.len());
+                }
+                // While a sweep plays, s stops it from anywhere in Setup;
+                // otherwise it is the SDK section's edit shortcut.
+                Char('s') => {
+                    if !self.tf_stop_sweep() && section == SetupSection::Sdk && !inside {
+                        self.sdk_edit = Some(self.sdk_dir.clone());
+                    }
+                }
+                // The Simulated TF keys, scoped to its entered section.
+                Char('m') if inside && section == SetupSection::SimTf => {
+                    self.tf_toggle_master()
+                }
+                Char('e') if inside && section == SetupSection::SimTf => {
+                    self.tf_intensity_edit = Some(self.tf_cfg.intensity.to_string());
+                }
+                Char('p') if inside && section == SetupSection::SimTf => {
+                    self.tf_pitch_edit = Some(self.tf_cfg.pitch_pct.to_string());
+                }
+                Char('d') if inside && section == SetupSection::SimTf => {
+                    self.tf_toggle_daemon()
+                }
+                // Arm the consent step; `t` never plays anything itself.
+                Char('t') if inside && section == SetupSection::SimTf => {
+                    if self.tf_sweep.is_some() {
+                        self.status = "test sweep: already playing (s stops it)".to_string();
+                    } else if self.tf_bin.is_none() {
+                        self.status =
+                            "test sweep: logi-tf-sim not found (PATH or next to logi-wheel)"
+                                .to_string();
+                    } else {
+                        self.tf_sweep_confirm = true;
+                        self.status = "Test simulated TrueForce: the wheel WILL produce haptic force for about 6 seconds. Keep hands relaxed. y continues, any other key cancels".to_string();
+                    }
+                }
+                // The game keys, scoped to the entered games list. Queued,
+                // not run here: the main loop draws a "running..." status
+                // line before the blocking run (see `pending_shim`).
+                Char('i') if inside && section == SetupSection::Games => {
+                    match (self.selected_game(), self.selected_game_action()) {
+                        (Some(game), Some(SetupAction::InstallShim)) => match game.prefix() {
+                            Some(prefix) => {
+                                let pfx = prefix.to_string_lossy().into_owned();
+                                // The RESOLVED dir goes along explicitly, i.e.
+                                // exactly what the SDK status line reports;
+                                // nothing resolved omits the flag and the
+                                // installer's own error guidance runs.
+                                let args =
+                                    steam::shim_install_args(&pfx, self.sdk_resolved.as_deref());
+                                self.pending_shim = Some((args, "install"));
+                            }
+                            None => self.status = "install: this game has no wine prefix".to_string(),
+                        },
+                        (Some(_), _) => {
+                            self.status =
+                                "TrueForce files are only for games with built-in TrueForce"
+                                    .to_string()
+                        }
+                        (None, _) => self.status = "install: no game selected".to_string(),
+                    }
+                }
+                Char('u') if inside && section == SetupSection::Games => {
+                    match self.selected_game() {
+                        // Removable either because the registry says so, or
+                        // (an unrecognised title added via the picker) it
+                        // already carries the shim: it stays manageable.
+                        Some(game)
+                            if matches!(
+                                self.selected_game_action(),
+                                Some(SetupAction::InstallShim)
+                            ) || game.shim_installed =>
+                        {
+                            match game.prefix() {
+                                Some(prefix) => {
+                                    let pfx = prefix.to_string_lossy().into_owned();
+                                    self.pending_shim = Some((
+                                        vec!["--uninstall-prefix".to_string(), pfx],
+                                        "uninstall",
+                                    ));
+                                }
+                                None => {
+                                    self.status = "remove: this game has no wine prefix".to_string()
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            self.status =
+                                "TrueForce files are only for games with built-in TrueForce"
+                                    .to_string()
+                        }
+                        None => self.status = "remove: no game selected".to_string(),
+                    }
+                }
+                Char('g') if inside && section == SetupSection::Games => {
+                    self.tf_toggle_selected_game()
+                }
+                Char('a') if inside && section == SetupSection::Games => {
+                    self.add_game = Some(AddGamePicker { idx: 0, manual: None });
+                }
+                _ => {}
+            }
+            return;
+        }
+        // A pending profile delete swallows the next key: only 'y'
+        // deletes, anything else cancels.
+        if let Some(name) = self.profile_delete_confirm.take() {
+            if matches!(key, Char('y') | Char('Y')) {
+                self.status = match profiles::delete_in(&self.profiles_dir, &name) {
+                    Ok(()) => format!("profile '{name}' deleted"),
+                    Err(e) => format!("profile '{name}': {e}"),
+                };
+                self.reload();
+            } else {
+                self.status = "delete cancelled".to_string();
+            }
+            return;
+        }
+        // The new-profile name prompt swallows every key while active, so
+        // typing a name cannot trigger the view's shortcuts.
+        if self.profile_name_edit.is_some() {
+            match key {
+                Enter => {
+                    let name = self.profile_name_edit.take().unwrap_or_default();
+                    self.save_profile(&name);
+                }
+                Esc => self.profile_name_edit = None,
+                Backspace => {
+                    if let Some(draft) = self.profile_name_edit.as_mut() {
+                        draft.pop();
+                    }
+                }
+                Char(c) => {
+                    if let Some(draft) = self.profile_name_edit.as_mut() {
+                        draft.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.nav_key(key) || self.sidebar_key(key) {
+            return;
+        }
+        match key {
+            // Without a wheel, r queues a re-discovery instead of a
+            // (pointless) reload; the main loop runs it.
+            Char('r') => {
+                if self.no_wheel {
+                    self.retry_requested = true;
+                    self.status = "retrying wheel discovery...".to_string();
+                } else {
+                    self.reload();
+                }
+            }
+            // On a saved-profile row 'd' arms its delete; anywhere else it
+            // keeps its usual desktop/onboard meaning.
+            Char('d') => match self.selected_profile_name() {
+                Some(name) => {
+                    self.status =
+                        format!("delete profile '{name}'? y deletes, any other key cancels");
+                    self.profile_delete_confirm = Some(name);
+                }
+                None => self.toggle_mode(),
+            },
+            // Only meaningful on a row that belongs to a shaping axis (a
+            // toggle row or one of the axis's own rows); a plain typo
+            // elsewhere does nothing.
+            Char('a') => self.toggle_selected_axis(),
+            // The selected setting's explainer. Settings views only: the
+            // Setup view's branch above keeps `i` for the shim install,
+            // and the Info view's branch keeps its own bindings.
+            Char('i') => self.open_info(),
+            // No LIGHTSYNC 't' preview key: effect edits commit to the
+            // device immediately, so the wheel already shows the selection
+            // and a preview is a no-op by construction (removed 2026-07-20;
+            // run_led_try stays for a future staged slot-editor preview).
+            // Only on the desktop Profiles page (the row exists nowhere
+            // else): open the new-profile name prompt.
+            Char('n') if self.rows.iter().any(|r| r.attr == PROFILE_NEW_ATTR) => {
+                self.profile_name_edit = Some(String::new());
+            }
+            Up => self.move_row(-1),
+            Down => self.move_row(1),
+            Esc | Left => self.focus = Focus::Sidebar,
+            Enter => {
+                if let Some(name) = self.selected_profile_name() {
+                    self.apply_profile(&name);
+                } else if self.selected().is_some_and(|r| r.attr == PROFILE_NEW_ATTR) {
+                    self.profile_name_edit = Some(String::new());
+                } else {
+                    self.begin_edit();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logi_wheel_core::sysfs::FakeSysfs;
+
+    fn app() -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_strength", "62");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_mode", "desktop");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn rows_follow_selected_category() {
+        let mut a = app();
+        // Category::ALL's default (index 0) is Info now; navigate to Ffb
+        // explicitly since that is what this test is actually about.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "wheel_strength"));
+        // absent attrs are marked unavailable, not dropped
+        let s = a.rows.iter().find(|r| r.attr == "wheel_ffb_filter").unwrap();
+        assert!(!s.available);
+    }
+
+    // --- G923 (classic engine) ---
+
+    fn g923_app() -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("range", "900");
+        fs.set("gain", "65535");
+        fs.set("autocenter", "0");
+        fs.set("combine_pedals", "0");
+        let device = logi_wheel_core::Device::with_io_and_model(fs, logi_wheel_core::WheelModel::G923);
+        let mut a = App::new(device);
+        a.focus = Focus::Content;
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn g923_is_recognized_as_a_present_wheel() {
+        // The registry-presence probe must check the classic attr set, not
+        // just the DD wheel_* one, or a connected G923 reads as "no wheel".
+        let a = g923_app();
+        assert!(!a.no_wheel, "a G923 must not read as no wheel");
+    }
+
+    #[test]
+    fn g923_shows_only_its_four_classic_settings_never_dd_rows() {
+        let mut a = g923_app();
+        for cat in Category::ALL {
+            a.cat_idx = Category::ALL.iter().position(|c| c == cat).unwrap();
+            a.reload();
+            // Never a DD wheel_* row: this is a different device model, not
+            // "DD with everything unavailable".
+            assert!(
+                a.rows.iter().all(|r| !r.attr.starts_with("wheel_")),
+                "{cat:?} unexpectedly carries a wheel_* row: {:?}",
+                a.rows.iter().map(|r| &r.attr).collect::<Vec<_>>()
+            );
+        }
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Steering).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "range" && r.available));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "gain" && r.available));
+        assert!(a.rows.iter().any(|r| r.attr == "autocenter" && r.available));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        a.reload();
+        assert!(a.rows.iter().any(|r| r.attr == "combine_pedals" && r.available));
+    }
+
+    #[test]
+    fn g923_profiles_page_offers_the_computer_store_without_a_mode_row() {
+        // No wheel_mode, no onboard profile store to snapshot into or out
+        // of: the Profiles page must skip straight to the computer-side
+        // store (the "Save current as..." row, plus any saved profiles),
+        // with no Mode row and no onboard slot picker anywhere on it.
+        let mut a = g923_app();
+        a.profiles_dir = profiles_tempdir();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec![PROFILE_NEW_ATTR], "empty store: just Save, no Mode row");
+    }
+
+    #[test]
+    fn g923_profiles_page_saves_and_applies_its_classic_settings() {
+        // The computer-side store must actually work on a G923: a save
+        // snapshots its own four settings, and an apply after a drift
+        // restores them, same round trip a DD wheel's desktop Profiles page
+        // gets (see `enter_on_a_saved_profile_applies_it`).
+        use crossterm::event::KeyCode;
+        let mut a = g923_app();
+        a.profiles_dir = profiles_tempdir();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == PROFILE_NEW_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        for c in "race".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("saved"), "status: {}", a.status);
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["profile:race", PROFILE_NEW_ATTR]);
+        let text = std::fs::read_to_string(a.profiles_dir.join("race.profile")).unwrap();
+        assert!(text.contains("range=900"));
+
+        // Drift a setting, then apply the snapshot back.
+        a.device.write("range", &Value::Int(540)).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "profile:race").unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("applied"), "status: {}", a.status);
+        assert_eq!(a.device.read("range").unwrap(), Value::Int(900));
+    }
+
+    #[test]
+    fn g923_toggle_mode_is_a_no_op() {
+        // The `d` shortcut's usual desktop/onboard meaning must not attempt
+        // a doomed `wheel_mode` write on a wheel that has none.
+        let mut a = g923_app();
+        let status_before = a.status.clone();
+        a.toggle_mode();
+        assert_eq!(a.status, status_before, "no status change from a no-op toggle");
+        assert_eq!(a.device.current_mode().unwrap(), Mode::Desktop);
+    }
+
+    #[test]
+    fn g923_hides_leds_from_the_sidebar_and_digit_jumps_but_keeps_profiles() {
+        use crossterm::event::KeyCode;
+        let a = g923_app();
+        assert!(!a.category_applicable(Category::Leds));
+        assert!(a.category_applicable(Category::Profiles));
+        assert!(a.category_applicable(Category::Ffb));
+        assert!(a.category_applicable(Category::Steering));
+        assert!(a.category_applicable(Category::Pedals));
+        assert!(a.category_applicable(Category::Info));
+
+        // Digit 5 (LIGHTSYNC) is inert: nothing there to jump to. Digit 6
+        // (Profiles) works: the computer-side store still has content, even
+        // with no onboard slots. (Category order is Info, Ffb, Steering,
+        // Pedals, Leds, Profiles: digits 1-6.)
+        let mut a = g923_app();
+        a.focus = Focus::Sidebar;
+        let before = a.category();
+        a.on_key(KeyCode::Char('5'));
+        assert_eq!(a.category(), before, "no LIGHTSYNC content to jump to");
+        assert_eq!(a.focus, Focus::Sidebar, "an inert digit does not steal focus");
+        a.on_key(KeyCode::Char('6'));
+        assert_eq!(a.category(), Category::Profiles, "Profiles has content to jump to");
+        assert_eq!(a.focus, Focus::Content, "a jump lands ready to work");
+
+        // Up/Down (move_cat) skips Leds but still stops at Profiles.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        a.move_cat(1);
+        assert_eq!(a.category(), Category::Profiles, "skips Leds going forward, to Profiles");
+        a.move_cat(1);
+        assert!(a.is_setup(), "Profiles is the last content category; another step reaches Setup");
+        a.move_cat(-1);
+        assert_eq!(a.category(), Category::Profiles);
+        a.move_cat(-1);
+        assert_eq!(a.category(), Category::Pedals, "skips Leds going backward too");
+    }
+
+    #[test]
+    fn g923_navigates_every_category_without_panicking() {
+        use crossterm::event::KeyCode;
+        let mut a = g923_app();
+        a.focus = Focus::Sidebar;
+        // Digit-jump through every category (1..=6) plus Setup (7): none of
+        // these may panic for a wheel whose registry has no Leds/Info rows
+        // at all (Profiles always has the computer-side store).
+        for d in '1'..='7' {
+            a.on_key(KeyCode::Char(d));
+        }
+    }
+
+    // --- the focus model, digit jumps and Esc discipline ---
+
+    #[test]
+    fn digit_jumps_land_on_the_view_with_content_focus() {
+        // Category order is Info, Ffb, Steering, Pedals, Leds, Profiles:
+        // digit 1 is Info, 5 is LIGHTSYNC, 7 is Setup.
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        a.focus = Focus::Sidebar;
+        a.on_key(KeyCode::Char('5'));
+        assert_eq!(a.category(), Category::Leds, "5 is the LIGHTSYNC entry");
+        assert_eq!(a.focus, Focus::Content, "a jump lands ready to work");
+        a.on_key(KeyCode::Char('7'));
+        assert!(a.is_setup(), "7 is the Setup entry");
+        a.on_key(KeyCode::Char('1'));
+        assert_eq!(a.category(), Category::Info, "1 is the Info entry");
+        // Out-of-range digits do nothing (but never fall through).
+        let cat = a.cat_idx;
+        a.on_key(KeyCode::Char('9'));
+        assert_eq!(a.cat_idx, cat);
+    }
+
+    #[test]
+    fn digits_type_into_text_editors_instead_of_jumping() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("desktop");
+        a.on_key(KeyCode::Char('n'));
+        a.on_key(KeyCode::Char('7'));
+        assert_eq!(a.profile_name_edit.as_deref(), Some("7"), "7 is text here");
+        assert!(!a.is_setup(), "no jump happened");
+    }
+
+    #[test]
+    fn tab_toggles_the_focused_pane() {
+        use crossterm::event::KeyCode;
+        // A freshly started app browses the sidebar (the test fixture
+        // parks itself on the content instead, so build one directly).
+        let a = App::new(logi_wheel_core::Device::with_io(FakeSysfs::new()));
+        assert_eq!(a.focus, Focus::Sidebar, "starts on the sidebar");
+        let mut a = app();
+        a.focus = Focus::Sidebar;
+        a.on_key(KeyCode::Tab);
+        assert_eq!(a.focus, Focus::Content);
+        a.on_key(KeyCode::Tab);
+        assert_eq!(a.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn sidebar_updown_moves_the_category_and_loads_it_live() {
+        // Default (index 0) is Info; Down steps to Ffb, Up back to Info.
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        a.focus = Focus::Sidebar;
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.category(), Category::Ffb);
+        assert_eq!(a.focus, Focus::Sidebar, "browsing stays on the sidebar");
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.category(), Category::Info, "the content loaded live both ways");
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.focus, Focus::Content, "Enter steps into the content");
+        assert!(a.edit.is_none(), "no editor opened from the sidebar");
+    }
+
+    #[test]
+    fn esc_closes_the_topmost_thing_and_never_quits() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        a.focus = Focus::Content;
+        // Navigate to Ffb: the default category (Info) has no editable rows.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
+        a.on_key(KeyCode::Enter); // the inline editor (topmost)
+        assert!(a.edit.is_some());
+        a.on_key(KeyCode::Esc);
+        assert!(a.edit.is_none(), "Esc closes the editor first");
+        assert_eq!(a.focus, Focus::Content, "and only the editor");
+        a.on_key(KeyCode::Esc);
+        assert_eq!(a.focus, Focus::Sidebar, "then content focus steps back");
+        a.on_key(KeyCode::Esc);
+        assert!(!a.quit, "Esc never quits");
+        assert_eq!(a.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn q_quits_from_both_focus_states_but_not_through_editors() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        a.focus = Focus::Sidebar;
+        a.on_key(KeyCode::Char('q'));
+        assert!(a.quit);
+        let mut b = profiles_app("desktop");
+        b.on_key(KeyCode::Char('n'));
+        b.on_key(KeyCode::Char('q'));
+        assert!(!b.quit, "q is text inside a prompt");
+        assert_eq!(b.profile_name_edit.as_deref(), Some("q"));
+    }
+
+    #[test]
+    fn help_overlay_opens_everywhere_and_any_key_closes_it() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        a.on_key(KeyCode::Char('?'));
+        assert!(a.help);
+        a.on_key(KeyCode::Char('q'));
+        assert!(!a.help, "any key closes the overlay");
+        assert!(!a.quit, "and does nothing else");
+        // From inside a non-text modal too (the curve editor keeps its
+        // keys, ? opens the overlay on top).
+        let mut p = pedal_app();
+        p.on_key(KeyCode::Enter);
+        assert!(p.curve_edit.is_some());
+        p.on_key(KeyCode::Char('?'));
+        assert!(p.help);
+        p.on_key(KeyCode::Esc);
+        assert!(!p.help);
+        assert!(p.curve_edit.is_some(), "the closing key never leaks into the editor");
+    }
+
+    #[test]
+    fn move_row_clamps() {
+        let mut a = app();
+        a.row_idx = 0;
+        a.move_row(-1);
+        assert_eq!(a.row_idx, 0);
+    }
+
+    #[test]
+    fn edit_commit_writes_and_reloads() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        // navigate to wheel_strength row (Ffb)
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
+        a.on_key(KeyCode::Enter); // begin edit
+        assert!(a.edit.is_some());
+        a.on_key(KeyCode::Right); // bump +1
+        a.on_key(KeyCode::Enter); // commit
+        assert!(a.edit.is_none());
+        assert_eq!(a.device.read("wheel_strength").unwrap(), logi_wheel_core::Value::Percent(63));
+    }
+
+    #[test]
+    fn wrong_mode_sets_status_prompt() {
+        use crossterm::event::KeyCode;
+        let fs = logi_wheel_core::sysfs::FakeSysfs::new();
+        fs.set("wheel_mode", "onboard");
+        fs.set("wheel_sensitivity", "50");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Steering).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_sensitivity").unwrap();
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Left);
+        a.on_key(KeyCode::Enter); // commit -> WrongMode
+        assert!(a.status.to_lowercase().contains("desktop"));
+    }
+
+    #[test]
+    fn d_toggles_mode_both_ways() {
+        use crossterm::event::KeyCode;
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.on_key(KeyCode::Char('d'));
+        assert_eq!(a.device.current_mode().unwrap(), Mode::Onboard);
+        a.on_key(KeyCode::Char('d'));
+        assert_eq!(a.device.current_mode().unwrap(), Mode::Desktop);
+    }
+
+    // --- external-change (drift) detection ---
+
+    use std::rc::Rc;
+
+    /// An app plus a second handle to its `FakeSysfs`, so a test can mutate
+    /// attributes behind the app's back (what the wheel's physical profile
+    /// button looks like from here).
+    fn drift_app() -> (Rc<FakeSysfs>, App<Rc<FakeSysfs>>) {
+        let fs = Rc::new(FakeSysfs::new());
+        fs.set("wheel_range", "900");
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "1");
+        fs.set("wheel_strength", "62");
+        let app = App::new(logi_wheel_core::Device::with_io(fs.clone()));
+        (fs, app)
+    }
+
+    #[test]
+    fn check_drift_without_changes_does_nothing() {
+        let (_fs, mut a) = drift_app();
+        a.status.clear();
+        assert!(!a.check_drift());
+        assert!(!a.check_drift());
+        assert!(a.status.is_empty());
+    }
+
+    #[test]
+    fn profile_drift_reloads_the_rows_and_reports() {
+        let (fs, mut a) = drift_app();
+        // Ffb, where wheel_strength lives (the default category is Info).
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        // The wheel's profile button fired: the slot AND an effective
+        // setting move without any key passing through the app.
+        fs.set("wheel_profile", "3");
+        fs.set("wheel_strength", "30");
+        assert!(a.check_drift());
+        let strength = a.rows.iter().find(|r| r.attr == "wheel_strength").unwrap();
+        assert_eq!(
+            strength.value.as_ref().unwrap(),
+            &Value::Percent(30),
+            "the visible rows must be re-read, not stale"
+        );
+        assert!(a.status.contains("changed"), "status: {}", a.status);
+        // The baseline advanced with the reload: the next tick is quiet.
+        assert!(!a.check_drift());
+    }
+
+    #[test]
+    fn mode_drift_recomposes_the_profiles_page() {
+        let (fs, mut a) = drift_app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        // Desktop mode composes the computer-side store rows.
+        assert!(a.rows.iter().any(|r| r.attr == PROFILE_NEW_ATTR));
+        fs.set("wheel_mode", "onboard");
+        assert!(a.check_drift());
+        // Onboard mode shows the registry rows (slot picker etc.) instead.
+        assert!(!a.rows.iter().any(|r| r.attr == PROFILE_NEW_ATTR));
+        assert!(a.rows.iter().any(|r| r.attr == "wheel_profile"));
+    }
+
+    #[test]
+    fn drift_check_is_skipped_while_an_editor_is_open() {
+        let (fs, mut a) = drift_app();
+        a.profile_name_edit = Some(String::new());
+        fs.set("wheel_profile", "4");
+        assert!(!a.check_drift(), "a reload must not yank state from under an open prompt");
+        a.profile_name_edit = None;
+        assert!(a.check_drift(), "the first check after the prompt closes catches up");
+    }
+
+    #[test]
+    fn own_edits_never_read_as_drift() {
+        let (_fs, mut a) = drift_app();
+        a.toggle_mode(); // writes wheel_mode and reloads, resyncing the baseline
+        assert!(!a.check_drift());
+    }
+
+    #[test]
+    fn drift_to_an_unreadable_wheel_flips_the_no_wheel_shell() {
+        let (fs, mut a) = drift_app();
+        fs.set_absent("wheel_range");
+        fs.set_absent("wheel_mode");
+        fs.set_absent("wheel_profile");
+        fs.set_absent("wheel_strength");
+        assert!(a.check_drift());
+        assert!(a.no_wheel);
+        assert!(a.rows.is_empty());
+        assert!(a.status.contains("disconnected"), "status: {}", a.status);
+        // With no wheel there is nothing to watch; `r` retries discovery.
+        assert!(!a.check_drift());
+    }
+
+    fn pedal_app() -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_throttle_curve", "0/64 points loaded (0 = built-in curve)");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        // A curve row only shows while its axis's shaping toggle is on (the
+        // default is the simple sensitivity view).
+        a.shaping_toggles.set(shaping::Axis::Throttle, true);
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_throttle_curve").unwrap();
+        a
+    }
+
+    #[test]
+    fn curve_row_opens_modal_not_inline_editor() {
+        use crossterm::event::KeyCode;
+        let mut a = pedal_app();
+        a.on_key(KeyCode::Enter);
+        assert!(a.curve_edit.is_some(), "curve opens the modal editor");
+        assert!(a.edit.is_none(), "not the inline field editor");
+    }
+
+    #[test]
+    fn curve_editor_commit_writes_a_multipoint_curve() {
+        use crossterm::event::KeyCode;
+        let mut a = pedal_app();
+        a.on_key(KeyCode::Enter); // open
+        a.on_key(KeyCode::Char('+')); // add a middle point (now 3 points)
+        a.on_key(KeyCode::Down); // move to Output field
+        a.on_key(KeyCode::Right); // bend the point
+        a.on_key(KeyCode::Enter); // save
+        assert!(a.curve_edit.is_none());
+        assert!(a.status.contains("set"), "status: {}", a.status);
+        // the stored curve is a real multi-point list ending at full scale
+        match a.device.read("wheel_throttle_curve").unwrap() {
+            Value::Curve(pts) => {
+                assert!(pts.len() >= 3, "points: {pts:?}");
+                assert_eq!(*pts.last().unwrap(), (65535, 65535));
+            }
+            v => panic!("expected a curve, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn curve_editor_esc_cancels_without_writing() {
+        use crossterm::event::KeyCode;
+        let mut a = pedal_app();
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Char('+'));
+        a.on_key(KeyCode::Esc);
+        assert!(a.curve_edit.is_none());
+        // nothing was written: the store still reads built-in (empty curve)
+        assert_eq!(
+            a.device.read("wheel_throttle_curve").unwrap(),
+            Value::Curve(vec![])
+        );
+    }
+
+    #[test]
+    fn i_opens_the_info_popup_and_any_key_closes_it() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        // FFB strength lives on Ffb; the default category is Info.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
+        a.on_key(KeyCode::Char('i'));
+        let popup = a.info_popup.as_ref().expect("popup opens");
+        assert_eq!(popup.title, "FFB strength");
+        assert!(
+            popup.lines.iter().any(|l| l.contains("Overall strength of every force")),
+            "registry help shown: {:?}",
+            popup.lines
+        );
+        assert!(
+            popup.lines.iter().any(|l| l.contains("0-100")),
+            "kind range shown: {:?}",
+            popup.lines
+        );
+        // Any key closes it, and that key does nothing else (q must not
+        // quit through the popup).
+        a.on_key(KeyCode::Char('q'));
+        assert!(a.info_popup.is_none());
+        assert!(!a.quit);
+    }
+
+    #[test]
+    fn info_popup_shows_the_mode_requirement() {
+        use crossterm::event::KeyCode;
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_sensitivity", "50");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Steering).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_sensitivity").unwrap();
+        a.on_key(KeyCode::Char('i'));
+        let popup = a.info_popup.as_ref().unwrap();
+        assert!(
+            popup.lines.iter().any(|l| l == "Desktop mode only."),
+            "mode requirement shown: {:?}",
+            popup.lines
+        );
+    }
+
+    #[test]
+    fn info_popup_on_a_shaping_toggle_row_shows_the_shared_help() {
+        use crossterm::event::KeyCode;
+        let mut a = pedal_app();
+        a.row_idx = a
+            .rows
+            .iter()
+            .position(|r| r.attr == shaping::toggle_attr(shaping::Axis::Throttle))
+            .unwrap();
+        a.on_key(KeyCode::Char('i'));
+        let popup = a.info_popup.as_ref().expect("popup opens on a synthetic row");
+        assert_eq!(popup.title, "Throttle shaping");
+        assert_eq!(popup.lines, vec![shaping::TOGGLE_HELP.to_string()]);
+    }
+
+    #[test]
+    fn setup_i_installs_only_inside_the_games_list() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        // At the section level, i neither opens the settings info popup
+        // nor queues an install.
+        a.on_key(KeyCode::Char('i'));
+        assert!(a.info_popup.is_none(), "Setup's i must not open the info popup");
+        assert_eq!(a.take_pending_shim(), None, "nothing queued at the section level");
+        // Inside the games list it queues the install for the selection.
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Char('i'));
+        assert!(a.take_pending_shim().is_some(), "status: {}", a.status);
+    }
+
+    #[test]
+    fn move_cat_reaches_and_leaves_setup() {
+        let mut a = app();
+        // step through every real category, landing on Setup right after
+        // the last one.
+        for _ in 0..Category::ALL.len() {
+            a.move_cat(1);
+        }
+        assert!(a.is_setup(), "cat_idx {} should be the Setup entry", a.cat_idx);
+        assert!(a.rows.is_empty(), "Setup has no settings rows");
+        // then a wrap back to the first category.
+        a.move_cat(1);
+        assert!(!a.is_setup());
+        assert_eq!(a.cat_idx, 0);
+        // stepping backward from the first category reaches Setup too.
+        a.move_cat(-1);
+        assert!(a.is_setup());
+    }
+
+    /// An app parked on the Info view (no real wheel input is asserted on;
+    /// the discovery the entry runs is overwritten per test).
+    fn info_view_app() -> App<FakeSysfs> {
+        let mut a = app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.reload();
+        assert!(a.is_info());
+        a
+    }
+
+    #[test]
+    fn entering_the_info_view_runs_input_discovery() {
+        let mut a = app();
+        // Start away from Info (now the default `app()` already sits on)
+        // so switching to it exercises the transition itself, via the same
+        // `set_cat` a digit jump or arrow move would call.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        let info = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.set_cat(info);
+        assert!(a.is_info());
+        assert!(a.test.scanned, "entering the Info view runs discovery");
+        // The identity rows still load like any category's.
+        assert!(a.rows.iter().any(|r| r.attr == "wheel_serial"));
+    }
+
+    #[test]
+    fn info_sim_keys_without_a_wheel_report_instead_of_arming() {
+        use crossterm::event::KeyCode;
+        let mut a = info_view_app();
+        a.test.dev = None;
+        a.on_key(KeyCode::Char('f'));
+        assert!(a.test.confirm.is_none(), "nothing armed without a wheel");
+        assert!(a.status.contains("no wheel"), "status: {}", a.status);
+        a.on_key(KeyCode::Char('t'));
+        assert!(a.test.confirm.is_none());
+    }
+
+    #[test]
+    fn info_sim_keys_arm_a_confirm_and_anything_but_y_cancels() {
+        use crate::wheel_test::SimKind;
+        use crossterm::event::KeyCode;
+        let mut a = info_view_app();
+        a.test.dev = Some(logi_wheel_core::evtest::WheelInput {
+            event_path: "/nonexistent/event99".to_string(),
+            name: "Logitech RS50 Base".to_string(),
+        });
+        a.on_key(KeyCode::Char('f'));
+        assert_eq!(a.test.confirm, Some(SimKind::ConstantForce));
+        assert!(a.status.contains("WILL move"), "safety text shown: {}", a.status);
+        a.on_key(KeyCode::Char('n'));
+        assert!(a.test.confirm.is_none());
+        assert!(a.status.contains("cancelled"), "status: {}", a.status);
+        assert!(!a.test.sim_running(), "nothing played");
+        // 't' arms the texture sim; Esc cancels it too.
+        a.on_key(KeyCode::Char('t'));
+        assert_eq!(a.test.confirm, Some(SimKind::Texture));
+        a.on_key(KeyCode::Esc);
+        assert!(a.test.confirm.is_none());
+        assert!(!a.test.sim_running());
+    }
+
+    #[test]
+    fn info_sim_y_arms_a_countdown_instead_of_playing_immediately() {
+        use crate::wheel_test::SimKind;
+        use crossterm::event::KeyCode;
+        let mut a = info_view_app();
+        a.test.dev = Some(logi_wheel_core::evtest::WheelInput {
+            event_path: "/nonexistent/event99".to_string(),
+            name: "Logitech RS50 Base".to_string(),
+        });
+        a.on_key(KeyCode::Char('f'));
+        assert_eq!(a.test.confirm, Some(SimKind::ConstantForce));
+        a.on_key(KeyCode::Char('y'));
+        assert!(a.test.confirm.is_none(), "confirm resolved");
+        assert!(a.test.countdown_active(), "armed a countdown, not playing yet");
+        assert!(!a.test.sim_running(), "the wheel has not moved yet");
+        assert!(a.status.contains("starting in 5"), "status: {}", a.status);
+
+        // 's' during the countdown cancels it outright, same key that
+        // stops an already-playing sim; the sim never starts.
+        a.on_key(KeyCode::Char('s'));
+        assert!(!a.test.countdown_active());
+        assert!(!a.test.sim_running());
+        assert!(a.status.contains("countdown cancelled"), "status: {}", a.status);
+
+        // Advancing the loop's tick (`tick_sim_countdown`) before the
+        // deadline is a no-op.
+        a.on_key(KeyCode::Char('f'));
+        a.on_key(KeyCode::Char('y'));
+        assert!(a.test.countdown_active());
+        a.tick_sim_countdown();
+        assert!(a.test.countdown_active(), "deadline not reached yet");
+    }
+
+    #[test]
+    fn info_c_shows_serial_and_firmware_for_manual_copy() {
+        // No clipboard mechanism exists in the TUI (and none is added for
+        // this), so 'c' surfaces the values on the status line instead.
+        use crossterm::event::KeyCode;
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_serial", "0000TESTSER1");
+        fs.set("wheel_firmware", "base: U1 00.00.B0000\nmotor: SC 00.00.B0000");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        // Point the module-version read at a path that never exists, so
+        // the test does not depend on whether this machine has the module
+        // loaded.
+        a.driver_version_path = PathBuf::from("/nonexistent/logi-wheel-test/version");
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.reload();
+        assert!(a.is_info());
+        a.on_key(KeyCode::Char('c'));
+        assert!(a.status.contains("serial: 0000TESTSER1"), "status: {}", a.status);
+        assert!(
+            a.status.contains("base: U1 00.00.B0000 / motor: SC 00.00.B0000"),
+            "both firmware lines flattened onto the one-line status: {}",
+            a.status
+        );
+        assert!(
+            a.status.contains(concat!("app: logi-wheel ", env!("CARGO_PKG_VERSION"))),
+            "the running front-end's version is on the status line: {}",
+            a.status
+        );
+        assert!(
+            a.status.contains("driver: (module not loaded)"),
+            "an absent module stamp shows the explicit marker: {}",
+            a.status
+        );
+        assert!(a.status.contains("manual copy"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn info_c_shows_the_loaded_driver_stamp() {
+        // With a readable version file (the fake-path override standing in
+        // for /sys/module/hid_logitech_dd/version), 'c' prints its stamp.
+        use crossterm::event::KeyCode;
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_serial", "0000TESTSER1");
+        let stamp = std::env::temp_dir()
+            .join(format!("logi-wheel-tui-driver-stamp-{}", std::process::id()));
+        std::fs::write(&stamp, "v0.16.0\n").unwrap();
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.driver_version_path = stamp.clone();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.reload();
+        a.on_key(KeyCode::Char('c'));
+        std::fs::remove_file(&stamp).unwrap();
+        assert!(a.status.contains("driver: v0.16.0"), "status: {}", a.status);
+        assert_eq!(a.driver_version_text(), "(module not loaded)", "gone after unload");
+    }
+
+    #[test]
+    fn the_startup_info_view_scans_for_the_wheel_input() {
+        // Info is the startup view; its monitor is otherwise only started
+        // by a view change, so construction must scan on its own or the
+        // page sits on "scanning" forever.
+        let a = app();
+        assert!(a.is_info(), "Info is expected to be the startup view");
+        assert!(a.test.scanned, "construction must run the input discovery");
+    }
+
+    #[test]
+    fn leaving_the_info_view_stops_the_monitor() {
+        let mut a = info_view_app();
+        a.move_cat(1);
+        assert!(!a.is_info());
+        assert!(!a.test.monitoring(), "monitor never survives leaving the view");
+        assert!(!a.test_polling());
+    }
+
+    #[test]
+    fn setup_view_ignores_row_and_edit_keys() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        for _ in 0..Category::ALL.len() {
+            a.move_cat(1);
+        }
+        assert!(a.is_setup());
+        a.on_key(KeyCode::Enter); // no rows to edit; must not open an editor
+        assert!(a.edit.is_none());
+        assert!(a.curve_edit.is_none());
+    }
+
+    /// A Wine game with a wine prefix at `prefix` (Steam sourced, the shape
+    /// most Setup tests need); `shim_installed` drives the row's status.
+    fn wine_game(name: &str, prefix: &str, shim_installed: bool) -> DiscoveredGame {
+        DiscoveredGame {
+            name: name.to_string(),
+            source: launchers::Source::Steam,
+            kind: launchers::GameKind::Wine { prefix: PathBuf::from(prefix) },
+            shim_installed,
+        }
+    }
+
+    /// A Setup-view app with two fake games in the list (no real Steam
+    /// scan results are asserted on; the scan the view entry triggers is
+    /// simply overwritten).
+    fn setup_app() -> App<FakeSysfs> {
+        let mut a = app();
+        // `set_cat` (what `move_cat` steps toward anyway) rather than a
+        // step count tied to `Category::ALL`'s current order/length: this
+        // fixture only needs to land in Setup, not exercise how many
+        // presses it takes to get there (see `move_cat_reaches_and_leaves_
+        // setup` for that).
+        a.set_cat(SETUP_INDEX);
+        assert!(a.is_setup());
+        // Two games with built-in TrueForce (the shim action), so the
+        // install/remove keys have something to queue; the sim-TF tests
+        // push a telemetry-driven title of their own.
+        a.games = vec![
+            wine_game(
+                "Assetto Corsa Competizione",
+                "/lib/steamapps/compatdata/100/pfx",
+                false,
+            ),
+            wine_game("Assetto Corsa EVO", "/lib/steamapps/compatdata/400/pfx", true),
+        ];
+        a.game_idx = 0;
+        a.games_scanned = true;
+        a
+    }
+
+    /// Park the Setup view on `target` and enter it (the Enter key), the
+    /// way a user reaches a section's inner keys.
+    fn enter_setup(a: &mut App<FakeSysfs>, target: SetupSection) {
+        a.setup_section_idx =
+            SetupSection::ALL.iter().position(|s| *s == target).unwrap();
+        a.setup_inside = false;
+        a.on_key(crossterm::event::KeyCode::Enter);
+    }
+
+    #[test]
+    fn setup_sections_move_clamp_and_enter() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        assert_eq!(a.setup_section(), SetupSection::Games, "starts on the first section");
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.setup_section(), SetupSection::Games, "clamps at the top");
+        for _ in 0..10 {
+            a.on_key(KeyCode::Down);
+        }
+        assert_eq!(a.setup_section(), SetupSection::SimTf, "clamps at the bottom");
+        // Enter steps inside; Up/Down stop moving the section cursor.
+        a.on_key(KeyCode::Enter);
+        assert!(a.setup_inside);
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.setup_section(), SetupSection::SimTf, "the cursor stays while inside");
+        // Esc leaves the section first, then hands focus to the sidebar.
+        a.on_key(KeyCode::Esc);
+        assert!(!a.setup_inside, "Esc closes the section level first");
+        assert_eq!(a.focus, Focus::Content);
+        a.on_key(KeyCode::Esc);
+        assert_eq!(a.focus, Focus::Sidebar, "then content focus steps back");
+        assert!(!a.quit);
+    }
+
+    #[test]
+    fn setup_right_and_left_mirror_enter_and_esc() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        assert!(a.setup_inside, "Enter opens the games list");
+        a.on_key(KeyCode::Left);
+        assert!(!a.setup_inside, "Left leaves it");
+        a.on_key(KeyCode::Right);
+        assert!(a.setup_inside, "Right enters it again");
+    }
+
+    #[test]
+    fn setup_sim_tf_keys_only_act_inside_their_section() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        // At the section level (Your games selected) the SimTf keys are inert.
+        a.on_key(KeyCode::Char('m'));
+        assert!(a.tf_cfg.enabled, "m does nothing at the section level");
+        a.on_key(KeyCode::Char('e'));
+        assert!(a.tf_intensity_edit.is_none());
+        a.on_key(KeyCode::Char('d'));
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('m'));
+        assert!(!a.tf_cfg.enabled, "m toggles inside Simulated TF");
+    }
+
+    #[test]
+    fn setup_leaving_the_view_steps_back_out_of_a_section() {
+        let mut a = setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        assert!(a.setup_inside);
+        a.set_cat(0);
+        a.set_cat(SETUP_INDEX);
+        assert!(!a.setup_inside, "a fresh Setup entry starts at the section level");
+    }
+
+    #[test]
+    fn setup_keys_queue_a_per_game_shim_run_instead_of_running_it() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        // Nothing resolved: --sdk-dir is omitted so the installer's own
+        // lookup (and its copy-the-DLLs guidance) runs. `sdk_resolved` is
+        // set directly: the real resolution reads this machine's
+        // environment (repo sdk/, env var), which a unit test must not
+        // depend on.
+        a.sdk_resolved = None;
+        a.on_key(KeyCode::Char('i'));
+        assert_eq!(
+            a.take_pending_shim(),
+            Some((
+                vec!["--prefix".to_string(), "/lib/steamapps/compatdata/100/pfx".to_string()],
+                "install"
+            ))
+        );
+        // Taken once; a second take finds nothing queued.
+        assert_eq!(a.take_pending_shim(), None);
+        // A resolved directory is passed through explicitly, exactly as
+        // the status line reported it.
+        a.sdk_resolved = Some(PathBuf::from("/data/sdk"));
+        a.on_key(KeyCode::Char('i'));
+        assert_eq!(
+            a.take_pending_shim(),
+            Some((
+                vec![
+                    "--prefix".to_string(),
+                    "/lib/steamapps/compatdata/100/pfx".to_string(),
+                    "--sdk-dir".to_string(),
+                    "/data/sdk".to_string(),
+                ],
+                "install"
+            ))
+        );
+        a.on_key(KeyCode::Down); // select the second game
+        a.on_key(KeyCode::Char('u'));
+        assert_eq!(
+            a.take_pending_shim(),
+            Some((
+                vec!["--uninstall-prefix".to_string(), "/lib/steamapps/compatdata/400/pfx".to_string()],
+                "uninstall"
+            ))
+        );
+    }
+
+    #[test]
+    fn setup_game_selection_clamps_at_both_ends() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.game_idx, 0, "up from the first game stays");
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.game_idx, 1);
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.game_idx, 1, "down from the last game stays");
+    }
+
+    #[test]
+    fn setup_with_no_games_reports_instead_of_queueing() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.games.clear();
+        a.game_idx = 0;
+        enter_setup(&mut a, SetupSection::Games);
+        assert!(!a.setup_inside, "an empty list cannot be entered");
+        assert!(a.status.contains("no Proton games"), "status: {}", a.status);
+        a.on_key(KeyCode::Char('i'));
+        assert_eq!(a.take_pending_shim(), None, "i is inert outside the list");
+    }
+
+    #[test]
+    fn setup_u_removes_the_shim_from_an_unrecognised_but_added_game() {
+        // A title the registry does not know, added earlier via the
+        // picker: not a shim action per the registry, but its files are
+        // installed, so u must still offer to remove them.
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.games.push(wine_game("Some Unknown Sim", "/lib/steamapps/compatdata/900/pfx", true));
+        a.game_idx = 2;
+        enter_setup(&mut a, SetupSection::Games);
+        a.game_idx = 2;
+        a.on_key(KeyCode::Char('u'));
+        assert_eq!(
+            a.take_pending_shim(),
+            Some((
+                vec!["--uninstall-prefix".to_string(), "/lib/steamapps/compatdata/900/pfx".to_string()],
+                "uninstall"
+            )),
+            "status: {}",
+            a.status
+        );
+    }
+
+    #[test]
+    fn add_game_key_opens_the_picker_over_the_addable_list() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.addable = vec![
+            wine_game("TEKKEN 8", "/pfx/tekken", false),
+            wine_game("Some Unknown Sim", "/pfx/unknown", false),
+        ];
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Char('a'));
+        let picker = a.add_game.as_ref().expect("a opens the picker");
+        assert_eq!(picker.idx, 0);
+        assert!(picker.manual.is_none());
+    }
+
+    #[test]
+    fn add_game_picker_up_down_clamp_across_the_trailing_manual_row() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.addable = vec![wine_game("TEKKEN 8", "/pfx/tekken", false)];
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Char('a'));
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.add_game.as_ref().unwrap().idx, 0, "up from the top stays");
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.add_game.as_ref().unwrap().idx, 1, "the trailing manual-entry row");
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.add_game.as_ref().unwrap().idx, 1, "down from the manual row stays");
+        a.on_key(KeyCode::Esc);
+        assert!(a.add_game.is_none(), "Esc closes the picker");
+    }
+
+    #[test]
+    fn add_game_picker_enter_on_a_row_queues_the_shim_install_and_closes() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.addable = vec![wine_game("TEKKEN 8", "/pfx/tekken", false)];
+        a.sdk_resolved = None;
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Char('a'));
+        a.on_key(KeyCode::Enter);
+        assert!(a.add_game.is_none(), "the picker closes on install");
+        assert_eq!(
+            a.take_pending_shim(),
+            Some((vec!["--prefix".to_string(), "/pfx/tekken".to_string()], "install"))
+        );
+    }
+
+    #[test]
+    fn add_game_picker_manual_entry_types_and_commits() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.addable = Vec::new();
+        a.sdk_resolved = None;
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Char('a'));
+        // No addable rows: the trailing manual row is already selected.
+        assert_eq!(a.add_game.as_ref().unwrap().idx, 0);
+        a.on_key(KeyCode::Enter);
+        assert!(a.add_game.as_ref().unwrap().manual.is_some(), "Enter opens the text field");
+        for c in "/home/me/.wine".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Backspace);
+        a.on_key(KeyCode::Char('e'));
+        a.on_key(KeyCode::Enter);
+        assert!(a.add_game.is_none(), "a non-empty path commits");
+        assert_eq!(
+            a.take_pending_shim(),
+            Some((vec!["--prefix".to_string(), "/home/me/.wine".to_string()], "install"))
+        );
+    }
+
+    #[test]
+    fn add_game_picker_rejects_an_empty_manual_path() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.addable = Vec::new();
+        enter_setup(&mut a, SetupSection::Games);
+        a.on_key(KeyCode::Char('a'));
+        a.on_key(KeyCode::Enter); // opens the manual field, empty
+        a.on_key(KeyCode::Enter); // commit with nothing typed
+        assert!(a.add_game.is_some(), "the picker stays open on an empty path");
+        assert!(a.add_game.as_ref().unwrap().manual.is_some(), "still on the text field");
+        assert_eq!(a.take_pending_shim(), None, "nothing queued");
+        assert!(a.status.contains("prefix path"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn sdk_dir_edit_commits_on_enter_and_discards_on_esc() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.sdk_dir = "/old".to_string();
+        a.setup_section_idx =
+            SetupSection::ALL.iter().position(|s| *s == SetupSection::Sdk).unwrap();
+        a.on_key(KeyCode::Char('s'));
+        assert_eq!(a.sdk_edit.as_deref(), Some("/old"));
+        // While editing, view shortcuts are plain characters.
+        for _ in 0.."/old".len() {
+            a.on_key(KeyCode::Backspace);
+        }
+        for c in "/new".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.sdk_dir, "/new");
+        assert!(a.sdk_edit.is_none());
+        assert!(
+            a.status.starts_with("SDK DLLs:"),
+            "the commit reports the concrete resolution outcome: {}",
+            a.status
+        );
+        a.on_key(KeyCode::Char('s'));
+        a.on_key(KeyCode::Char('x'));
+        a.on_key(KeyCode::Esc);
+        assert_eq!(a.sdk_dir, "/new", "Esc keeps the committed dir");
+        assert!(a.sdk_edit.is_none());
+    }
+
+    #[test]
+    fn run_shim_reports_missing_binary_without_spawning() {
+        let mut a = app();
+        a.shim_binary = None;
+        a.run_shim(&["--prefix".to_string(), "/x".to_string()], "install");
+        assert!(a.status.contains("not found"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn run_shim_reports_success() {
+        let mut a = app();
+        a.shim_binary = Some(PathBuf::from("true")); // exists on PATH, exits 0, ignores args
+        a.run_shim(&["--prefix".to_string(), "/x".to_string()], "install");
+        assert_eq!(a.status, "shim install: ok");
+    }
+
+    #[test]
+    fn run_shim_reports_failure_without_crashing() {
+        let mut a = app();
+        a.shim_binary = Some(PathBuf::from("false")); // exists on PATH, exits non-zero
+        a.run_shim(&["--uninstall-prefix".to_string(), "/x".to_string()], "uninstall");
+        assert!(a.status.starts_with("shim uninstall:"), "status: {}", a.status);
+        assert_ne!(a.status, "shim uninstall: ok");
+    }
+
+    #[test]
+    fn run_shim_reports_spawn_failure_without_crashing() {
+        let mut a = app();
+        a.shim_binary = Some(PathBuf::from("this-binary-does-not-exist-anywhere"));
+        a.run_shim(&["--prefix".to_string(), "/x".to_string()], "install");
+        assert!(a.status.contains("failed to run"), "status: {}", a.status);
+    }
+
+    // --- LIGHTSYNC page ---
+
+    const TEN_COLORS: &str =
+        "ff0000 00ff00 0000ff 111111 222222 000000 000000 000000 000000 000000";
+
+    fn leds_app(effect: &str, direction: &str) -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_led_effect", effect);
+        fs.set("wheel_led_slot", "0");
+        fs.set("wheel_led_brightness", "80");
+        fs.set("wheel_led_slot_name", "RACE");
+        fs.set("wheel_led_slot_brightness", "70");
+        fs.set("wheel_led_direction", direction);
+        fs.set("wheel_led_colors", TEN_COLORS);
+        fs.set("wheel_rev_level", "0");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Leds).unwrap();
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn t_on_the_lightsync_page_does_nothing() {
+        // The 't' preview binding was removed: effect edits commit to the
+        // device immediately, so the wheel already shows the selection and
+        // a preview was a no-op by construction (2026-07-20).
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("5", "0");
+        let status = a.status.clone();
+        a.on_key(KeyCode::Char('t'));
+        assert_eq!(a.status, status, "'t' is unbound on the Leds page");
+    }
+
+    #[test]
+    fn run_led_try_restores_the_state_and_reports() {
+        let mut a = leds_app("5", "0");
+        // Zero durations: the test pins the write/restore contract, not
+        // the hold or the sweep pacing the queued run uses.
+        a.run_led_try(std::time::Duration::ZERO, std::time::Duration::ZERO);
+        assert_eq!(a.device.read("wheel_led_effect").unwrap(), Value::Int(5), "effect restored");
+        assert_eq!(a.device.read("wheel_led_slot").unwrap(), Value::Int(0), "slot restored");
+        assert!(a.status.contains("restored"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn run_led_try_plays_a_rev_sweep_for_the_custom_effect() {
+        // The custom effect (5) plays one 0..10..0 rev sweep; the sweep's
+        // last write leaves the fill at 0 before the effect restore exits
+        // it back to the idle pattern.
+        let mut a = leds_app("5", "0");
+        a.run_led_try(std::time::Duration::ZERO, std::time::Duration::ZERO);
+        assert!(a.status.contains("restored"), "status: {}", a.status);
+        assert_eq!(a.device.read("wheel_rev_level").unwrap(), Value::Int(0), "sweep ended at 0");
+    }
+
+    #[test]
+    fn run_led_try_sequences_the_hold_between_apply_and_restore() {
+        // Regression guard for the one-frame flash: the show phase must
+        // land BETWEEN the apply writes and the restore writes. Sweeps are
+        // disabled (the rev fill is the wheel's own rev display, hardware
+        // finding 2026-07-20), so the sequence is apply then restore with
+        // no rev_level writes at all.
+        use std::rc::Rc;
+        let fs = Rc::new(FakeSysfs::new());
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_led_effect", "5");
+        fs.set("wheel_led_slot", "1");
+        fs.set("wheel_led_brightness", "80");
+        fs.set("wheel_rev_level", "0");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs.clone()));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Leds).unwrap();
+        a.reload(); // reads only; the write log stays empty until the try
+        a.run_led_try(std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let expected = vec![
+            ("wheel_led_slot".to_string(), "1".to_string()),
+            ("wheel_led_effect".to_string(), "5".to_string()),
+            ("wheel_led_slot".to_string(), "1".to_string()),
+            ("wheel_led_effect".to_string(), "5".to_string()),
+        ];
+        assert_eq!(fs.writes(), expected);
+    }
+
+    #[test]
+    fn run_led_try_really_blocks_between_apply_and_restore() {
+        // Regression: a custom slot's try used to flash for about one
+        // frame. The show phase must consume real wall time before the
+        // restore runs; with sweeps disabled the static hold paces custom
+        // slots and built-ins alike.
+        let hold = std::time::Duration::from_millis(40);
+        let step = std::time::Duration::from_millis(2);
+
+        let mut a = leds_app("5", "0"); // custom: the hold paces the show
+        let t0 = std::time::Instant::now();
+        a.run_led_try(hold, step);
+        assert!(
+            t0.elapsed() >= hold,
+            "the show must hold for real wall time, took {:?}",
+            t0.elapsed()
+        );
+
+        let mut a = leds_app("2", "0"); // built-in: the static hold
+        let t0 = std::time::Instant::now();
+        a.run_led_try(hold, std::time::Duration::ZERO);
+        assert!(
+            t0.elapsed() >= hold,
+            "the built-in hold must really elapse, took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_led_try_skips_the_sweep_for_builtin_effects() {
+        // A built-in effect's colours are firmware-owned: no rev fill.
+        // The fixture's rev level starts at 3 and must stay untouched.
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_led_effect", "2");
+        fs.set("wheel_led_slot", "0");
+        fs.set("wheel_led_brightness", "80");
+        fs.set("wheel_rev_level", "3");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Leds).unwrap();
+        a.reload();
+        a.run_led_try(std::time::Duration::ZERO, std::time::Duration::ZERO);
+        assert_eq!(a.device.read("wheel_rev_level").unwrap(), Value::Int(3), "rev level untouched");
+    }
+
+    #[test]
+    fn led_preview_colors_mirror_only_for_mirrored_directions() {
+        // Direction 2 (inside-out) plays the strip as pairs: the preview
+        // mirrors the left half onto the right, left half winning.
+        let a = leds_app("5", "2");
+        let colors = a.led_preview_colors().unwrap();
+        assert_eq!(colors.len(), 10);
+        assert_eq!(colors[9], colors[0]);
+        assert_eq!(colors[5], colors[4]);
+        // A plain left-to-right sweep shows the stored colors as they are.
+        let a = leds_app("5", "0");
+        let colors = a.led_preview_colors().unwrap();
+        assert_eq!(colors[0].to_hex(), "ff0000");
+        assert_eq!(colors[9].to_hex(), "000000");
+    }
+
+    #[test]
+    fn led_preview_colors_none_without_readable_colors() {
+        let a = app(); // no LIGHTSYNC attrs in this fixture
+        assert!(a.led_preview_colors().is_none());
+    }
+
+    #[test]
+    fn lightsync_page_hides_the_slot_group_for_builtin_effects() {
+        let a = leds_app("3", "0");
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["wheel_led_effect", "wheel_led_brightness"]);
+    }
+
+    #[test]
+    fn lightsync_page_shows_the_indented_slot_group_for_the_custom_effect() {
+        let a = leds_app("5", "0");
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(
+            attrs,
+            vec![
+                "wheel_led_effect",
+                "wheel_led_brightness",
+                "wheel_led_slot_name",
+                "wheel_led_slot_brightness",
+                "wheel_led_direction",
+                "wheel_led_colors",
+                "wheel_led_apply",
+            ]
+        );
+        let name_row = a.rows.iter().find(|r| r.attr == "wheel_led_slot_name").unwrap();
+        assert!(name_row.label.starts_with("  "), "slot rows are indented: {:?}", name_row.label);
+    }
+
+    #[test]
+    fn effect_row_opens_the_selector_with_the_current_entry() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("5", "0");
+        a.row_idx = 0;
+        a.on_key(KeyCode::Enter);
+        let fe = a.effect_edit.as_ref().expect("Enter opens the effect selector");
+        assert_eq!(fe.labels.len(), 9, "4 sweeps + 5 custom slots, no unlabeled effects");
+        assert_eq!(fe.index, 4, "effect 5 + slot 0 = CUSTOM 1");
+        assert_eq!(fe.labels[4], "CUSTOM 1: RACE", "the active slot's name is shown");
+        assert!(a.edit.is_none(), "not the inline field editor");
+    }
+
+    #[test]
+    fn effect_selector_cycles_and_wraps_both_ways() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("1", "0");
+        a.row_idx = 0;
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.effect_edit.as_ref().unwrap().index, 0);
+        a.on_key(KeyCode::Left);
+        assert_eq!(a.effect_edit.as_ref().unwrap().index, 8, "left from the first entry wraps");
+        a.on_key(KeyCode::Right);
+        assert_eq!(a.effect_edit.as_ref().unwrap().index, 0);
+        a.on_key(KeyCode::Esc);
+        assert!(a.effect_edit.is_none(), "Esc discards without writing");
+        assert_eq!(a.device.read("wheel_led_effect").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn effect_readback_of_7_round_trips_as_custom_3() {
+        use crossterm::event::KeyCode;
+        // Device effects 5-9 ARE the custom slots: a readback of 7 must
+        // show as CUSTOM 3 (slot 2), never a raw "Effect 7" entry, and
+        // re-committing the entry resolves to the slot write pair.
+        let mut a = leds_app("7", "0");
+        a.row_idx = 0;
+        assert_eq!(a.lightsync_effect_label(), "CUSTOM 3");
+        a.on_key(KeyCode::Enter);
+        {
+            let fe = a.effect_edit.as_ref().unwrap();
+            assert_eq!(fe.labels.len(), 9, "no trailing raw entry for a decoded value");
+            assert_eq!(fe.index, 6, "effect 7 = CUSTOM 3 = selector index 6");
+            assert_eq!(fe.labels[6], "CUSTOM 3");
+        }
+        a.on_key(KeyCode::Enter); // commit the same entry
+        assert_eq!(a.device.read("wheel_led_slot").unwrap(), Value::Int(2));
+        assert_eq!(a.device.read("wheel_led_effect").unwrap(), Value::Int(5));
+        assert!(
+            a.lightsync_effect_label().starts_with("CUSTOM 3"),
+            "label survives the round trip"
+        );
+    }
+
+    #[test]
+    fn effect_selector_custom_commit_writes_slot_then_effect() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("1", "0");
+        a.row_idx = 0;
+        a.on_key(KeyCode::Enter);
+        for _ in 0..6 {
+            a.on_key(KeyCode::Right); // index 6 = CUSTOM 3
+        }
+        a.on_key(KeyCode::Enter);
+        assert!(a.effect_edit.is_none());
+        assert_eq!(a.device.read("wheel_led_slot").unwrap(), Value::Int(2));
+        assert_eq!(a.device.read("wheel_led_effect").unwrap(), Value::Int(5));
+        // the slot group appears after the reload the commit triggers
+        assert!(a.rows.iter().any(|r| r.attr == "wheel_led_colors"));
+    }
+
+    #[test]
+    fn effect_selector_sweep_commit_writes_only_the_effect() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("1", "0");
+        a.row_idx = 0;
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Right); // index 1 = Outside in = effect 2
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.device.read("wheel_led_effect").unwrap(), Value::Int(2));
+        assert_eq!(a.device.read("wheel_led_slot").unwrap(), Value::Int(0), "slot untouched");
+    }
+
+    #[test]
+    fn enter_on_the_colors_row_opens_the_picker_not_the_inline_editor() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("5", "0");
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_led_colors").unwrap();
+        a.on_key(KeyCode::Enter);
+        let picker = a.color_picker.as_ref().expect("the picker opens");
+        assert_eq!(picker.colors.len(), 10);
+        assert_eq!(picker.colors[0].to_hex(), "ff0000", "seeded from the wheel");
+        assert!(a.edit.is_none(), "not the raw hex line editor");
+    }
+
+    #[test]
+    fn picker_esc_cancels_without_writing_and_w_commits() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("5", "0");
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_led_colors").unwrap();
+        a.on_key(KeyCode::Enter);
+        // Paint LED 1 with the palette's Blue, then cancel: no write.
+        a.color_picker.as_mut().unwrap().palette = 10;
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Esc);
+        assert!(a.color_picker.is_none());
+        match a.device.read("wheel_led_colors").unwrap() {
+            Value::Rgb(cs) => assert_eq!(cs[0].to_hex(), "ff0000", "Esc never writes"),
+            v => panic!("expected colors, got {v:?}"),
+        }
+        // Same edit again, committed with w: the write lands.
+        a.on_key(KeyCode::Enter);
+        a.color_picker.as_mut().unwrap().palette = 10;
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Char('w'));
+        assert!(a.color_picker.is_none());
+        match a.device.read("wheel_led_colors").unwrap() {
+            Value::Rgb(cs) => assert_eq!(cs[0].to_hex(), "0000ff", "w writes the strip"),
+            v => panic!("expected colors, got {v:?}"),
+        }
+        assert!(a.status.contains("Colors set"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn colors_commit_mirrors_the_left_half_when_the_direction_mirrors() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("5", "2"); // inside-out
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_led_colors").unwrap();
+        a.on_key(KeyCode::Enter); // open the color picker
+        a.on_key(KeyCode::Char('w')); // commit unchanged
+        match a.device.read("wheel_led_colors").unwrap() {
+            Value::Rgb(cs) => {
+                for i in 0..5 {
+                    assert_eq!(cs[9 - i], cs[i], "LED {} mirrors LED {}", 10 - i, i + 1);
+                }
+                assert_eq!(cs[0].to_hex(), "ff0000", "the left half is untouched");
+                assert_eq!(cs[4].to_hex(), "222222");
+            }
+            v => panic!("expected colors, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn colors_commit_stays_untouched_for_a_sweep_direction() {
+        use crossterm::event::KeyCode;
+        let mut a = leds_app("5", "0"); // left to right
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_led_colors").unwrap();
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Char('w'));
+        match a.device.read("wheel_led_colors").unwrap() {
+            Value::Rgb(cs) => {
+                assert_eq!(cs[9].to_hex(), "000000", "no mirroring for a sweep");
+                assert_eq!(cs[0].to_hex(), "ff0000");
+            }
+            v => panic!("expected colors, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_label_names_the_active_custom_slot() {
+        let a = leds_app("5", "0");
+        assert_eq!(a.lightsync_effect_label(), "CUSTOM 1: RACE");
+        let b = leds_app("4", "0");
+        assert_eq!(b.lightsync_effect_label(), "Left to right");
+    }
+
+    // --- advanced shaping toggle ---
+
+    fn steering_app() -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_sensitivity", "50");
+        fs.set("wheel_response_curve", "reset");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Steering).unwrap();
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn shaping_toggles_head_each_axis_block_on_steering_and_pedals_only() {
+        use shaping::Axis;
+        let a = steering_app();
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        // The steering toggle heads the axis block (right before the
+        // sensitivity row), not the whole page.
+        let toggle = attrs.iter().position(|a| *a == shaping::toggle_attr(Axis::Steering)).unwrap();
+        assert_eq!(attrs[toggle + 1], "wheel_sensitivity");
+        let mut p = steering_app();
+        p.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        p.reload();
+        let pattrs: Vec<&str> = p.rows.iter().map(|r| r.attr.as_str()).collect();
+        for ax in [Axis::Throttle, Axis::Brake, Axis::Clutch, Axis::Handbrake] {
+            assert!(pattrs.contains(&shaping::toggle_attr(ax)), "missing {ax:?} toggle");
+        }
+        let ffb = app(); // first category, Ffb
+        assert!(!ffb.has_shaping_toggle(), "Ffb has no shaping generators");
+    }
+
+    #[test]
+    fn simple_mode_shows_sensitivity_and_hides_curves() {
+        let a = steering_app();
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(attrs.contains(&"wheel_sensitivity"));
+        assert!(!attrs.contains(&"wheel_response_curve"));
+    }
+
+    #[test]
+    fn enter_on_a_toggle_row_switches_its_axis_without_a_device_write() {
+        use crossterm::event::KeyCode;
+        let mut a = steering_app();
+        a.row_idx =
+            a.rows.iter().position(|r| r.attr == shaping::toggle_attr(shaping::Axis::Steering)).unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.shaping_toggles.get(shaping::Axis::Steering));
+        assert!(a.edit.is_none(), "no inline editor opens");
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(attrs.contains(&"wheel_response_curve"));
+        assert!(!attrs.contains(&"wheel_sensitivity"));
+        // Pure view state: the reserved attr never reaches the device.
+        assert!(a.device.read(shaping::toggle_attr(shaping::Axis::Steering)).is_err());
+    }
+
+    #[test]
+    fn a_key_toggles_the_selected_rows_axis_and_back() {
+        use crossterm::event::KeyCode;
+        let mut a = steering_app();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_sensitivity").unwrap();
+        a.on_key(KeyCode::Char('a'));
+        assert!(a.shaping_toggles.get(shaping::Axis::Steering));
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_response_curve").unwrap();
+        a.on_key(KeyCode::Char('a'));
+        assert!(!a.shaping_toggles.get(shaping::Axis::Steering));
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(attrs.contains(&"wheel_sensitivity"), "back to the simple view");
+    }
+
+    #[test]
+    fn a_key_does_nothing_on_a_row_without_an_axis() {
+        use crossterm::event::KeyCode;
+        let mut a = app(); // Ffb
+        let before: Vec<String> = a.rows.iter().map(|r| r.attr.clone()).collect();
+        a.on_key(KeyCode::Char('a'));
+        assert_eq!(a.shaping_toggles, shaping::AxisToggles::default());
+        let after: Vec<String> = a.rows.iter().map(|r| r.attr.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn pedal_axes_toggle_independently_and_keep_deadzones() {
+        let mut a = steering_app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        a.reload();
+        let simple: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(simple.contains(&"wheel_throttle_deadzone"));
+        assert!(simple.contains(&"wheel_throttle_sensitivity"));
+        assert!(!simple.contains(&"wheel_throttle_curve"));
+        // Brake to the curve view; the throttle stays on sensitivity.
+        a.toggle_shaping(shaping::Axis::Brake);
+        let mixed: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(mixed.contains(&"wheel_brake_curve"));
+        assert!(!mixed.contains(&"wheel_brake_sensitivity"));
+        assert!(mixed.contains(&"wheel_brake_deadzone"));
+        assert!(mixed.contains(&"wheel_throttle_sensitivity"));
+        assert!(!mixed.contains(&"wheel_throttle_curve"));
+        // Every axis on the curve view: no sensitivities remain.
+        for ax in [shaping::Axis::Throttle, shaping::Axis::Clutch, shaping::Axis::Handbrake] {
+            a.toggle_shaping(ax);
+        }
+        let curves: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(curves.contains(&"wheel_throttle_curve"));
+        assert!(curves.contains(&"wheel_handbrake_curve"));
+        assert!(curves.contains(&"wheel_clutch_deadzone"));
+        assert!(!curves.iter().any(|a| a.ends_with("_sensitivity")));
+    }
+
+    #[test]
+    fn shaping_state_survives_a_category_round_trip() {
+        let mut a = steering_app();
+        a.toggle_shaping(shaping::Axis::Steering);
+        assert!(a.shaping_toggles.get(shaping::Axis::Steering));
+        a.move_cat(-1); // away to Ffb
+        a.move_cat(1); // and back to Steering
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert!(attrs.contains(&"wheel_response_curve"), "still the curve view after navigation");
+    }
+
+    #[test]
+    fn profile_names_parsed_by_slot() {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_profile_names", "1: AC EVO\n2: GT7\n3: PROFILE 3");
+        let a = App::new(logi_wheel_core::Device::with_io(fs));
+        let names = a.profile_names();
+        assert_eq!(names.get(&1).map(String::as_str), Some("AC EVO"));
+        assert_eq!(names.get(&2).map(String::as_str), Some("GT7"));
+        assert_eq!(names.get(&3).map(String::as_str), Some("PROFILE 3"));
+    }
+
+    // --- Simulated TrueForce (Setup view) ---
+
+    /// A fresh, unique tf-sim.conf path per test.
+    fn tf_conf_tempfile() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "logi-wheel-tui-tfsim-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("tf-sim.conf")
+    }
+
+    /// `setup_app` with the tf-sim state pointed away from the real
+    /// machine: a temp conf and no resolved binary.
+    fn tf_setup_app() -> App<FakeSysfs> {
+        let mut a = setup_app();
+        a.tf_conf = tf_conf_tempfile();
+        a.tf_reload();
+        a.tf_bin = None;
+        a
+    }
+
+    #[test]
+    fn setup_m_toggles_the_tf_master_switch() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        assert!(a.tf_cfg.enabled, "defaults on");
+        a.on_key(KeyCode::Char('m'));
+        assert!(!a.tf_cfg.enabled);
+        let text = std::fs::read_to_string(&a.tf_conf).unwrap();
+        assert!(text.contains("enabled=0"), "conf written: {text}");
+        a.on_key(KeyCode::Char('m'));
+        assert!(a.tf_cfg.enabled);
+    }
+
+    #[test]
+    fn setup_e_edits_the_master_intensity_with_range_check() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('e'));
+        assert_eq!(a.tf_intensity_edit.as_deref(), Some("60"), "draft seeds from the value");
+        a.on_key(KeyCode::Backspace);
+        a.on_key(KeyCode::Backspace);
+        a.on_key(KeyCode::Char('4'));
+        a.on_key(KeyCode::Char('5'));
+        a.on_key(KeyCode::Enter);
+        assert!(a.tf_intensity_edit.is_none());
+        assert_eq!(a.tf_cfg.intensity, 45);
+        // Out of range never writes; the draft's letters never register.
+        a.on_key(KeyCode::Char('e'));
+        a.on_key(KeyCode::Char('x'));
+        a.on_key(KeyCode::Char('9'));
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.tf_cfg.intensity, 45, "459 is out of range, nothing written");
+        assert!(a.status.contains("0-100"), "status: {}", a.status);
+        // Esc discards.
+        a.on_key(KeyCode::Char('e'));
+        a.on_key(KeyCode::Esc);
+        assert!(a.tf_intensity_edit.is_none());
+        assert_eq!(a.tf_cfg.intensity, 45);
+    }
+
+    #[test]
+    fn setup_p_edits_pitch_with_its_own_range() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('p'));
+        assert_eq!(a.tf_pitch_edit.as_deref(), Some("50"), "the default pitch seeds the editor");
+        for _ in 0..3 {
+            a.on_key(KeyCode::Backspace);
+        }
+        a.on_key(KeyCode::Char('5'));
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.tf_cfg.pitch_pct, 50, "5 is below the 10-200 range");
+        assert!(a.status.contains("10-200"), "status: {}", a.status);
+        a.on_key(KeyCode::Char('p'));
+        for _ in 0..3 {
+            a.on_key(KeyCode::Backspace);
+        }
+        for c in "150".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.tf_cfg.pitch_pct, 150);
+    }
+
+    #[test]
+    fn setup_g_toggles_only_games_with_a_daemon_id() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        // The selected fixture game (ACC, a shim title) has no tf-sim id.
+        a.on_key(KeyCode::Char('g'));
+        assert!(a.status.contains("no per-game support"), "status: {}", a.status);
+        assert!(a.tf_cfg.games.is_empty(), "nothing written");
+        // A mapped title (Steam's own casing) toggles its daemon id.
+        a.games.push(wine_game("DiRT Rally 2.0", "/lib/steamapps/compatdata/690790/pfx", false));
+        a.game_idx = 2;
+        a.on_key(KeyCode::Char('g'));
+        assert!(!a.tf_cfg.game("dirt-rally-2").enabled);
+        let text = std::fs::read_to_string(&a.tf_conf).unwrap();
+        assert!(text.contains("game.dirt-rally-2.enabled=0"), "conf written: {text}");
+        a.on_key(KeyCode::Char('g'));
+        assert!(a.tf_cfg.game("dirt-rally-2").enabled);
+    }
+
+    #[test]
+    fn setup_t_arms_consent_and_only_y_plays() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        // No binary: nothing arms.
+        a.on_key(KeyCode::Char('t'));
+        assert!(!a.tf_sweep_confirm);
+        assert!(a.status.contains("not found"), "status: {}", a.status);
+        // A harmless stand-in binary (never the real logi-tf-sim in a
+        // unit test): /bin/true takes the --sweep argument and exits 0.
+        a.tf_bin = Some(PathBuf::from("/bin/true"));
+        a.on_key(KeyCode::Char('t'));
+        assert!(a.tf_sweep_confirm);
+        assert!(
+            a.status.contains("WILL produce haptic force"),
+            "safety text shown: {}",
+            a.status
+        );
+        // Anything but y cancels; nothing spawns.
+        a.on_key(KeyCode::Char('n'));
+        assert!(!a.tf_sweep_confirm);
+        assert!(!a.tf_sweep_active(), "nothing played");
+        assert!(a.status.contains("cancelled"), "status: {}", a.status);
+        // y plays; the main loop's tick reaps the exit.
+        a.on_key(KeyCode::Char('t'));
+        a.on_key(KeyCode::Char('y'));
+        assert!(a.tf_sweep_active());
+        for _ in 0..100 {
+            a.tick_tf_sweep();
+            if !a.tf_sweep_active() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!a.tf_sweep_active(), "the exited sweep is reaped");
+        assert!(a.status.contains("finished"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn setup_s_stops_a_playing_sweep_and_edits_the_sdk_dir_otherwise() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        // A stub that ignores nothing: exits 0 on SIGTERM, like the real
+        // daemon's clean-stop path. Runs ~30 s if never signalled, so the
+        // reap below only passes when the stop really landed.
+        let stub = a.tf_conf.with_file_name("logi-tf-sim-stub");
+        std::fs::write(&stub, "#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30 &\nwait $!\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        a.tf_bin = Some(stub);
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('t'));
+        a.on_key(KeyCode::Char('y'));
+        assert!(a.tf_sweep_active());
+        // s stops the sweep from anywhere in Setup; never the SDK editor.
+        a.on_key(KeyCode::Char('s'));
+        assert!(a.sdk_edit.is_none());
+        for _ in 0..200 {
+            a.tick_tf_sweep();
+            if !a.tf_sweep_active() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!a.tf_sweep_active(), "SIGTERM stopped the stub");
+        // With no sweep playing, s belongs to the SDK section only.
+        a.on_key(KeyCode::Char('s'));
+        assert!(a.sdk_edit.is_none(), "s is inert inside Simulated TF");
+        a.on_key(KeyCode::Esc);
+        a.setup_section_idx =
+            SetupSection::ALL.iter().position(|s| *s == SetupSection::Sdk).unwrap();
+        a.on_key(KeyCode::Char('s'));
+        assert!(a.sdk_edit.is_some());
+    }
+
+    #[test]
+    fn tf_probe_scans_the_configured_proc_root() {
+        let mut a = tf_setup_app();
+        let proc_root = tf_conf_tempfile().parent().unwrap().to_path_buf();
+        a.proc_root = proc_root.clone();
+        a.tf_probe();
+        assert!(!a.tf_daemon, "empty proc root: not running");
+        let pid_dir = proc_root.join("4242");
+        std::fs::create_dir_all(&pid_dir).unwrap();
+        std::fs::write(pid_dir.join("stat"), "4242 (logi-tf-sim) S 1 4242").unwrap();
+        a.tf_probe();
+        assert!(a.tf_daemon);
+    }
+
+    #[test]
+    fn tf_edit_and_confirm_states_pause_the_drift_watcher() {
+        let mut a = tf_setup_app();
+        a.tf_sweep_confirm = true;
+        assert!(!a.check_drift(), "a pending consent never races a reload");
+        a.tf_sweep_confirm = false;
+        a.tf_intensity_edit = Some("6".to_string());
+        assert!(!a.check_drift());
+        a.tf_intensity_edit = None;
+        a.tf_pitch_edit = Some("1".to_string());
+        assert!(!a.check_drift());
+    }
+
+    // --- mode-coupled Profiles page ---
+
+    /// A fresh, unique temp directory per test for the computer-side
+    /// profile store.
+    fn profiles_tempdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "logi-wheel-tui-profiles-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn profiles_app(mode: &str) -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", mode);
+        fs.set("wheel_strength", "62");
+        fs.set("wheel_profile", "2");
+        fs.set("wheel_profile_names", "1: AC EVO\n2: GT7");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.profiles_dir = profiles_tempdir();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn onboard_profiles_page_shows_the_wheel_slot_rows() {
+        let a = profiles_app("onboard");
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["wheel_mode", "wheel_profile", "wheel_profile_names"]);
+    }
+
+    #[test]
+    fn desktop_profiles_page_shows_mode_plus_the_computer_store() {
+        let a = profiles_app("desktop");
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["wheel_mode", PROFILE_NEW_ATTR], "empty store: just Mode + Save");
+    }
+
+    #[test]
+    fn mode_toggle_recomposes_the_profiles_page() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("desktop");
+        a.on_key(KeyCode::Char('d')); // Mode row selected: toggles the mode
+        assert_eq!(a.device.current_mode().unwrap(), Mode::Onboard);
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["wheel_mode", "wheel_profile", "wheel_profile_names"]);
+        a.on_key(KeyCode::Char('d'));
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["wheel_mode", PROFILE_NEW_ATTR]);
+    }
+
+    #[test]
+    fn save_prompt_creates_a_profile_row() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("desktop");
+        // Enter on the Save row opens the name prompt.
+        a.row_idx = a.rows.iter().position(|r| r.attr == PROFILE_NEW_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.profile_name_edit.as_deref(), Some(""));
+        for c in "race".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Enter);
+        assert!(a.profile_name_edit.is_none());
+        assert!(a.status.contains("saved"), "status: {}", a.status);
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec!["wheel_mode", "profile:race", PROFILE_NEW_ATTR]);
+        // The file really is a snapshot of the device.
+        let text =
+            std::fs::read_to_string(a.profiles_dir.join("race.profile")).unwrap();
+        assert!(text.contains("wheel_strength=62"));
+    }
+
+    #[test]
+    fn n_opens_the_prompt_and_esc_discards_it() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("desktop");
+        a.on_key(KeyCode::Char('n'));
+        assert!(a.profile_name_edit.is_some());
+        a.on_key(KeyCode::Char('x'));
+        a.on_key(KeyCode::Esc);
+        assert!(a.profile_name_edit.is_none());
+        assert!(!a.rows.iter().any(|r| r.attr.starts_with(PROFILE_ROW_PREFIX)), "nothing saved");
+        // 'n' outside the desktop Profiles page does nothing.
+        let mut b = profiles_app("onboard");
+        b.on_key(KeyCode::Char('n'));
+        assert!(b.profile_name_edit.is_none());
+    }
+
+    #[test]
+    fn enter_on_a_saved_profile_applies_it() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("desktop");
+        profiles::save_in(&a.profiles_dir, "race", &a.device).unwrap();
+        // Drift a setting, then apply the snapshot back.
+        a.device.write("wheel_strength", &Value::Percent(10)).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "profile:race").unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("applied"), "status: {}", a.status);
+        assert_eq!(a.device.read("wheel_strength").unwrap(), Value::Percent(62));
+    }
+
+    #[test]
+    fn d_on_a_profile_row_arms_a_delete_confirm() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("desktop");
+        profiles::save_in(&a.profiles_dir, "race", &a.device).unwrap();
+        a.reload();
+        a.row_idx = a.rows.iter().position(|r| r.attr == "profile:race").unwrap();
+        a.on_key(KeyCode::Char('d'));
+        assert_eq!(a.profile_delete_confirm.as_deref(), Some("race"));
+        assert_eq!(a.device.current_mode().unwrap(), Mode::Desktop, "no mode toggle");
+        // Anything but y cancels.
+        a.on_key(KeyCode::Char('x'));
+        assert!(a.profile_delete_confirm.is_none());
+        assert!(a.rows.iter().any(|r| r.attr == "profile:race"), "still saved");
+        // y really deletes.
+        a.on_key(KeyCode::Char('d'));
+        a.on_key(KeyCode::Char('y'));
+        assert!(!a.rows.iter().any(|r| r.attr == "profile:race"));
+        assert!(a.status.contains("deleted"), "status: {}", a.status);
+    }
+
+    // --- the no-wheel state machine ---
+
+    /// An app whose device probes as absent (an empty fake sysfs).
+    fn no_wheel_app() -> App<FakeSysfs> {
+        let a = App::new(logi_wheel_core::Device::with_io(FakeSysfs::new()));
+        assert!(a.no_wheel, "an empty sysfs probes as no wheel");
+        a
+    }
+
+    #[test]
+    fn no_wheel_starts_into_the_shell_with_empty_categories() {
+        let mut a = no_wheel_app();
+        // Every device category shows the empty state (no rows), Setup
+        // stays a full page.
+        for _ in 0..Category::ALL.len() + 1 {
+            assert!(a.rows.is_empty(), "no rows in the no-wheel state (cat {})", a.cat_idx);
+            a.move_cat(1);
+        }
+    }
+
+    #[test]
+    fn no_wheel_survives_every_keypress() {
+        use crossterm::event::KeyCode::*;
+        // Walk every category (Setup and Info included) mashing the whole
+        // key map; nothing may panic and nothing may open an editor.
+        let mut a = no_wheel_app();
+        for _ in 0..Category::ALL.len() + 1 {
+            for key in [
+                Enter,
+                Up,
+                Down,
+                Char('a'),
+                Char('d'),
+                Char('f'),
+                Char('t'),
+                Char('n'),
+                Char('i'),
+                Char('u'),
+                Char('s'),
+                Char('y'),
+                Esc,
+                Backspace,
+            ] {
+                a.on_key(key);
+            }
+            // Leave any editor/prompt a key might have opened (Setup's
+            // 's' SDK editor), then move on.
+            a.on_key(Esc);
+            assert!(a.edit.is_none() && a.curve_edit.is_none(), "no editor without rows");
+            a.move_cat(1);
+        }
+        assert!(!a.quit);
+    }
+
+    #[test]
+    fn no_wheel_r_queues_a_retry_once() {
+        use crossterm::event::KeyCode;
+        let mut a = no_wheel_app();
+        assert!(!a.take_retry_request(), "nothing queued at startup");
+        a.on_key(KeyCode::Char('r'));
+        assert!(a.take_retry_request());
+        assert!(!a.take_retry_request(), "taken once");
+        // With a wheel present, r reloads instead of queueing.
+        let mut b = app();
+        b.on_key(KeyCode::Char('r'));
+        assert!(!b.take_retry_request());
+    }
+
+    #[test]
+    fn info_r_without_a_wheel_also_queues_a_retry() {
+        use crossterm::event::KeyCode;
+        let mut a = no_wheel_app();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Info).unwrap();
+        a.reload();
+        assert!(a.is_info());
+        a.on_key(KeyCode::Char('r'));
+        assert!(a.take_retry_request());
+    }
+
+    #[test]
+    fn adopt_device_restores_live_behavior() {
+        let mut a = no_wheel_app();
+        // Ffb, where wheel_strength lives (the default category is Info).
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        assert!(a.rows.is_empty());
+        let fs = FakeSysfs::new();
+        fs.set("wheel_strength", "62");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_mode", "desktop");
+        a.adopt_device(logi_wheel_core::Device::with_io(fs));
+        assert!(!a.no_wheel);
+        assert!(a.status.contains("wheel found"), "status: {}", a.status);
+        assert!(a.rows.iter().any(|r| r.attr == "wheel_strength"), "rows are live again");
+    }
+
+    #[test]
+    fn adopt_device_with_still_no_wheel_stays_in_the_empty_state() {
+        let mut a = no_wheel_app();
+        a.adopt_device(logi_wheel_core::Device::with_io(FakeSysfs::new()));
+        assert!(a.no_wheel);
+        assert!(a.rows.is_empty());
+        assert!(a.status.contains("no wheel"), "status: {}", a.status);
+    }
+
+    #[test]
+    fn no_wheel_setup_stays_usable() {
+        use crossterm::event::KeyCode;
+        let mut a = no_wheel_app();
+        for _ in 0..Category::ALL.len() {
+            a.move_cat(1);
+        }
+        assert!(a.is_setup());
+        a.games = vec![wine_game("Assetto Corsa Competizione", "/lib/steamapps/compatdata/100/pfx", false)];
+        a.games_scanned = true;
+        // Pinned rather than resolved: the real resolution reads this
+        // machine's environment (repo sdk/, env var).
+        a.sdk_resolved = None;
+        a.focus = Focus::Content;
+        a.setup_section_idx =
+            SetupSection::ALL.iter().position(|s| *s == SetupSection::Games).unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.setup_inside, "the games list opens without a wheel");
+        a.on_key(KeyCode::Char('i'));
+        let (args, verb) = a.take_pending_shim().expect("shim installs work without a wheel");
+        assert_eq!(verb, "install");
+        assert!(!args.contains(&"--sdk-dir".to_string()), "nothing resolved: the flag is omitted");
+    }
+
+    #[test]
+    fn onboard_profile_picker_bumps_within_1_to_5() {
+        use crossterm::event::KeyCode;
+        let mut a = profiles_app("onboard");
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_profile").unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.edit.is_some());
+        a.on_key(KeyCode::Left); // 2 -> 1
+        a.on_key(KeyCode::Left); // clamps at 1, never 0
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.device.read("wheel_profile").unwrap(), Value::Int(1));
+        a.on_key(KeyCode::Enter);
+        for _ in 0..9 {
+            a.on_key(KeyCode::Right); // clamps at 5
+        }
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.device.read("wheel_profile").unwrap(), Value::Int(5));
+    }
+
+    // --- viewport scrolling (the Setup and Info/Testing composed views) ---
+
+    #[test]
+    fn scroll_offset_clamps_to_the_content_height() {
+        let mut a = setup_app();
+        a.body_height.set(10); // what a small terminal's draw recorded
+        let max = a.max_scroll();
+        assert!(max > 0, "the Setup view is taller than 10 lines");
+        a.scroll_view(10_000);
+        assert_eq!(a.setup_scroll, max, "clamped at the last full viewport");
+        a.scroll_view(-10_000);
+        assert_eq!(a.setup_scroll, 0, "never negative");
+    }
+
+    #[test]
+    fn setup_page_keys_scroll_and_the_game_keys_stay_selection() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        a.body_height.set(10);
+        a.on_key(KeyCode::PageDown);
+        assert!(a.setup_scroll > 0, "PgDn scrolls the Setup view");
+        let scrolled = a.setup_scroll;
+        // Up/Down keep their game-selection meaning, untouched by scrolling.
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.game_idx, 1, "Down still selects the next game");
+        assert_eq!(a.setup_scroll, scrolled, "Down does not scroll Setup");
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.game_idx, 0, "Up still selects the previous game");
+        assert_eq!(a.setup_scroll, scrolled);
+        a.on_key(KeyCode::PageUp);
+        assert_eq!(a.setup_scroll, 0, "PgUp scrolls back to the top");
+    }
+
+    #[test]
+    fn setup_section_cursor_scrolls_its_section_into_view() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        a.body_height.set(8); // a small viewport: the page cannot fit
+        for _ in 0..SetupSection::ALL.len() {
+            a.on_key(KeyCode::Down);
+        }
+        assert_eq!(a.setup_section(), SetupSection::SimTf);
+        assert!(
+            a.setup_scroll > 0,
+            "moving to the last section scrolled the view down"
+        );
+        for _ in 0..SetupSection::ALL.len() {
+            a.on_key(KeyCode::Up);
+        }
+        assert_eq!(a.setup_scroll, 0, "moving back up scrolled back to the top");
+    }
+
+    #[test]
+    fn info_view_scrolls_with_updown_and_the_page_keys() {
+        use crossterm::event::KeyCode;
+        let mut a = info_view_app();
+        a.body_height.set(5); // small enough that even the empty state clips
+        assert!(a.max_scroll() > 0, "the Info view is taller than 5 lines");
+        a.on_key(KeyCode::Down);
+        assert_eq!(a.info_scroll, 1, "Down scrolls one line (no list selection here)");
+        a.on_key(KeyCode::Up);
+        assert_eq!(a.info_scroll, 0);
+        a.on_key(KeyCode::PageDown);
+        assert_eq!(a.info_scroll, u16::try_from(a.scroll_page()).unwrap().min(a.max_scroll()));
+        a.on_key(KeyCode::PageUp);
+        assert_eq!(a.info_scroll, 0);
+    }
+
+    #[test]
+    fn switching_views_resets_the_scroll_offsets() {
+        let mut a = setup_app();
+        a.body_height.set(10);
+        a.scroll_view(3);
+        assert_eq!(a.setup_scroll, 3);
+        a.move_cat(1); // leave Setup (wraps to the first category)
+        assert_eq!(a.setup_scroll, 0, "a fresh view starts at its top");
+        let mut a = info_view_app();
+        a.body_height.set(5);
+        a.scroll_view(2);
+        assert_eq!(a.info_scroll, 2);
+        a.move_cat(-1);
+        assert_eq!(a.info_scroll, 0);
+    }
+
+    #[test]
+    fn scrolling_is_a_noop_on_the_plain_settings_views() {
+        use crossterm::event::KeyCode;
+        let mut a = app();
+        // A plain (non-composed) settings page; the default is Info, which
+        // IS composed/scrollable, so this needs an explicit category.
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Ffb).unwrap();
+        a.reload();
+        a.body_height.set(5);
+        a.on_key(KeyCode::PageDown);
+        assert_eq!((a.info_scroll, a.setup_scroll), (0, 0));
+        assert_eq!(a.scroll_content_height(), 0, "no composed content to scroll");
+    }
+}

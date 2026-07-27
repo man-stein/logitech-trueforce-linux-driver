@@ -1,4 +1,4 @@
-<img src="docs/images/logo.svg" align="right" width="120" alt="logi-dd logo"/>
+<img src="docs/images/logo.svg" align="right" width="120" alt="logi-wheel logo"/>
 
 # Logitech TrueForce Linux Driver
 
@@ -7,8 +7,8 @@ wheels: the **RS50** and the **G PRO Racing Wheel**. It brings force feedback,
 TrueForce haptics (native, and simulated from game telemetry for titles
 without it), a live RPM rev-light display, LIGHTSYNC LED control, and
 G HUB-equivalent wheel settings to Linux, including in Proton/Wine sims -
-all managed from a desktop app (**logi-dd-gui**) or a terminal one
-(**logi-dd**).
+all managed from a desktop app (**logi-wheel-gui**) or a terminal one
+(**logi-wheel**).
 
 > Not a direct-drive wheel? The belt-driven **G920** is already served by the
 > in-tree `hid-logitech-hidpp` driver and does not need this one. The **G923**
@@ -55,11 +55,11 @@ Six pieces, all built from this repository:
   (`c266`/`c267`/`c26e`) with a separate feature set; see
   [G923 support](#g923-support) below for how that differs.
 
-- **logi-dd**, a terminal settings app: a native-Linux stand-in for the parts of
+- **logi-wheel**, a terminal settings app: a native-Linux stand-in for the parts of
   G HUB that configure the wheel, with typed, validated edits and a G HUB-style
   curve editor. So you do not have to `echo` values into sysfs by hand.
 
-- **logi-dd-gui**, the same settings surface as a desktop app (Slint): every
+- **logi-wheel-gui**, the same settings surface as a desktop app (Slint): every
   wheel setting, a LIGHTSYNC editor with per-slot colors and animation
   direction (changes apply to the wheel immediately), per-game TrueForce shim
   and simulated-TrueForce management on a Setup page that finds your sims across
@@ -68,7 +68,7 @@ Six pieces, all built from this repository:
   live input tester (rotating wheel diagram, button and pedal readouts) and
   guarded, cancelable force simulations.
 
-  ![logi-dd-gui settings](docs/images/logi-dd.png)
+  ![logi-wheel-gui settings](docs/images/logi-wheel.png)
 
 - **logi-ffb**, a DirectInput force-feedback proxy for Wine/Proton sims that lose
   force feedback on the `PROTON_ENABLE_HIDRAW=1` path (see below).
@@ -84,7 +84,7 @@ Six pieces, all built from this repository:
   SDK, for apps that want to drive TrueForce without Wine (a telemetry-driven
   haptic generator, for example). Optional; not needed for the Proton recipe.
 
-The distribution packages install the driver plus the `logi-dd`, `logi-dd-gui`,
+The distribution packages install the driver plus the `logi-wheel`, `logi-wheel-gui`,
 `logi-ffb` and `logi-tf-sim` tools; `libtrueforce` has its own build under
 `userspace/libtrueforce/`.
 
@@ -128,7 +128,7 @@ protocol, not the RS50/G PRO's endpoint-based one.
   other Logitech device - G29/G27/DFGT/G920, mice, keyboards, receivers - is
   untouched. The one exception is berarma's new-lg4ff (`hid-logitech-new`),
   blacklisted outright since it otherwise races us for `c266`/`c267`.
-- `logi-dd` and `logi-dd-gui` recognise the G923 and expose its four classic
+- `logi-wheel` and `logi-wheel-gui` recognise the G923 and expose its four classic
   settings, with its own wheel image on the Info/Testing page.
 
 ## Install
@@ -140,9 +140,9 @@ wiki page, and the one-time TrueForce SDK setup is on
 
 | Distribution | Install |
 |---|---|
-| Arch, CachyOS, Manjaro | `paru -S logi-dd-gui` (AUR, or your AUR helper; pulls `logi-dd` and the driver. Headless box: `paru -S logi-dd`) |
-| Debian, Ubuntu, Mint, Pop!_OS | download the `.deb`s from [Releases](https://github.com/mescon/logitech-trueforce-linux-driver/releases), then `sudo apt install ./logitech-trueforce-dkms_*.deb ./logi-dd_*.deb ./logi-dd-gui_*.deb` (skip the gui one on a headless box) |
-| Fedora, Nobara | COPR akmod: `sudo dnf copr enable mescon/logitech-trueforce && sudo dnf install akmod-logitech-trueforce logi-dd-gui` (headless box: `logi-dd` instead of `logi-dd-gui`) |
+| Arch, CachyOS, Manjaro | `paru -S logi-wheel-gui` (AUR, or your AUR helper; pulls `logi-wheel` and the driver. Headless box: `paru -S logi-wheel`) |
+| Debian, Ubuntu, Mint, Pop!_OS | download the `.deb`s from [Releases](https://github.com/mescon/logitech-trueforce-linux-driver/releases), then `sudo apt install ./logitech-trueforce-dkms_*.deb ./logi-wheel_*.deb ./logi-wheel-gui_*.deb` (skip the gui one on a headless box) |
+| Fedora, Nobara | COPR akmod: `sudo dnf copr enable mescon/logitech-trueforce && sudo dnf install akmod-logitech-trueforce logi-wheel-gui` (headless box: `logi-wheel` instead of `logi-wheel-gui`) |
 | openSUSE | OBS repo `home:mescon` (see the [Installation](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Installation) page) |
 | From source (any distro) | `git clone` this repo, then `sudo ./tools/setup.sh` (DKMS build, udev rule, everything). `./tools/setup.sh doctor` health-checks it. |
 
@@ -187,26 +187,26 @@ installed (it needs no group membership).
 
 ## Configuring the wheel
 
-Run **logi-dd-gui** (or **logi-dd** in a terminal) and edit settings live:
+Run **logi-wheel-gui** (or **logi-wheel** in a terminal) and edit settings live:
 rotation range, force-feedback strength and filters, TrueForce level, LIGHTSYNC
 LEDs, profiles, and per-pedal / steering response curves through a G HUB-style
 curve editor.
 
-![logi-dd-gui curve editor](docs/images/logi-dd-curve-editor.png)
+![logi-wheel-gui curve editor](docs/images/logi-wheel-curve-editor.png)
 
 The Info / Testing page doubles as a live input tester (does this button
 reach the computer?), and the Setup page manages the game helpers:
 
-![logi-dd-gui Info / Testing](docs/images/logi-dd-info-testing.png)
+![logi-wheel-gui Info / Testing](docs/images/logi-wheel-info-testing.png)
 
-![logi-dd-gui Setup](docs/images/logi-dd-setup.png)
+![logi-wheel-gui Setup](docs/images/logi-wheel-setup.png)
 
 ```bash
-cd userspace/logi-dd && cargo build --release
-./target/release/logi-dd-gui    # desktop app; ./target/release/logi-dd for the TUI
+cd userspace/logi-wheel && cargo build --release
+./target/release/logi-wheel-gui    # desktop app; ./target/release/logi-wheel for the TUI
 ```
 
-**logi-dd is the recommended way to configure these wheels** - it is built for
+**logi-wheel is the recommended way to configure these wheels** - it is built for
 them specifically and covers everything the driver exposes. Everything it sets
 is also available as plain sysfs attributes under
 `/sys/class/hidraw/hidrawX/device/wheel_*`, so you can script them directly; the
@@ -236,7 +236,7 @@ keeping hands clear during AC EVO map loads) are covered under
   module did not bind. Confirm it is loaded (`lsmod | grep hid_logitech_dd`),
   replug the wheel, and check `dmesg`. `./tools/setup.sh doctor` diagnoses this.
 - **Force feedback pulls the wrong way** (a native game and a Wine/Proton game can
-  want opposite signs): toggle **Invert constant force** in logi-dd (the
+  want opposite signs): toggle **Invert constant force** in logi-wheel (the
   `wheel_ffb_constant_sign` attribute).
 - **A game stops seeing the wheel after a driver reload:** restart Steam fully;
   its device list goes stale across reloads.

@@ -1,0 +1,467 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! The tf-sim configuration store.
+//!
+//! `$XDG_CONFIG_HOME/logi-wheel/tf-sim.conf` (falling back to
+//! `~/.config/logi-wheel/tf-sim.conf`), hand-rolled key=value in the same
+//! discipline as the logi-wheel profile store: trivial format, std only,
+//! comments and blank lines allowed, unknown or unparsable lines ignored
+//! individually so a hand-edited file never fails wholesale.
+//!
+//! Keys:
+//! - `enabled` (0/1): master switch
+//! - `intensity` (0-100): master intensity
+//! - `leds` (0/1): drive the wheel's rev display from telemetry RPM
+//! - `port.codemasters` (also serves modern F1 and EA Sports WRC),
+//!   `port.pcars`, `port.beamng`, `port.relay`: UDP listen ports
+//! - `game.<id>.enabled` (0/1), `game.<id>.intensity` (0-100)
+//! - `g923.ffb_invert` (0/1): sign flag for the G923 FFB mirror (see
+//!   [`crate::g923::Sign`]); hardware-calibrated on a c266, defaults to 1
+//!   (inverted). Set to 0 only if a given unit turns out to push the
+//!   wrong way. The `LOGI_TF_SIM_G923_FFB_SIGN` environment variable
+//!   overrides this for a one-off check without editing the file.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::error::{Error, Result};
+use crate::{beamng, codemasters, pcars, relay};
+
+/// First line of every saved file.
+pub const FILE_HEADER: &str = "# logi-tf-sim configuration";
+/// File name under the logi-wheel config directory.
+pub const FILE_NAME: &str = "tf-sim.conf";
+
+/// Default master intensity (percent).
+pub const DEFAULT_INTENSITY: u8 = 60;
+/// Default per-game intensity (percent), relative to the master.
+pub const DEFAULT_GAME_INTENSITY: u8 = 100;
+
+/// Per-game overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameConfig {
+    pub enabled: bool,
+    /// 0-100, applied on top of the master intensity.
+    pub intensity: u8,
+}
+
+impl Default for GameConfig {
+    fn default() -> Self {
+        GameConfig { enabled: true, intensity: DEFAULT_GAME_INTENSITY }
+    }
+}
+
+/// The whole tf-sim configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    /// Master switch; when false the daemon idles.
+    pub enabled: bool,
+    /// Master intensity, 0-100.
+    pub intensity: u8,
+    /// Felt rev-rate scale in percent (10-200; 100 = fundamental at the
+    /// crank rate rpm/60 Hz, 50 = half for a slower engine feel).
+    pub pitch_pct: u8,
+    /// Whether the daemon also drives the wheel's rev display
+    /// (`wheel_rev_level`) from telemetry RPM while streaming.
+    pub leds: bool,
+    /// Codemasters/EA family listen port (classic float array, modern F1,
+    /// and EA Sports WRC all arrive here, told apart by length and header).
+    pub codemasters_port: u16,
+    /// PCARS2/AMS2 listen port.
+    pub pcars_port: u16,
+    /// BeamNG OutGauge listen port.
+    pub beamng_port: u16,
+    /// Shared-memory telemetry relay listen port (see [`crate::relay`]).
+    pub relay_port: u16,
+    /// The G923 FFB-mirror sign flag, persisted; see
+    /// [`crate::g923::Sign::resolve`] for how this combines with the
+    /// environment override.
+    pub g923_ffb_invert: bool,
+    /// Per-game overrides, keyed by game id.
+    pub games: BTreeMap<String, GameConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            enabled: true,
+            intensity: DEFAULT_INTENSITY,
+            // Default 50: at 100 (crank-rate fundamental) the hardware
+            // feel-test read as an alarmingly fast engine (2026-07-20);
+            // half rate feels like an engine, not a dentist drill.
+            pitch_pct: 50,
+            leds: true,
+            codemasters_port: codemasters::DEFAULT_PORT,
+            pcars_port: pcars::DEFAULT_PORT,
+            beamng_port: beamng::DEFAULT_PORT,
+            relay_port: relay::DEFAULT_PORT,
+            g923_ffb_invert: true,
+            games: BTreeMap::new(),
+        }
+    }
+}
+
+/// `$XDG_CONFIG_HOME/logi-wheel/tf-sim.conf`, falling back to
+/// `~/.config/logi-wheel/tf-sim.conf` when the variable is unset or empty.
+///
+/// Pre-rename installs saved this file under `logi-dd/tf-sim.conf` instead.
+/// To avoid ever losing an existing config, the new file wins when it
+/// exists, otherwise the old one is read transparently (no copy step, so
+/// there is nothing to fail partway through); with neither present yet
+/// (fresh install) this returns the new path, so the first save creates it
+/// there. Once the new file exists, it wins permanently, even if the old
+/// one is still around. Mirrored, not shared, in the front-ends'
+/// `logi-wheel-core::tfsim::default_path` (that crate cannot be linked here;
+/// see the module doc).
+pub fn default_path() -> PathBuf {
+    resolve_path_in(&config_root())
+}
+
+/// `<root>/logi-wheel/tf-sim.conf` if it exists, else
+/// `<root>/logi-dd/tf-sim.conf` if that exists, else the new path (for a
+/// file that does not exist yet). Split out from [`default_path`] as a pure
+/// function of `root` (no environment access) so the new/old/both-exist
+/// migration behavior is testable without touching `XDG_CONFIG_HOME`.
+fn resolve_path_in(root: &Path) -> PathBuf {
+    let new_path = root.join("logi-wheel").join(FILE_NAME);
+    if new_path.is_file() {
+        return new_path;
+    }
+    let old_path = root.join("logi-dd").join(FILE_NAME);
+    if old_path.is_file() {
+        return old_path;
+    }
+    new_path
+}
+
+/// `$XDG_CONFIG_HOME`, falling back to `~/.config` when unset or empty.
+fn config_root() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg);
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join(".config")
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_percent(raw: &str) -> Option<u8> {
+    raw.parse::<u8>().ok().filter(|v| *v <= 100)
+}
+
+impl Config {
+    /// Load from [`default_path`]; a missing file is the default config.
+    pub fn load() -> Config {
+        Config::load_from(&default_path())
+    }
+
+    /// Load from `path`. A missing or unreadable file yields the defaults;
+    /// within a readable file, each unknown or unparsable line is ignored
+    /// individually.
+    pub fn load_from(path: &Path) -> Config {
+        let mut cfg = Config::default();
+        let Ok(text) = fs::read_to_string(path) else { return cfg };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, raw)) = line.split_once('=') else { continue };
+            let (key, raw) = (key.trim(), raw.trim());
+            match key {
+                "enabled" => {
+                    if let Some(v) = parse_bool(raw) {
+                        cfg.enabled = v;
+                    }
+                }
+                "intensity" => {
+                    if let Some(v) = parse_percent(raw) {
+                        cfg.intensity = v;
+                    }
+                }
+                "pitch" => {
+                    if let Ok(v) = raw.parse::<u8>() {
+                        if (10..=200u16).contains(&u16::from(v)) {
+                            cfg.pitch_pct = v;
+                        }
+                    }
+                }
+                "leds" => {
+                    if let Some(v) = parse_bool(raw) {
+                        cfg.leds = v;
+                    }
+                }
+                "port.codemasters" => {
+                    if let Ok(v) = raw.parse::<u16>() {
+                        cfg.codemasters_port = v;
+                    }
+                }
+                "port.pcars" => {
+                    if let Ok(v) = raw.parse::<u16>() {
+                        cfg.pcars_port = v;
+                    }
+                }
+                "port.beamng" => {
+                    if let Ok(v) = raw.parse::<u16>() {
+                        cfg.beamng_port = v;
+                    }
+                }
+                "port.relay" => {
+                    if let Ok(v) = raw.parse::<u16>() {
+                        cfg.relay_port = v;
+                    }
+                }
+                "g923.ffb_invert" => {
+                    if let Some(v) = parse_bool(raw) {
+                        cfg.g923_ffb_invert = v;
+                    }
+                }
+                _ => {
+                    let Some(rest) = key.strip_prefix("game.") else { continue };
+                    let Some((id, field)) = rest.rsplit_once('.') else { continue };
+                    if id.is_empty() {
+                        continue;
+                    }
+                    match field {
+                        "enabled" => {
+                            if let Some(v) = parse_bool(raw) {
+                                cfg.games.entry(id.to_string()).or_default().enabled = v;
+                            }
+                        }
+                        "intensity" => {
+                            if let Some(v) = parse_percent(raw) {
+                                cfg.games.entry(id.to_string()).or_default().intensity = v;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        cfg
+    }
+
+    /// Save to [`default_path`], creating the directory as needed.
+    pub fn save(&self) -> Result<()> {
+        self.save_to(&default_path())
+    }
+
+    /// Save to `path`, creating parent directories as needed.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let mut out = String::from(FILE_HEADER);
+        out.push('\n');
+        out.push_str(&format!("enabled={}\n", u8::from(self.enabled)));
+        out.push_str(&format!("intensity={}\n", self.intensity));
+        out.push_str(&format!("pitch={}\n", self.pitch_pct));
+        out.push_str(&format!("leds={}\n", u8::from(self.leds)));
+        out.push_str(&format!("port.codemasters={}\n", self.codemasters_port));
+        out.push_str(&format!("port.pcars={}\n", self.pcars_port));
+        out.push_str(&format!("port.beamng={}\n", self.beamng_port));
+        out.push_str(&format!("port.relay={}\n", self.relay_port));
+        out.push_str(&format!("g923.ffb_invert={}\n", u8::from(self.g923_ffb_invert)));
+        for (id, game) in &self.games {
+            out.push_str(&format!("game.{id}.enabled={}\n", u8::from(game.enabled)));
+            out.push_str(&format!("game.{id}.intensity={}\n", game.intensity));
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| Error::Io(format!("create {}", dir.display()), e))?;
+        }
+        fs::write(path, out).map_err(|e| Error::Io(format!("write {}", path.display()), e))
+    }
+
+    /// Whether synthesis may run for `id`: the master switch AND the
+    /// per-game switch (games default to enabled when not listed).
+    pub fn game_enabled(&self, id: &str) -> bool {
+        self.enabled && self.games.get(id).map_or(true, |g| g.enabled)
+    }
+
+    /// Effective intensity for `id` as 0.0..1.0: master x per-game.
+    pub fn effective_intensity(&self, id: &str) -> f32 {
+        let game = self.games.get(id).map_or(DEFAULT_GAME_INTENSITY, |g| g.intensity);
+        (f32::from(self.intensity) / 100.0 * f32::from(game) / 100.0).clamp(0.0, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A fresh, unique temp directory per test (std only, no tempfile dep).
+    fn tempdir() -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tf-sim-config-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_file_is_the_default_config() {
+        let cfg = Config::load_from(Path::new("/nonexistent-tf-sim.conf"));
+        assert_eq!(cfg, Config::default());
+        assert!(cfg.enabled);
+        assert!(cfg.leds, "the rev display defaults on");
+        assert_eq!(cfg.intensity, DEFAULT_INTENSITY);
+        assert_eq!(cfg.codemasters_port, 20777);
+        assert_eq!(cfg.pcars_port, 5606);
+        assert_eq!(cfg.beamng_port, 4444);
+        assert_eq!(cfg.relay_port, 20780);
+        assert!(cfg.g923_ffb_invert, "the FFB mirror sign defaults inverted (hardware-calibrated on a c266)");
+    }
+
+    #[test]
+    fn save_load_round_trips() {
+        let path = tempdir().join(FILE_NAME);
+        let mut cfg = Config {
+            enabled: false,
+            intensity: 42,
+            pitch_pct: 50,
+            leds: false,
+            codemasters_port: 30500,
+            pcars_port: 5607,
+            beamng_port: 4445,
+            relay_port: 20781,
+            g923_ffb_invert: true,
+            games: BTreeMap::new(),
+        };
+        cfg.games.insert("dirt-rally-2".into(), GameConfig { enabled: true, intensity: 80 });
+        cfg.games.insert("ams2-pcars2".into(), GameConfig { enabled: false, intensity: 100 });
+        cfg.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), cfg);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(FILE_HEADER));
+        assert!(text.contains("leds=0\n"));
+        assert!(text.contains("port.relay=20781\n"));
+        assert!(text.contains("g923.ffb_invert=1\n"));
+        assert!(text.contains("game.dirt-rally-2.intensity=80\n"));
+    }
+
+    #[test]
+    fn save_creates_parent_directories() {
+        let path = tempdir().join("nested").join("deeper").join(FILE_NAME);
+        Config::default().save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), Config::default());
+    }
+
+    #[test]
+    fn unknown_and_malformed_lines_are_ignored() {
+        let path = tempdir().join(FILE_NAME);
+        fs::write(
+            &path,
+            format!(
+                "{FILE_HEADER}\nintensity=55\nbogus_key=7\nintensity=notanumber\n\
+                 not a line\ngame..enabled=1\ngame.dirt-rally-2.bogus=3\n\
+                 game.dirt-rally-2.enabled=0\nintensity2=99\nenabled=maybe\nleds=maybe\n"
+            ),
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path);
+        assert_eq!(cfg.intensity, 55, "good line before the bad one sticks");
+        assert!(cfg.enabled, "unparsable bool keeps the default");
+        assert!(cfg.leds, "unparsable leds bool keeps the default");
+        assert!(!cfg.game_enabled("dirt-rally-2"));
+        assert_eq!(cfg.games.len(), 1);
+    }
+
+    #[test]
+    fn g923_ffb_invert_parses_and_defaults() {
+        let path = tempdir().join(FILE_NAME);
+        fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=1\n")).unwrap();
+        assert!(Config::load_from(&path).g923_ffb_invert);
+
+        fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=0\n")).unwrap();
+        assert!(!Config::load_from(&path).g923_ffb_invert, "explicit 0 overrides the inverted default");
+
+        fs::write(&path, format!("{FILE_HEADER}\ng923.ffb_invert=maybe\n")).unwrap();
+        assert!(Config::load_from(&path).g923_ffb_invert, "unparsable bool keeps the (inverted) default");
+    }
+
+    #[test]
+    fn out_of_range_percentages_are_ignored() {
+        let path = tempdir().join(FILE_NAME);
+        fs::write(&path, format!("{FILE_HEADER}\nintensity=150\ngame.f1.intensity=101\n")).unwrap();
+        let cfg = Config::load_from(&path);
+        assert_eq!(cfg.intensity, DEFAULT_INTENSITY);
+        assert!(cfg.games.is_empty());
+    }
+
+    #[test]
+    fn gating_and_effective_intensity() {
+        let mut cfg = Config { intensity: 50, ..Config::default() };
+        cfg.games.insert("f1".into(), GameConfig { enabled: false, intensity: 100 });
+        cfg.games.insert("dirt-rally-2".into(), GameConfig { enabled: true, intensity: 50 });
+
+        assert!(cfg.game_enabled("dirt-rally-2"));
+        assert!(!cfg.game_enabled("f1"), "per-game off wins");
+        assert!(cfg.game_enabled("codemasters"), "unlisted games default on");
+
+        assert!((cfg.effective_intensity("dirt-rally-2") - 0.25).abs() < 1e-6);
+        assert!((cfg.effective_intensity("codemasters") - 0.5).abs() < 1e-6);
+
+        cfg.enabled = false;
+        assert!(!cfg.game_enabled("dirt-rally-2"), "master off wins");
+    }
+
+    #[test]
+    fn default_path_honors_xdg_config_home() {
+        // The only test in this crate that touches the environment, so it
+        // cannot race the others.
+        let dir = tempdir();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        assert_eq!(default_path(), dir.join("logi-wheel").join(FILE_NAME));
+        let cfg = Config { intensity: 33, ..Config::default() };
+        cfg.save().unwrap();
+        assert_eq!(Config::load(), cfg);
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    /// The pre-rename `logi-dd` file migration: new-only, old-only (still
+    /// readable, no copy performed), and both-exist (new wins). Exercises
+    /// [`resolve_path_in`] directly with an explicit root, so it never
+    /// touches `XDG_CONFIG_HOME` and cannot race
+    /// [`default_path_honors_xdg_config_home`].
+    #[test]
+    fn resolve_path_in_migrates_from_the_pre_rename_file() {
+        // new-only: no logi-dd file at all, brand new install.
+        let root_new = tempdir();
+        fs::create_dir_all(root_new.join("logi-wheel")).unwrap();
+        fs::write(root_new.join("logi-wheel").join(FILE_NAME), "intensity=11\n").unwrap();
+        let resolved = resolve_path_in(&root_new);
+        assert_eq!(resolved, root_new.join("logi-wheel").join(FILE_NAME));
+        assert_eq!(Config::load_from(&resolved).intensity, 11);
+
+        // old-only: a pre-rename install with no new file yet. The old one
+        // must still be read transparently, with nothing copied.
+        let root_old = tempdir();
+        fs::create_dir_all(root_old.join("logi-dd")).unwrap();
+        fs::write(root_old.join("logi-dd").join(FILE_NAME), "intensity=22\n").unwrap();
+        let resolved = resolve_path_in(&root_old);
+        assert_eq!(resolved, root_old.join("logi-dd").join(FILE_NAME));
+        assert_eq!(Config::load_from(&resolved).intensity, 22);
+        assert!(!root_old.join("logi-wheel").exists(), "old file read in place, never copied");
+
+        // both exist: the new file wins, even though the old one is still
+        // there.
+        let root_both = tempdir();
+        fs::create_dir_all(root_both.join("logi-dd")).unwrap();
+        fs::write(root_both.join("logi-dd").join(FILE_NAME), "intensity=33\n").unwrap();
+        fs::create_dir_all(root_both.join("logi-wheel")).unwrap();
+        fs::write(root_both.join("logi-wheel").join(FILE_NAME), "intensity=44\n").unwrap();
+        let resolved = resolve_path_in(&root_both);
+        assert_eq!(resolved, root_both.join("logi-wheel").join(FILE_NAME));
+        assert_eq!(Config::load_from(&resolved).intensity, 44, "the new file wins");
+    }
+}

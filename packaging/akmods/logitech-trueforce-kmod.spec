@@ -33,9 +33,9 @@ Source0:        %{url}/archive/refs/tags/v%{upstream_ver}.tar.gz#/%{name}-%{upst
 
 BuildRequires:  kmodtool
 BuildRequires:  gcc, make, kernel-rpm-macros
-# Userspace companions (logi-ffb, logi-dd) built alongside the module.
+# Userspace companions (logi-ffb, logi-wheel) built alongside the module.
 BuildRequires:  cargo, rust
-# logi-dd-gui's yeslogic-fontconfig-sys dependency links fontconfig/freetype
+# logi-wheel-gui's yeslogic-fontconfig-sys dependency links fontconfig/freetype
 # at build time (build.rs calls pkg_config::find_library, no dlopen), so the
 # devel package and pkg-config must be present or `cargo build` panics and
 # aborts the whole %build. pkgconfig(fontconfig) pulls both on Fedora.
@@ -66,10 +66,10 @@ hid-logitech-hidpp, which continues to serve every other Logitech device.
 %package -n %{kmod_name}-kmod-common
 Summary:        udev rules for the %{kmod_name} kernel module
 BuildArch:      noarch
-# The pre-split -tools package shipped everything; recommending logi-dd
+# The pre-split -tools package shipped everything; recommending logi-wheel
 # keeps "install the driver, get the ecosystem" while still allowing a
 # lean module-only install.
-Recommends:     logi-dd
+Recommends:     logi-wheel
 # Switches the G923 Xbox edition (c26d) into PC mode (c26e) on plug-in;
 # the udev rule that runs it is a no-op without the binary present.
 Recommends:     usb_modeswitch
@@ -90,40 +90,49 @@ force-feedback device).
 # Userspace companions are ordinary compiled binaries (arch-specific, not
 # tied to a kernel version), so they get their own subpackages rather than
 # joining the noarch -common package or the per-kernel kmod packages.
-# logi-dd is the complete headless install: driver <- logi-dd <-
-# logi-dd-gui.
-%package -n logi-dd
+# logi-wheel is the complete headless install: driver <- logi-wheel <-
+# logi-wheel-gui.
+%package -n logi-wheel
 Summary:        Terminal tools for the %{kmod_name} direct-drive wheel driver
 License:        GPL-2.0-only
 BuildRequires:  cargo, rust
 Requires:       %{kmod_name}-kmod-common
 # The shim installer edits the wine prefix registry with python3.
 Recommends:     python3
+# Renamed from logi-dd (0.20.0): "dd" meant direct-drive, but the app
+# configures every supported wheel, including the belt-driven G923. These
+# move an existing logi-dd install onto this package automatically.
+Provides:       logi-dd = %{version}-%{release}
+Obsoletes:      logi-dd < %{version}-%{release}
 
-%description -n logi-dd
+%description -n logi-wheel
 The complete headless toolset for the Logitech direct-drive wheel driver:
-logi-dd, a terminal settings UI, logi-ffb, a DirectInput force-feedback
+logi-wheel, a terminal settings UI, logi-ffb, a DirectInput force-feedback
 proxy, logi-tf-sim, a simulated-TrueForce daemon driven by game telemetry,
 and logitech-trueforce-install-shim, the TrueForce SDK shim installer for
 Proton prefixes.
 
-%files -n logi-dd
+%files -n logi-wheel
+%{_bindir}/logi-wheel
 %{_bindir}/logi-dd
 %{_bindir}/logi-ffb
 %{_bindir}/logi-tf-sim
 %{_bindir}/logitech-trueforce-install-shim
 
-%package -n logi-dd-gui
+%package -n logi-wheel-gui
 Summary:        Graphical settings app for the %{kmod_name} direct-drive wheel driver
 License:        GPL-3.0-or-later
-Requires:       logi-dd
+Requires:       logi-wheel
+# Renamed from logi-dd-gui (0.20.0); see logi-wheel's subpackage for why.
+Provides:       logi-dd-gui = %{version}-%{release}
+Obsoletes:      logi-dd-gui < %{version}-%{release}
 # Owns the hicolor icon directories the GUI's launcher icon lands in.
 Requires:       hicolor-icon-theme
-# logi-dd-gui (Slint GUI) runtime stack: windowing (Wayland/X11), input
+# logi-wheel-gui (Slint GUI) runtime stack: windowing (Wayland/X11), input
 # (xkbcommon), and GL/EGL rendering. Derived from `ldd`/`strings` on the
 # built binary; Slint dlopen's the wayland/X11/GL bits at runtime rather
 # than linking them, so ldd alone would miss them. Fedora tracks current
-# Rust, so logi-dd-gui's MSRV (1.92, from Slint 1.17.1) always builds here;
+# Rust, so logi-wheel-gui's MSRV (1.92, from Slint 1.17.1) always builds here;
 # no version guard needed (contrast packaging/debian/rules).
 Requires:       wayland
 Requires:       libxkbcommon
@@ -139,15 +148,16 @@ Requires:       mesa-libGL
 Requires:       fontconfig
 Requires:       freetype
 
-%description -n logi-dd-gui
-logi-dd-gui, a graphical settings app (GPL-3.0-or-later, with a desktop
+%description -n logi-wheel-gui
+logi-wheel-gui, a graphical settings app (GPL-3.0-or-later, with a desktop
 menu entry) for the Logitech direct-drive wheel driver: wheel settings,
 LIGHTSYNC, response curves, game-helper setup pages, and a test section.
 
-%files -n logi-dd-gui
+%files -n logi-wheel-gui
+%{_bindir}/logi-wheel-gui
 %{_bindir}/logi-dd-gui
-%{_datadir}/applications/logi-dd-gui.desktop
-%{_datadir}/icons/hicolor/scalable/apps/logi-dd-gui.svg
+%{_datadir}/applications/logi-wheel-gui.desktop
+%{_datadir}/icons/hicolor/scalable/apps/logi-wheel-gui.svg
 
 %prep
 %setup -q -n logitech-trueforce-linux-driver-%{upstream_ver}
@@ -162,12 +172,12 @@ for kver in %{?kernel_versions}; do
     make -C "${kver##*___}" M="$PWD/_kmod_build_${kver%%___*}" modules
 done
 # Userspace companions: not kernel-specific, built once regardless of the
-# akmod-vs-static-kmod mode selected above. This also builds logi-dd-gui
+# akmod-vs-static-kmod mode selected above. This also builds logi-wheel-gui
 # (the Slint GUI): Fedora's rustc is always new enough for its MSRV, so
 # unlike packaging/debian/rules no version guard is needed here.
 # cargo fetches crate dependencies over the network at build time (nothing
 # is vendored); enable networking for the COPR project or the build.
-cargo build --release --manifest-path userspace/logi-dd/Cargo.toml
+cargo build --release --manifest-path userspace/logi-wheel/Cargo.toml
 
 %install
 for kver in %{?kernel_versions}; do
@@ -191,28 +201,40 @@ install -D -m 0644 udev/73-logitech-g923-xbox-modeswitch.rules \
 install -D -m 0644 packaging/modprobe.d/hid-logitech-dd.conf \
     "%{buildroot}%{_sysconfdir}/modprobe.d/hid-logitech-dd.conf"
 
-# Headless toolset (the logi-dd package).
-install -D -m 0755 userspace/logi-dd/target/release/logi-dd \
-    "%{buildroot}%{_bindir}/logi-dd"
-install -D -m 0755 userspace/logi-dd/target/release/logi-ffb \
+# Headless toolset (the logi-wheel package).
+install -D -m 0755 userspace/logi-wheel/target/release/logi-wheel \
+    "%{buildroot}%{_bindir}/logi-wheel"
+install -D -m 0755 userspace/logi-wheel/target/release/logi-ffb \
     "%{buildroot}%{_bindir}/logi-ffb"
-install -D -m 0755 userspace/logi-dd/target/release/logi-tf-sim \
+install -D -m 0755 userspace/logi-wheel/target/release/logi-tf-sim \
     "%{buildroot}%{_bindir}/logi-tf-sim"
+# Transitional symlink: scripts and habits built around the old logi-dd
+# binary name keep working.
+ln -s logi-wheel "%{buildroot}%{_bindir}/logi-dd"
 # TrueForce-in-Proton shim installer (no-op without the proprietary SDK
 # DLLs; resolves the SDK dir via --sdk-dir / $LOGITECH_TRUEFORCE_SDK_DIR /
 # ~/.local/share/logitech-trueforce/sdk).
 install -D -m 0755 tools/install-tf-shim.sh \
     "%{buildroot}%{_bindir}/logitech-trueforce-install-shim"
 
-# The GUI + its desktop integration (the logi-dd-gui package).
-install -D -m 0755 userspace/logi-dd/target/release/logi-dd-gui \
-    "%{buildroot}%{_bindir}/logi-dd-gui"
-install -D -m 0644 desktop/logi-dd-gui.desktop \
-    "%{buildroot}%{_datadir}/applications/logi-dd-gui.desktop"
-install -D -m 0644 desktop/logi-dd-gui.svg \
-    "%{buildroot}%{_datadir}/icons/hicolor/scalable/apps/logi-dd-gui.svg"
+# The GUI + its desktop integration (the logi-wheel-gui package).
+install -D -m 0755 userspace/logi-wheel/target/release/logi-wheel-gui \
+    "%{buildroot}%{_bindir}/logi-wheel-gui"
+install -D -m 0644 desktop/logi-wheel-gui.desktop \
+    "%{buildroot}%{_datadir}/applications/logi-wheel-gui.desktop"
+install -D -m 0644 desktop/logi-wheel-gui.svg \
+    "%{buildroot}%{_datadir}/icons/hicolor/scalable/apps/logi-wheel-gui.svg"
+# Transitional symlink: scripts and habits built around the old
+# logi-dd-gui binary name keep working.
+ln -s logi-wheel-gui "%{buildroot}%{_bindir}/logi-dd-gui"
 
 %changelog
+* Sun Jul 26 2026 mescon <5875228+mescon@users.noreply.github.com> - 0.20.0-1
+- Renamed the settings subpackages: logi-dd -> logi-wheel, logi-dd-gui ->
+  logi-wheel-gui ("dd" meant direct-drive, but the app now also covers the
+  belt-driven G923). Provides/Obsoletes on the old names move existing
+  installs over automatically.
+
 * Sat Jul 18 2026 mescon <5875228+mescon@users.noreply.github.com> - 0.15.0-1
 - Ship the userspace ecosystem as layered subpackages: logi-dd (settings
   TUI, logi-ffb DirectInput force-feedback proxy, logi-tf-sim

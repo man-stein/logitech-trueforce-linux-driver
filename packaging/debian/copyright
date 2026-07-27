@@ -39,10 +39,10 @@ License: GPL-2.0-or-later
  On Debian systems, the full text of the GNU General Public License
  version 2 can be found in /usr/share/common-licenses/GPL-2.
 
-# logi-dd-gui (the Slint settings GUI, installed as /usr/bin/logi-dd-gui)
+# logi-wheel-gui (the Slint settings GUI, installed as /usr/bin/logi-wheel-gui)
 # is GPL-3.0-or-later, unlike the rest of this package. This stanza is more
 # specific than "Files: *" above, so it takes precedence for this subtree.
-Files: userspace/logi-dd/crates/logi-dd-gui/*
+Files: userspace/logi-wheel/crates/logi-wheel-gui/*
 Copyright: 2024-2026 the logitech-trueforce-linux-driver contributors
 License: GPL-3.0-or-later
  This program is free software; you can redistribute it and/or modify it

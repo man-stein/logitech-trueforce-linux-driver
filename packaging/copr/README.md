@@ -15,19 +15,19 @@ and it loads and registers the `logitech-dd` driver.
 - `packaging/akmods/logitech-trueforce-kmod.spec` builds akmod-only when
   `kernels` is undefined (it passes `kmodtool --akmod`); no kernel-devel is
   needed at build time.
-- The same spec also builds the layered userspace subpackages: `logi-dd`
-  (the complete headless install: the `logi-dd` terminal settings UI,
+- The same spec also builds the layered userspace subpackages: `logi-wheel`
+  (the complete headless install: the `logi-wheel` terminal settings UI,
   `logi-ffb` DirectInput force-feedback proxy, `logi-tf-sim`
   simulated-TrueForce daemon, and the `logitech-trueforce-install-shim`
   SDK shim installer; requires the driver's `-kmod-common`) and
-  `logi-dd-gui` (the graphical settings app with desktop entry and icon;
-  requires `logi-dd`), from the `userspace/logi-dd` Rust workspace. This
+  `logi-wheel-gui` (the graphical settings app with desktop entry and icon;
+  requires `logi-wheel`), from the `userspace/logi-wheel` Rust workspace. This
   pulls `cargo`/`rust` into the build dependencies alongside
   `gcc`/`make`/`kernel-rpm-macros`.
-- `logi-dd-gui` is GPL-3.0-or-later (the rest of the driver is
+- `logi-wheel-gui` is GPL-3.0-or-later (the rest of the driver is
   GPL-2.0-only); each subpackage carries its own `License`. The GUI's
   Slint UI needs a windowing/rendering stack at runtime (Wayland/X11,
-  xkbcommon, GL/EGL); the `logi-dd-gui` subpackage's `Requires` cover it,
+  xkbcommon, GL/EGL); the `logi-wheel-gui` subpackage's `Requires` cover it,
   so headless installs stay lean. Fedora always ships a rustc new enough
   for Slint's MSRV (1.92), so the build needs no version guard.
 - The userspace binaries are built with `cargo`, which needs build-time
@@ -35,8 +35,8 @@ and it loads and registers the `logitech-dd` driver.
   COPR project must have build networking enabled.
 - `.copr/Makefile` is COPR's "make srpm" entrypoint: it builds the source
   tarball from the git checkout and emits the SRPM. COPR rebuilds that SRPM
-  per chroot into `akmod-logitech-trueforce` (plus `logi-dd` and
-  `logi-dd-gui`).
+  per chroot into `akmod-logitech-trueforce` (plus `logi-wheel` and
+  `logi-wheel-gui`).
 
 ## Automated publishing
 
@@ -77,12 +77,12 @@ Enabling automatic rebuilds on new commits via a GitHub webhook is optional.
 sudo dnf install -y \
   https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
 sudo dnf copr enable <owner>/logitech-trueforce
-sudo dnf install akmod-logitech-trueforce logi-dd-gui
+sudo dnf install akmod-logitech-trueforce logi-wheel-gui
 ```
 
 The first `akmods` run builds the module for the running kernel (and every
-kernel installed afterwards). `logi-dd-gui` pulls `logi-dd`, which
-installs `logi-dd`, `logi-ffb`, `logi-tf-sim`, and
+kernel installed afterwards). `logi-wheel-gui` pulls `logi-wheel`, which
+installs `logi-wheel`, `logi-ffb`, `logi-tf-sim`, and
 `logitech-trueforce-install-shim` to `/usr/bin`, built from the same repo
-checkout; skip `logi-dd-gui` on a headless box and install `logi-dd`
+checkout; skip `logi-wheel-gui` on a headless box and install `logi-wheel`
 instead. See the [Installation](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Installation) wiki page for the full flow.

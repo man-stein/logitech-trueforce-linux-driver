@@ -1,0 +1,700 @@
+import { Button, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { SettingRow, SettingsList } from "widgets.slint";
+import { CurveEditor, CurvePoint } from "curve_editor.slint";
+import { RgbStrip, LedColor } from "rgb_strip.slint";
+import { SlotTextEditor, SlotNameRow } from "slot_text.slint";
+import { Setup, SetupGame, AddableGame } from "setup.slint";
+import { InfoPage, TestButton, TestAxis, TestCallout } from "info_page.slint";
+import { ComputerProfiles } from "computer_profiles.slint";
+import { LedPreview } from "led_preview.slint";
+export { SettingRow } from "widgets.slint";
+export { SetupGame, AddableGame } from "setup.slint";
+export { TestButton, TestAxis, TestCallout } from "info_page.slint";
+export { CurvePoint } from "curve_editor.slint";
+export { LedColor } from "rgb_strip.slint";
+export { SlotNameRow } from "slot_text.slint";
+
+export component App inherits Window {
+    title: "Logi Wheel";
+    icon: @image-url("assets/app-icon.png");
+    preferred-width: 960px;
+    preferred-height: 640px;
+    min-width: 720px;
+    min-height: 480px;
+    background: Palette.background;
+
+    // No-wheel state: the shell always shows (Setup, the Info page's input
+    // monitor and the docs are useful without a wheel); when the worker
+    // reports it cannot reach the
+    // device (nothing bound, unplugged mid-session, ...) a slim banner
+    // appears under the header and the device categories show an empty
+    // state instead of their rows. `retry-discover` re-attempts
+    // `Device::discover()`; a wheel appearing later restores everything
+    // live. Defaults to on: the worker's first response (Info or NoWheel)
+    // settles it, and that reply arrives well before anyone could act on a
+    // flash of the wrong state.
+    in property <bool> no-wheel: true;
+    in property <string> no-wheel-message: "Looking for your wheel...";
+    callback retry-discover();
+
+    // Header: app name plus the desktop/onboard mode toggle. Device identity
+    // (serial, firmware) lives in the Info category, not the header.
+    in property <bool> mode-onboard: false;
+    callback toggle-mode();
+    callback refresh();
+
+    // Project home, shown as a link at the bottom of the Info category.
+    in property <string> project-url: "";
+    // Opens `url` in the user's browser (wired to xdg-open on the Rust side).
+    callback open-url(string);
+
+    // Sidebar: one label per `Category::ALL`, plus a trailing "Setup" label
+    // `main.rs` appends; `selected-category` is that combined list's index,
+    // resolved to a `Category` on the Rust side (or, for the last row, left
+    // as `setup-index` to route to the `Setup` page below instead).
+    in property <[string]> category-labels: [];
+    in property <int> selected-category: 0;
+    callback select-category(int);
+
+    // The sidebar index of the "Setup" row: `Category::ALL.len()`, set once
+    // from Rust. `-1` (never equal to any real `selected-category`) until
+    // then, so nothing routes to the Setup page before it is set.
+    in property <int> setup-index: -1;
+    in property <bool> setup-ffb-found: false;
+    // The resolved helper paths ("" while not found): PATH hit or the
+    // repo-checkout fallback; shown in the Setup status lines.
+    in property <string> setup-ffb-path: "";
+    in property <bool> setup-shim-found: false;
+    in property <string> setup-shim-path: "";
+    in property <bool> setup-shim-running: false;
+    in property <string> setup-shim-output: "";
+    // The SDK folder field's initial text and live validity (see
+    // `Setup.sdk-dir`); `main.rs` re-checks on every edit-accept.
+    in property <string> setup-sdk-dir: "";
+    in property <bool> setup-sdk-valid: false;
+    in property <string> setup-sdk-status: "";
+    // The installed Proton games (scanned off the UI thread; see
+    // `Setup.games`).
+    in property <[SetupGame]> setup-games: [];
+    in property <bool> setup-games-scanned: false;
+    // The "Your games" accordion header's one-line count (installed / need
+    // setup), built in Rust alongside the list (see `bridge::games_summary`).
+    in property <string> setup-games-summary: "";
+    // The "Add a game" dialog's picker list: unrecognised, unshimmed Wine
+    // games the launcher scan found (see `bridge::addable_games`).
+    in property <[AddableGame]> addable-games: [];
+    // Fired by the dialog's confirm button with the chosen (or typed) wine
+    // prefix; runs the shim installer, then rescans.
+    callback add-game(string);
+    // Simulated TrueForce (see `Setup`'s tf-* properties): the resolved
+    // logi-tf-sim binary, the daemon's run state, the tf-sim.conf master
+    // values, and the test sweep's run state + output.
+    in property <bool> setup-tf-found: false;
+    in property <string> setup-tf-path: "";
+    in property <bool> setup-tf-running: false;
+    in property <bool> setup-tf-enabled: false;
+    in property <int> setup-tf-intensity: 60;
+    in property <int> setup-tf-pitch: 100;
+    in property <bool> setup-tf-sweep-running: false;
+    in property <string> setup-tf-output: "";
+    callback setup-copy-launch();
+    callback setup-sdk-dir-edited(string);
+    // Per-game shim install/remove; the argument is the row's wine prefix.
+    callback setup-install-game(string);
+    callback setup-remove-game(string);
+    callback setup-rescan-games();
+    callback setup-tf-set-enabled(bool);
+    callback setup-tf-set-intensity(int);
+    callback setup-tf-set-pitch(int);
+    callback setup-tf-start-daemon();
+    callback setup-tf-stop-daemon();
+    callback setup-tf-sweep();
+    callback setup-tf-sweep-stop();
+    callback setup-sim-game-enabled(string, bool);
+    callback setup-sim-game-intensity(string, int);
+
+    // The sidebar index of the Info category (the page that carries the
+    // live input monitor), set once from Rust; `-1` until then, same guard
+    // as `setup-index`. The identity strings come from the registry Info
+    // rows; the live values below are pushed by the evdev reader thread
+    // `main.rs` runs while this page is open (throttled to ~30 Hz).
+    in property <int> info-index: -1;
+    // Which wheel was detected, human-readable (e.g. "Logitech G923 Racing
+    // Wheel for PlayStation 4 and PC"), or "" while no wheel is bound - the
+    // Wheel row shows a "No wheel detected" state for that itself. Pushed
+    // from `Response::Info` (`bridge`/`main.rs`), same as serial/firmware.
+    in property <string> info-wheel-name: "";
+    in property <string> info-serial: "";
+    in property <string> info-firmware: "";
+    // Software identity under the device rows: the running front-end's
+    // name + version, and the loaded kernel module's version stamp (or
+    // "(module not loaded)"). Both set from Rust.
+    in property <string> info-app-version: "";
+    in property <string> info-driver-version: "";
+    // Copy one identity value (the serial, or the two firmware lines) to
+    // the clipboard; same best-effort mechanism as `setup-copy-launch`.
+    callback info-copy(string);
+    in property <bool> test-available: false;
+    in property <bool> test-scanned: false;
+    in property <string> test-device-name: "";
+    in property <float> test-degrees: 0;
+    in property <string> test-degrees-text: "0.0 deg";
+    in property <int> test-range: 900;
+    // Which product photo the Info/Testing page shows: 0 RS50, 1 G PRO, 2
+    // G923 (see `bridge::wheel_image_index`); set from `Response::Info`'s
+    // `model` whenever discovery identifies the connected wheel.
+    in property <int> test-wheel-kind: 0;
+    // Whether the connected wheel is a G923 (the classic lg4ff-style
+    // engine): it has no LIGHTSYNC strip and no desktop/onboard split at
+    // all, so the LIGHTSYNC preview strip (not built from registry rows, so
+    // nothing else hides it automatically), the Profiles page's Mode row
+    // and the header's mode toggle are all gated on this instead. The
+    // computer-profiles panel itself is NOT gated on it: it still renders
+    // (with a slightly different helper line - see `ComputerProfiles.
+    // classic-wheel`) since the store works the same way regardless of
+    // model. Set from `Response::Info`'s `model`; resets to false while no
+    // wheel is known.
+    in property <bool> classic-wheel: false;
+    in property <[TestButton]> test-buttons: [];
+    in property <string> test-hat: "centered";
+    in property <[TestAxis]> test-axes: [];
+    in property <[TestCallout]> test-callouts: [];
+    in property <bool> test-sim-running: false;
+    in property <string> test-sim-error: "";
+    callback test-rescan();
+    // Only ever fired by the Info page's confirm dialog (see
+    // `info_page.slint`); each plays a fixed 25%/2 s effect.
+    callback test-sim-constant();
+    callback test-sim-texture();
+    // Stops the currently playing simulation (the Info page's Stop button).
+    callback test-sim-stop();
+
+    // Content: the selected category's rows, same as Task 4.
+    in property <string> category-label: "Force feedback";
+    in property <[SettingRow]> rows: [];
+    // The current page's ordered distinct group titles (see
+    // `bridge::row_groups`); each becomes one card in the settings list.
+    in property <[string]> row-groups: [];
+
+    // Mode-coupled Profiles page: while the wheel is in desktop mode the
+    // page shows the computer-side profile store below the Mode row
+    // (onboard mode shows the wheel's own slot picker rows instead).
+    // `profiles-index` is the Profiles category's sidebar index, set once
+    // from Rust (-1 until then, same guard as `setup-index`).
+    in property <int> profiles-index: -1;
+    in property <[string]> computer-profiles: [];
+    in property <string> profiles-status: "";
+    in property <bool> profiles-status-error: false;
+    callback profile-apply(string);
+    callback profile-delete(string);
+    callback profile-save(string);
+    // Whether the Profiles layout (the computer-side profile store, with or
+    // without the Mode row above it) replaces the plain settings list.
+    // Always true for a G923 while its Profiles page is open: it has no
+    // onboard/desktop split to gate on, but the computer-side store still
+    // works against its own settings. A DD wheel only gets it in desktop
+    // mode (onboard mode shows its own slot picker + rename rows instead,
+    // via `compose-profiles` on the Rust side).
+    property <bool> show-computer-profiles: selected-category == profiles-index && (classic-wheel || !mode-onboard);
+
+    // LIGHTSYNC page extras: the sidebar index of the Leds category (set
+    // once from Rust; -1 until then, same guard as `setup-index`) and the
+    // preview strip's state. `lightsync-leds`/`lightsync-direction` come
+    // from the same last-known LIGHTSYNC values the slot editor seeds
+    // from, pushed on every Leds reload and relevant row update.
+    in property <int> leds-index: -1;
+    in property <[LedColor]> lightsync-leds: [];
+    in property <int> lightsync-direction: 0;
+
+    callback edit-slider(string, int);
+    callback edit-choice(string, int);
+    callback edit-switch(string, bool);
+    callback edit-text(string, string);
+    callback trigger(string);
+    // (attr, is-lower, value): only the touched half of a pair row; see
+    // `SettingsList.edit-pair`.
+    callback edit-pair(string, bool, int);
+    // The LIGHTSYNC effect selector's chosen index (0-12); see
+    // `SettingsList.edit-light-effect`.
+    callback edit-light-effect(int);
+
+    // Curve editor overlay: opened by a `Curve`-kind row's "Edit curve"
+    // button. The Rust side owns the in-flight `Curve` and pushes the
+    // composed plot / control points here for the live preview; every edit
+    // callback below round-trips through Rust before the overlay redraws.
+    in property <bool> curve-editor-open: false;
+    in property <string> curve-label: "";
+    // The editor's x-axis caption, named for the axis being shaped
+    // ("Throttle input %", ...); set alongside curve-label on open.
+    in property <string> curve-x-label: "Input %";
+    in property <string> curve-plot-commands: "";
+    in property <[CurvePoint]> curve-control-points: [];
+    in property <int> curve-lower-deadzone: 0;
+    in property <int> curve-upper-deadzone: 0;
+    callback edit-curve(string);
+    callback curve-move-point(int, float, float);
+    callback curve-add-point(float);
+    callback curve-remove-point(int);
+    // Pure: the editor's hover-ghost bindings call these (see
+    // curve_editor.slint's own callback declarations).
+    pure callback curve-grab-point(float, float, float) -> int;
+    pure callback curve-ghost-y(float) -> float;
+    callback curve-set-lower-deadzone(int);
+    callback curve-set-upper-deadzone(int);
+    callback curve-commit();
+    callback curve-cancel();
+
+    // LIGHTSYNC slot editor overlay (the extended RGB strip editor):
+    // opened by the LIGHTSYNC page's "Edit slot" button. The Rust side
+    // owns the in-flight `Vec<Color>` and the staged direction, and
+    // pushes the swatch list (plus the selected swatch's hex text, the
+    // slot's name/brightness and the staged direction) here for the live
+    // preview; every edit callback below round-trips through Rust before
+    // the overlay redraws.
+    in property <bool> rgb-editor-open: false;
+    in property <string> rgb-label: "";
+    in property <[LedColor]> rgb-leds: [];
+    in property <string> rgb-selected-hex: "";
+    in property <string> rgb-slot-name: "";
+    in property <int> rgb-slot-brightness: 100;
+    in property <int> rgb-direction: 0;
+    callback edit-rgb(string);
+    callback rgb-select-led(int);
+    callback rgb-set-color(int, int, int, int);
+    callback rgb-set-hex(int, string);
+    callback rgb-apply-to-all(int, int, int);
+    callback rgb-set-name(string);
+    callback rgb-set-slot-brightness(int);
+    callback rgb-set-direction(int);
+    callback rgb-commit();
+    callback rgb-cancel();
+
+    // Slot-text editor overlay: opened by a `SlotText`-kind row's "Edit slot
+    // names" button (onboard profile renaming). Unlike the curve/RGB
+    // overlays, each field applies immediately when the user presses enter
+    // (`Kind::SlotText` writes one slot at a time), so there is no separate
+    // commit; `slot-text-close` just dismisses the overlay.
+    in property <bool> slot-text-editor-open: false;
+    in property <string> slot-text-label: "";
+    in property <[SlotNameRow]> slot-text-names: [];
+    in property <int> slot-text-max-len: 9;
+    // The last slot write's error, surfaced inside the overlay (the row's
+    // own error slot is hidden behind the scrim while it is open). Cleared
+    // on open and on every new edit.
+    in property <string> slot-text-error: "";
+    callback edit-slot-text(string);
+    callback slot-text-set-name(int, string);
+    callback slot-text-close();
+
+    // One unconditional root layout wraps the shell so conditional children
+    // (the no-wheel banner) are laid out (and stretched to fill) by it. A
+    // conditional element placed directly under a `Window` is positioned
+    // manually and never fills the window, regardless of any
+    // width/height/alignment set on it; the same element nested inside a
+    // layout fills normally. The editor overlays stay separate `Window`
+    // children: they size themselves to the window and paint on top of
+    // this shell.
+    VerticalLayout {
+        // Header: app name plus the mode toggle. A thin bottom divider
+        // (rather than a background-color band) so it reads correctly against
+        // every widget style's own background brush. Device identity (serial,
+        // firmware) is shown in the Info category, not here. The two device
+        // buttons grey out while no wheel is reachable; the shell itself
+        // stays up (Setup and the Info monitor work without a wheel).
+        Rectangle {
+            height: 52px;
+
+            HorizontalLayout {
+                padding: Theme.padding;
+                spacing: Theme.gutter;
+
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("assets/logo-mark.png");
+                        width: 26px;
+                        height: 26px;
+                    }
+                }
+                Text {
+                    text: "Logi Wheel";
+                    font-size: 17px;
+                    font-weight: 700;
+                    color: Theme.text-color;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // Hidden for a G923: it has no desktop/onboard split at
+                // all, so this control would only ever attempt a write
+                // sysfs does not expose (see `toggle-mode`'s Rust handler,
+                // which also no-ops rather than trusting this alone).
+                if !root.classic-wheel: Button {
+                    text: root.mode-onboard ? "Mode: onboard" : "Mode: desktop";
+                    enabled: !root.no-wheel;
+                    clicked => { root.toggle-mode(); }
+                }
+                Button {
+                    text: "Refresh";
+                    enabled: !root.no-wheel;
+                    clicked => { root.refresh(); }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border;
+            }
+        }
+
+        // No-wheel banner: slim, under the header, with the discovery
+        // error and a Retry button. The rest of the shell stays usable.
+        if root.no-wheel: Rectangle {
+            background: Theme.panel-background;
+
+            HorizontalLayout {
+                padding: Theme.gutter;
+                spacing: Theme.gutter;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: "No compatible wheel found - connect the wheel and press Retry. ("
+                        + root.no-wheel-message + ")";
+                    color: Theme.text-color;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "Retry";
+                    clicked => { root.retry-discover(); }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border;
+            }
+        }
+
+        HorizontalLayout {
+            // Takes all the height left under the header so the sidebar panel
+            // and the settings list reach the bottom of the window instead of
+            // stopping at their content height.
+            vertical-stretch: 1;
+
+            // Sidebar: one row per `Category::ALL`, with a clear
+            // accent-colored highlight on the selected entry.
+            Rectangle {
+                width: 200px;
+                background: Palette.alternate-background;
+
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 2px;
+
+                    for label[i] in root.category-labels: Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: i == root.selected-category ? Theme.selected-background : transparent;
+
+                        TouchArea {
+                            clicked => { root.select-category(i); }
+                        }
+                        Text {
+                            x: 10px;
+                            width: parent.width - 2 * self.x;
+                            height: 100%;
+                            text: label;
+                            vertical-alignment: center;
+                            horizontal-alignment: left;
+                            font-weight: i == root.selected-category ? 700 : 400;
+                            color: i == root.selected-category ? Theme.selected-foreground : Theme.text-color;
+                        }
+                    }
+
+                    // Stretchy spacer: without it this column of fixed-height
+                    // (36px) items has a finite max-height, and since a
+                    // HorizontalLayout's height is capped by its shortest
+                    // child's max-height, the whole content row could never
+                    // grow past the sidebar's items. The spacer gives the
+                    // column an unbounded max-height so the sidebar (and the
+                    // row) fills the window.
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    background: Palette.border;
+                }
+            }
+
+            VerticalLayout {
+                padding: Theme.padding;
+                spacing: Theme.gutter;
+
+                // The Setup page replaces the whole category title + list +
+                // doc-link block below (it has its own title and its own
+                // doc link at the bottom); the two are mutually exclusive on
+                // `selected-category`.
+                if root.selected-category == root.setup-index: Setup {
+                    vertical-stretch: 1;
+                    project-url: root.project-url;
+                    ffb-found: root.setup-ffb-found;
+                    ffb-path: root.setup-ffb-path;
+                    shim-found: root.setup-shim-found;
+                    shim-path: root.setup-shim-path;
+                    shim-running: root.setup-shim-running;
+                    shim-output: root.setup-shim-output;
+                    sdk-dir: root.setup-sdk-dir;
+                    sdk-valid: root.setup-sdk-valid;
+                    sdk-status: root.setup-sdk-status;
+                    games: root.setup-games;
+                    games-scanned: root.setup-games-scanned;
+                    games-summary: root.setup-games-summary;
+                    addable-games: root.addable-games;
+                    tf-found: root.setup-tf-found;
+                    tf-path: root.setup-tf-path;
+                    tf-running: root.setup-tf-running;
+                    tf-enabled: root.setup-tf-enabled;
+                    tf-intensity: root.setup-tf-intensity;
+                    tf-pitch: root.setup-tf-pitch;
+                    tf-sweep-running: root.setup-tf-sweep-running;
+                    tf-output: root.setup-tf-output;
+                    copy-launch() => { root.setup-copy-launch(); }
+                    sdk-dir-edited(dir) => { root.setup-sdk-dir-edited(dir); }
+                    install-game(pfx) => { root.setup-install-game(pfx); }
+                    remove-game(pfx) => { root.setup-remove-game(pfx); }
+                    rescan-games() => { root.setup-rescan-games(); }
+                    add-game(pfx) => { root.add-game(pfx); }
+                    tf-set-enabled(v) => { root.setup-tf-set-enabled(v); }
+                    tf-set-intensity(v) => { root.setup-tf-set-intensity(v); }
+                    tf-set-pitch(v) => { root.setup-tf-set-pitch(v); }
+                    tf-start-daemon() => { root.setup-tf-start-daemon(); }
+                    tf-stop-daemon() => { root.setup-tf-stop-daemon(); }
+                    tf-sweep() => { root.setup-tf-sweep(); }
+                    tf-sweep-stop() => { root.setup-tf-sweep-stop(); }
+                    sim-game-enabled(id, v) => { root.setup-sim-game-enabled(id, v); }
+                    sim-game-intensity(id, v) => { root.setup-sim-game-intensity(id, v); }
+                    open-url(url) => { root.open-url(url); }
+                }
+
+                if root.selected-category != root.setup-index: Text {
+                    text: root.category-label;
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: Theme.text-color;
+                }
+
+                // The Info page carries the identity rows plus the live
+                // input monitor; it replaces the settings list and runs
+                // even with no wheel bound to the driver (the monitor
+                // reads evdev, not sysfs), which is why it lives inside
+                // the shell rather than behind the no-wheel banner.
+                if root.selected-category == root.info-index: InfoPage {
+                    vertical-stretch: 1;
+                    wheel-name: root.info-wheel-name;
+                    serial: root.info-serial;
+                    firmware: root.info-firmware;
+                    app-version: root.info-app-version;
+                    driver-version: root.info-driver-version;
+                    project-url: root.project-url;
+                    available: root.test-available;
+                    scanned: root.test-scanned;
+                    device-name: root.test-device-name;
+                    degrees: root.test-degrees;
+                    degrees-text: root.test-degrees-text;
+                    range: root.test-range;
+                    wheel-kind: root.test-wheel-kind;
+                    buttons: root.test-buttons;
+                    hat: root.test-hat;
+                    axes: root.test-axes;
+                    callouts: root.test-callouts;
+                    sim-running: root.test-sim-running;
+                    sim-error: root.test-sim-error;
+                    open-url(url) => { root.open-url(url); }
+                    copy-value(text) => { root.info-copy(text); }
+                    rescan() => { root.test-rescan(); }
+                    sim-constant() => { root.test-sim-constant(); }
+                    sim-texture() => { root.test-sim-texture(); }
+                    sim-stop() => { root.test-sim-stop(); }
+                }
+
+                // Without a wheel a device category shows a short empty
+                // state instead of its rows (the worker has nothing to
+                // read); Setup and the Info monitor above stay functional.
+                if root.selected-category != root.setup-index && root.selected-category != root.info-index && root.no-wheel: VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: start;
+                    spacing: 6px;
+
+                    Text {
+                        text: "No wheel connected.";
+                        font-weight: 600;
+                        color: Theme.text-color;
+                    }
+                    Text {
+                        text: "These settings become available when a compatible wheel is found. Connect the wheel and press Retry in the banner above. Setup and the Info page's input monitor work without a wheel.";
+                        color: Theme.muted-text-color;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // Profiles: the computer-side profile store, with the Mode
+                // row (a one-row settings list) above it for a DD wheel in
+                // desktop mode. A G923 has no Mode row at all (`root.rows`
+                // is empty for it on this category - it has no
+                // desktop/onboard split), so it gets just the store, with
+                // no onboard slot picker and no mode toggle anywhere on the
+                // page.
+                if root.selected-category != root.setup-index && root.selected-category != root.info-index && !root.no-wheel && root.show-computer-profiles: VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: Theme.gutter;
+
+                    if !root.classic-wheel: SettingsList {
+                        // Just the Mode row (`compose_profiles` filters the
+                        // rest away in desktop mode), rendered as the "Mode"
+                        // card; a fixed height that fits the card so the
+                        // computer profile store gets the remaining space.
+                        height: 120px;
+                        rows: root.rows;
+                        groups: root.row-groups;
+                        edit-choice(attr, v) => { root.edit-choice(attr, v); }
+                        switch-mode() => { root.toggle-mode(); }
+                    }
+
+                    ComputerProfiles {
+                        vertical-stretch: 1;
+                        profiles: root.computer-profiles;
+                        status: root.profiles-status;
+                        status-error: root.profiles-status-error;
+                        classic-wheel: root.classic-wheel;
+                        apply-profile(name) => { root.profile-apply(name); }
+                        delete-profile(name) => { root.profile-delete(name); }
+                        save-profile(name) => { root.profile-save(name); }
+                    }
+                }
+
+                // The LIGHTSYNC page: the preview strip panel above the
+                // composed settings list (Effect, Brightness, Edit slot).
+                // The preview itself never shows for a G923: it has no
+                // LIGHTSYNC strip, so there is nothing for it to preview.
+                if root.selected-category == root.leds-index && !root.no-wheel: VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: Theme.gutter;
+
+                    if !root.classic-wheel: LedPreview {
+                        // Natural height only: the settings list below is
+                        // the page's one stretching child, so the panel's
+                        // rows never drift apart on a tall window.
+                        vertical-stretch: 0;
+                        leds: root.lightsync-leds;
+                        direction: root.lightsync-direction;
+                    }
+
+                    SettingsList {
+                        vertical-stretch: 1;
+                        rows: root.rows;
+                        groups: root.row-groups;
+                        edit-slider(attr, v) => { root.edit-slider(attr, v); }
+                        edit-choice(attr, v) => { root.edit-choice(attr, v); }
+                        edit-switch(attr, v) => { root.edit-switch(attr, v); }
+                        edit-text(attr, v) => { root.edit-text(attr, v); }
+                        trigger(attr) => { root.trigger(attr); }
+                        edit-pair(attr, is-lower, v) => { root.edit-pair(attr, is-lower, v); }
+                        edit-light-effect(idx) => { root.edit-light-effect(idx); }
+                        edit-curve(attr) => { root.edit-curve(attr); }
+                        edit-rgb(attr) => { root.edit-rgb(attr); }
+                        edit-slot-text(attr) => { root.edit-slot-text(attr); }
+                        switch-mode() => { root.toggle-mode(); }
+                    }
+                }
+
+                if root.selected-category != root.setup-index && root.selected-category != root.info-index && root.selected-category != root.leds-index && !root.no-wheel && !root.show-computer-profiles: SettingsList {
+                    // Claim all the vertical space left under the category
+                    // title so the list (and its background/scrollbar) reaches
+                    // the bottom of the window. Without this the ListView only
+                    // takes its content height and sits as a short box with an
+                    // empty void beneath it.
+                    vertical-stretch: 1;
+                    rows: root.rows;
+                    groups: root.row-groups;
+                    edit-slider(attr, v) => { root.edit-slider(attr, v); }
+                    edit-choice(attr, v) => { root.edit-choice(attr, v); }
+                    edit-switch(attr, v) => { root.edit-switch(attr, v); }
+                    edit-text(attr, v) => { root.edit-text(attr, v); }
+                    trigger(attr) => { root.trigger(attr); }
+                    edit-pair(attr, is-lower, v) => { root.edit-pair(attr, is-lower, v); }
+                    edit-light-effect(idx) => { root.edit-light-effect(idx); }
+                    edit-curve(attr) => { root.edit-curve(attr); }
+                    edit-rgb(attr) => { root.edit-rgb(attr); }
+                    edit-slot-text(attr) => { root.edit-slot-text(attr); }
+                    switch-mode() => { root.toggle-mode(); }
+                }
+
+            }
+        }
+    }
+
+    // Painted last so it sits on top of the shell above.
+    if root.curve-editor-open: CurveEditor {
+        width: root.width;
+        height: root.height;
+        curve-label: root.curve-label;
+        x-axis-label: root.curve-x-label;
+        plot-commands: root.curve-plot-commands;
+        control-points: root.curve-control-points;
+        lower-deadzone: root.curve-lower-deadzone;
+        upper-deadzone: root.curve-upper-deadzone;
+        move-point(i, x, y) => { root.curve-move-point(i, x, y); }
+        add-point(x) => { root.curve-add-point(x); }
+        remove-point(i) => { root.curve-remove-point(i); }
+        grab-point(x, y, aspect) => { return root.curve-grab-point(x, y, aspect); }
+        ghost-y(x) => { return root.curve-ghost-y(x); }
+        set-lower-deadzone(v) => { root.curve-set-lower-deadzone(v); }
+        set-upper-deadzone(v) => { root.curve-set-upper-deadzone(v); }
+        commit() => { root.curve-commit(); }
+        cancel() => { root.curve-cancel(); }
+    }
+
+    // Painted last so it sits on top of everything else, including the
+    // curve editor (the two never open at once, but if they somehow did,
+    // this one should win since it was opened more recently).
+    if root.rgb-editor-open: RgbStrip {
+        width: root.width;
+        height: root.height;
+        strip-label: root.rgb-label;
+        leds: root.rgb-leds;
+        selected-hex: root.rgb-selected-hex;
+        slot-name: root.rgb-slot-name;
+        slot-brightness: root.rgb-slot-brightness;
+        direction: root.rgb-direction;
+        select-led(i) => { root.rgb-select-led(i); }
+        set-color(i, r, g, b) => { root.rgb-set-color(i, r, g, b); }
+        set-hex(i, h) => { root.rgb-set-hex(i, h); }
+        apply-to-all(r, g, b) => { root.rgb-apply-to-all(r, g, b); }
+        set-name(t) => { root.rgb-set-name(t); }
+        set-slot-brightness(v) => { root.rgb-set-slot-brightness(v); }
+        set-direction(d) => { root.rgb-set-direction(d); }
+        commit() => { root.rgb-commit(); }
+        cancel() => { root.rgb-cancel(); }
+    }
+
+    // Painted last of all: none of the overlays above open at the same time
+    // as this one in practice, but if they somehow did, the most-recently-
+    // opened overlay should win.
+    if root.slot-text-editor-open: SlotTextEditor {
+        width: root.width;
+        height: root.height;
+        slot-text-label: root.slot-text-label;
+        slot-names: root.slot-text-names;
+        max-len: root.slot-text-max-len;
+        error: root.slot-text-error;
+        set-slot-name(slot, name) => { root.slot-text-set-name(slot, name); }
+        close() => { root.slot-text-close(); }
+    }
+}

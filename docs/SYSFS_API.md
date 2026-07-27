@@ -811,7 +811,7 @@ echo "8 5" > wheel_clutch_deadzone
 > Because sensitivity, deadzone and the raw curve all write the one hardware
 > curve per axis, use one of them at a time per pedal. To combine a deadzone
 > with a custom shape, author the whole thing as a single `_curve` upload (this
-> is what the logi-dd editor does).
+> is what the logi-wheel editor does).
 
 ### wheel_combined_pedals
 **Access**: Read/Write, **Values**: `0` (separate) / `1` (combined)

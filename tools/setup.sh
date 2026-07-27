@@ -62,7 +62,7 @@ doctor() {
 		bad "hid_logitech_dd is not loaded (run: sudo ./tools/setup.sh)"
 	fi
 	# App versions, when the tools are on PATH; bug reports want these.
-	for tool in logi-dd logi-dd-gui logi-ffb logi-tf-sim; do
+	for tool in logi-wheel logi-wheel-gui logi-ffb logi-tf-sim; do
 		if command -v "$tool" >/dev/null 2>&1; then
 			ok "$tool on PATH ($("$tool" --version 2>/dev/null || echo "version flag unsupported"))"
 		fi

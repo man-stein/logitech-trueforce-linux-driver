@@ -27,7 +27,7 @@
 #     C268  G PRO Racing Wheel (PlayStation/PC)
 #
 #   Gear-driven, but same TrueForce stream protocol - access is for
-#   logi-tf-sim (the interface-2 hidraw node) and logi-dd, since the
+#   logi-tf-sim (the interface-2 hidraw node) and logi-wheel, since the
 #   SDK's own TrueForce path does not work for the PS G923 under Proton:
 #     C266  G923 (PlayStation/PC)
 #     C267  G923 (PlayStation 4/PC)

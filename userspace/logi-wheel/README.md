@@ -1,0 +1,179 @@
+# logi-wheel
+
+Settings apps for the supported Logitech wheels (RS50, G PRO, and the G923):
+a terminal app (`logi-wheel`) and a desktop app (`logi-wheel-gui`), native
+Linux stand-ins for the parts of G HUB that configure the wheel. Both read
+and write the driver's sysfs attributes (the direct-drive wheels' `wheel_*`
+set, or the G923's classic `range`/`gain`/`autocenter`/`combine_pedals`
+set) with typed values, validation, and mode awareness, so you do not have
+to `echo` values into sysfs by hand. The workspace also builds `logi-ffb`,
+the DirectInput force-feedback proxy (see below).
+
+## Features
+
+- **Every wheel setting in one place**, grouped into categories: Force
+  feedback, Steering, Pedals, LIGHTSYNC, Profiles / mode, Info. Each row shows
+  the live value read from the wheel; settings absent on your hardware are
+  marked unavailable rather than hidden. Steering and Pedals have an Advanced
+  toggle that reveals the full curve and filter set behind the simple sliders.
+- **Typed, validated edits.** Percentages, ranges, enums, toggles and colours
+  are parsed and range-checked before they reach the wheel, so an out-of-range
+  value is rejected in the UI instead of erroring at the device.
+- **Mode awareness.** Settings that only apply in desktop or onboard mode are
+  flagged, and the app can switch the wheel between the two (the `d` key). A
+  write that needs the other mode tells you so instead of failing silently.
+- **A G HUB-style curve editor** for the pedal, steering and handbrake response
+  curves: edit control points (input / output percent) plus lower and upper
+  deadzones, with a live plot of the composed curve, then upload it.
+- **A LIGHTSYNC slot editor**: per-LED colors (with an HSV picker in the GUI),
+  effect, brightness and animation direction, composed per onboard slot.
+- **Onboard profile renaming**: pick a slot and type a new name.
+- **Combined pedals** toggle and per-pedal / handbrake sensitivity sliders.
+- **A Setup section**: a per-game action panel. It lists your installed
+  Steam/Proton games, matches each to the compatibility registry, and shows
+  only the control that game needs (install/remove TrueForce, a logi-ffb
+  launch option, a simulated-TrueForce switch, or nothing), alongside the
+  global helpers (logi-ffb, the TrueForce files folder, the simulated-
+  TrueForce daemon). The full compatibility list lives in the project wiki.
+- **A Test section**: a live input monitor and guarded force-feedback
+  simulations.
+
+## Building
+
+logi-wheel is a Rust workspace of four crates (see Layout below): the
+`logi-wheel-core` library, the `logi-wheel-tui` and `logi-wheel-gui` frontends, and the
+`ffb-proxy` crate that builds `logi-ffb`. It needs a Rust toolchain (edition
+2021, Rust 1.88 or newer; the Slint GUI needs 1.92). The TUI needs
+no system libraries beyond the standard terminal; the GUI additionally needs
+`pkg-config` and the fontconfig headers (`libfontconfig-dev` on Debian/Ubuntu,
+`fontconfig-devel` on Fedora, `fontconfig` on Arch).
+
+```bash
+cd userspace/logi-wheel
+cargo build --release
+```
+
+The binaries land at `userspace/logi-wheel/target/release/{logi-wheel,logi-wheel-gui,logi-ffb}`.
+Copy them somewhere on your `PATH` if you like, or run them in place.
+
+The workspace crates share one version (`workspace.package` in `Cargo.toml`)
+that follows the repository's release tag; bump it as part of cutting a release.
+
+## Running
+
+```bash
+./target/release/logi-wheel
+```
+
+logi-wheel finds the wheel automatically (it looks for the driver's sysfs
+attributes). The driver's udev rule makes the `wheel_*` settings files
+writable for the local user automatically, so no group membership or terminal
+step is needed - reads and writes both work as your normal user. If no wheel
+is found, logi-wheel prints `no wheel found` and exits (check the driver is loaded
+and bound).
+
+## Keys
+
+The TUI is a sidebar of views plus a content pane. Press `?` at any time for
+the complete key list of the current context; that in-app overlay and the
+footer render from the same table, so they are the authoritative reference.
+
+**Global** (whenever no text entry is open)
+
+| Key | Action |
+|-----|--------|
+| 1-7 | Jump straight to that sidebar view |
+| Tab | Switch focus between the sidebar and the content pane |
+| Esc | Close the topmost editor / overlay, else back to the sidebar |
+| ? | The full key list for the current context |
+| q | Quit |
+
+**Sidebar focus**: Up / Down choose a view (its content loads live),
+Enter / Right move focus into the content pane.
+
+**Settings views** (content focus)
+
+| Key | Action |
+|-----|--------|
+| Up / Down | Select a setting |
+| Enter | Edit the selected setting (or apply / run it, for actions) |
+| i | Explain the selected setting |
+| a | Toggle sensitivity / full curve for the row's axis (Steering, Pedals) |
+| d | Toggle desktop / onboard mode (on a saved-profile row: delete it) |
+| r | Re-read all values from the wheel |
+
+**Editing a value**: Left / Right nudge the value (or type, for text fields),
+Enter commits, Esc cancels.
+
+**Curve editor** (opens on a curve setting): Up / Down move between fields
+(point, input, output, lower deadzone, upper deadzone), Left / Right adjust the
+selected field, `+` / `-` add or delete a point, Enter uploads the curve, Esc
+cancels.
+
+**LED color picker** (opens on the LED colors row): Tab switches between the
+strip and the palette, arrows move, Enter paints the selected LED (`a` paints
+all, `p` the LED and its mirror pair, `x` opens hex entry), `w` writes the
+strip to the wheel, Esc cancels.
+
+**Setup and Info / Testing** are sectioned views with their own keys (in the
+Setup "Your games" list `i`/`u` install or remove TrueForce and `g` toggles
+simulated TrueForce; the daemon section has its master controls; Info /
+Testing has the guarded force simulations); the footer shows the most useful
+ones and `?` lists them all.
+
+## DirectInput force feedback (`logi-ffb`)
+
+DirectInput games under Wine/Proton get no force feedback on the real wheel
+directly, because its HID descriptor has no PID (force-feedback) collection.
+The `logi-ffb` binary, built from the `ffb-proxy` crate in this workspace,
+fixes that: it presents a virtual force-feedback wheel that does carry a PID
+collection, enables Wine's hidraw PID path for that virtual wheel
+automatically (via `PROTON_ENABLE_HIDRAW`, set on the launched process
+without disturbing any value you already had there), and forwards the
+effects Wine drives onto the real wheel's existing kernel evdev FF interface.
+You do not set the hidraw variable yourself.
+
+This needs both the packaged udev rules (for `/dev/uhid` and for the virtual
+wheel's own hidraw node) and Proton 10, Proton Experimental, or GE-Proton 10
+or newer; `PROTON_ENABLE_HIDRAW` does not exist in Proton 9.0 or earlier.
+
+Usage is a single prepended command, or the same string pasted into a Steam
+title's launch options:
+
+```
+logi-ffb %command%
+```
+
+See [`crates/ffb-proxy/README.md`](crates/ffb-proxy/README.md) for how it
+works, build instructions, and the standalone `--daemon` mode.
+
+## Layout
+
+- `crates/logi-wheel-core` - the shared library: the setting registry, typed
+  values, validation, the sysfs read/write layer, plus the `steam` (Steam /
+  Proton game discovery), `evtest` (live input monitoring for the Test views),
+  `lightsync` (composed per-slot LED model) and `shaping` (simple / advanced
+  attribute split) modules. Reusable without either frontend.
+- `crates/logi-wheel-tui` - the terminal UI (ratatui + crossterm), builds the
+  `logi-wheel` binary.
+- `crates/logi-wheel-gui` - the desktop UI (Slint), builds the `logi-wheel-gui`
+  binary.
+- `crates/ffb-proxy` - the `logi-ffb` DirectInput force-feedback proxy binary.
+
+## Development without a wheel
+
+Set `LOGI_WHEEL_SYSFS_DIR=/path/to/dir` to point the apps at a directory of
+plain `wheel_*` files instead of the real sysfs tree; both frontends then run
+fully headless against it, no wheel or driver needed. The pre-rename
+`LOGI_DD_SYSFS_DIR` still works as a deprecated alias (`LOGI_WHEEL_SYSFS_DIR`
+wins if both are set).
+
+## Upgrading from logi-dd
+
+The settings app used to be named `logi-dd`; it is renamed to `logi-wheel`
+because the driver now also supports the belt-driven G923, not just the
+direct-drive wheels. Packages upgrade in place (see the top-level
+CHANGELOG), and `logi-dd`/`logi-dd-gui` are installed as transitional
+symlinks to the new binaries. Existing profiles and `tf-sim.conf` under
+`~/.config/logi-dd` keep working untouched: they are still read
+automatically whenever `~/.config/logi-wheel` does not exist yet.

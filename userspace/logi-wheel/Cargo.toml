@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/logi-wheel-core", "crates/logi-wheel-tui", "crates/ffb-proxy", "crates/logi-wheel-gui", "crates/tf-sim"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.74"
+version = "0.20.0"
+license = "GPL-2.0"

@@ -1,0 +1,3 @@
+userspace/logi-wheel/target/release/logi-wheel-gui usr/bin/
+desktop/logi-wheel-gui.desktop usr/share/applications/
+desktop/logi-wheel-gui.svg usr/share/icons/hicolor/scalable/apps/

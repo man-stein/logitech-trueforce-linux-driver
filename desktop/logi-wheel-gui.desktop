@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Logi Wheel
+GenericName=Racing wheel control
+Comment=Settings, helpers and TrueForce for Logitech racing wheels
+Exec=logi-wheel-gui
+Icon=logi-wheel-gui
+StartupWMClass=logi-wheel-gui
+Terminal=false
+Categories=Settings;HardwareSettings;Game;
+Keywords=Logitech;TrueForce;wheel;force feedback;racing;RS50;G PRO;sim;

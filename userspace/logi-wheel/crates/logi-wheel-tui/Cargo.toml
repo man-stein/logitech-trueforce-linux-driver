@@ -1,0 +1,18 @@
+[package]
+name = "logi-wheel-tui"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "logi-wheel"
+path = "src/main.rs"
+
+[dependencies]
+logi-wheel-core = { path = "../logi-wheel-core" }
+ratatui = "0.28"
+crossterm = "0.28"
+# Only for the Test view's evdev force-feedback ioctls (EVIOCSFF/EVIOCRMFF)
+# and the non-blocking open flag; already present in the workspace tree.
+libc = "0.2"

@@ -61,7 +61,7 @@ body:
     id: driver-version
     attributes:
       label: Driver version
-      description: "`cat /sys/module/hid_logitech_dd/version` (also printed in dmesg at load, and shown with the app version on the Info / Testing page of logi-dd / logi-dd-gui)"
+      description: "`cat /sys/module/hid_logitech_dd/version` (also printed in dmesg at load, and shown with the app version on the Info / Testing page of logi-wheel / logi-wheel-gui)"
       placeholder: v0.16.1
     validations:
       required: true

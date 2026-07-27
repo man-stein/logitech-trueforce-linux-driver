@@ -1,0 +1,3 @@
+# Transitional symlink: scripts and habits built around the old logi-dd
+# binary name keep working after the logi-dd -> logi-wheel rename (0.20.0).
+usr/bin/logi-wheel usr/bin/logi-dd

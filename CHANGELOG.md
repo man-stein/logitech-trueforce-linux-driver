@@ -53,9 +53,32 @@ the contract is "it works on RS50 and G Pro as listed here".
   stop it racing us for c266/c267 - if you run it for a different
   Logitech wheel (G29, G27, DFGT, ...) that wheel now falls back to the
   in-tree `hid-logitech` driver instead.
-- **logi-dd G923 support**: the TUI and GUI recognise the G923 and expose
+- **logi-wheel G923 support**: the TUI and GUI recognise the G923 and expose
   its four classic settings, with its own wheel image on the Info/Testing
   page alongside the RS50 and G PRO.
+
+### Changed
+- **The settings app is renamed from `logi-dd` to `logi-wheel`** (TUI binary
+  `logi-dd` -> `logi-wheel`, GUI binary `logi-dd-gui` -> `logi-wheel-gui`;
+  `logi-ffb` and `logi-tf-sim` keep their names). Reason: "dd" meant
+  direct-drive, but the driver now also supports the belt-driven G923, and
+  the app configures every supported wheel, not just the direct-drive ones.
+  - **Config files keep working automatically.** Profiles and
+    `tf-sim.conf` move to `$XDG_CONFIG_HOME/logi-wheel` (falling back to
+    `~/.config/logi-wheel`); the old `logi-dd` directory is still read
+    transparently whenever the new one does not exist yet, so existing
+    profiles and tf-sim settings are picked up with no manual migration.
+    Once anything is saved under the new path, it wins over the old one.
+  - **`LOGI_DD_SYSFS_DIR`/`LOGI_DD_TEST_OVERLAYS`** still work as deprecated
+    aliases for the new `LOGI_WHEEL_SYSFS_DIR`/`LOGI_WHEEL_TEST_OVERLAYS`;
+    the new name wins if both are set.
+  - **Packages upgrade in place.** The AUR, Debian and RPM packages for
+    `logi-dd`/`logi-dd-gui` are replaced by `logi-wheel`/`logi-wheel-gui`
+    with `Provides`/`Replaces`/`Conflicts` (or `Obsoletes`, on RPM) on the
+    old names, so a package manager moves existing installs over cleanly.
+  - **Transitional symlinks**: `logi-dd` and `logi-dd-gui` are installed as
+    symlinks to `logi-wheel`/`logi-wheel-gui`, so scripts and desktop
+    shortcuts referencing the old binary names keep working.
 
 ### Notes
 - **G923 force feedback needs no Proton launch options**: no

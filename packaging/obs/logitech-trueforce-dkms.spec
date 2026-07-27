@@ -3,9 +3,9 @@
 # DKMS compiles on the user's machine and rebuilds on kernel updates. The
 # same source, dkms.conf, and udev rules as every other channel; the module
 # builds as hid-logitech-dd. The userspace companions are ordinary compiled
-# binaries, shipped as layered subpackages: driver <- logi-dd (TUI,
+# binaries, shipped as layered subpackages: driver <- logi-wheel (TUI,
 # logi-ffb, logi-tf-sim, shim installer; the complete headless install)
-# <- logi-dd-gui (graphical settings app + desktop entry).
+# <- logi-wheel-gui (graphical settings app + desktop entry).
 %global module   logitech-trueforce
 %global modver   0.12.1
 
@@ -19,8 +19,8 @@ Source0:        logitech-trueforce-linux-driver-%{version}.tar.gz
 # Vendored crate dependencies (produced by `cargo vendor` in the publish
 # workflow): OBS builders have no network access, so the Rust workspace
 # builds --offline against this instead of index.crates.io.
-Source1:        logi-dd-vendor-%{version}.tar.zst
-# Not noarch: the logi-dd/logi-dd-gui subpackages ship compiled Rust
+Source1:        logi-wheel-vendor-%{version}.tar.zst
+# Not noarch: the logi-wheel/logi-wheel-gui subpackages ship compiled Rust
 # binaries (rpmlint aborts on binaries in noarch packages); the dkms
 # sources riding an arch package is the conventional trade-off.
 BuildRequires:  cargo, rust
@@ -31,7 +31,7 @@ BuildRequires:  zstd
 # logi-tf-sim's build.rs compiles the in-repo libtrueforce.a via make+gcc
 # and links it statically (no runtime dependency).
 BuildRequires:  gcc, make
-# logi-dd-gui's yeslogic-fontconfig-sys dependency links fontconfig/freetype
+# logi-wheel-gui's yeslogic-fontconfig-sys dependency links fontconfig/freetype
 # at build time (build.rs calls pkg_config::find_library, no dlopen), so the
 # devel package and pkg-config must be present or `cargo build` panics and
 # aborts the whole %build. pkgconfig(fontconfig) pulls both on openSUSE and
@@ -39,9 +39,9 @@ BuildRequires:  gcc, make
 BuildRequires:  pkgconfig(fontconfig)
 Requires:       dkms >= 2.1.0.0
 # The pre-split package pulled the userspace tools in hard; recommending
-# logi-dd keeps "install the driver, get the ecosystem" while still
+# logi-wheel keeps "install the driver, get the ecosystem" while still
 # allowing a lean module-only install.
-Recommends:     logi-dd
+Recommends:     logi-wheel
 # Switches the G923 Xbox edition (c26d) into PC mode (c26e) on plug-in;
 # the udev rule that runs it is a no-op without the binary present.
 Recommends:     usb_modeswitch
@@ -71,34 +71,42 @@ TrueForce in Proton sims additionally needs Logitech's proprietary signed SDK
 DLLs, which are not shipped by this package; see the bundled Getting Started
 guide.
 
-# Layered userspace subpackages: driver <- logi-dd (the complete headless
-# install) <- logi-dd-gui. logi-ffb/logi-dd/logi-tf-sim are GPL-2.0-only
-# (the main package's License); logi-dd-gui is GPL-3.0-or-later.
-%package -n logi-dd
+# Layered userspace subpackages: driver <- logi-wheel (the complete headless
+# install) <- logi-wheel-gui. logi-ffb/logi-wheel/logi-tf-sim are GPL-2.0-only
+# (the main package's License); logi-wheel-gui is GPL-3.0-or-later.
+%package -n logi-wheel
 Summary:        Terminal tools for the Logitech direct-drive wheel driver
 License:        GPL-2.0-only
 Requires:       logitech-trueforce-dkms
 # The shim installer edits the wine prefix registry with python3.
 Recommends:     python3
+# Renamed from logi-dd (0.20.0): "dd" meant direct-drive, but the app
+# configures every supported wheel, including the belt-driven G923. These
+# move an existing logi-dd install onto this package automatically.
+Provides:       logi-dd = %{version}-%{release}
+Obsoletes:      logi-dd < %{version}-%{release}
 
-%description -n logi-dd
+%description -n logi-wheel
 The complete headless toolset for the Logitech direct-drive wheel driver:
-logi-dd, a terminal settings UI, logi-ffb, a DirectInput force-feedback
+logi-wheel, a terminal settings UI, logi-ffb, a DirectInput force-feedback
 proxy, logi-tf-sim, a simulated-TrueForce daemon driven by game telemetry,
 and logitech-trueforce-install-shim, the TrueForce SDK shim installer for
 Proton prefixes.
 
-%package -n logi-dd-gui
+%package -n logi-wheel-gui
 Summary:        Graphical settings app for the Logitech direct-drive wheel driver
 License:        GPL-3.0-or-later
-Requires:       logi-dd
+Requires:       logi-wheel
 # Owns the hicolor icon directories the GUI's launcher icon lands in.
 Requires:       hicolor-icon-theme
-# logi-dd-gui (Slint GUI) runtime stack: windowing (Wayland/X11), input
+# Renamed from logi-dd-gui (0.20.0); see logi-wheel's subpackage for why.
+Provides:       logi-dd-gui = %{version}-%{release}
+Obsoletes:      logi-dd-gui < %{version}-%{release}
+# logi-wheel-gui (Slint GUI) runtime stack: windowing (Wayland/X11), input
 # (xkbcommon), and GL/EGL rendering. Derived from `ldd`/`strings` on the
 # built binary; Slint dlopen's the wayland/X11/GL bits at runtime rather
 # than linking them, so ldd alone would miss them. Both openSUSE
-# Tumbleweed and Fedora track current Rust, so logi-dd-gui's MSRV (1.92,
+# Tumbleweed and Fedora track current Rust, so logi-wheel-gui's MSRV (1.92,
 # from Slint 1.17.1) always builds here; no version guard needed (contrast
 # packaging/debian/rules).
 %if 0%{?suse_version}
@@ -131,8 +139,8 @@ Requires:       fontconfig
 Requires:       freetype
 %endif
 
-%description -n logi-dd-gui
-logi-dd-gui, a graphical settings app (GPL-3.0-or-later, with a desktop
+%description -n logi-wheel-gui
+logi-wheel-gui, a graphical settings app (GPL-3.0-or-later, with a desktop
 menu entry) for the Logitech direct-drive wheel driver: wheel settings,
 LIGHTSYNC, response curves, game-helper setup pages, and a test section.
 
@@ -140,9 +148,9 @@ LIGHTSYNC, response curves, game-helper setup pages, and a test section.
 %autosetup -n logitech-trueforce-linux-driver-%{version}
 # Unpack the vendored crates into the Rust workspace and point cargo at
 # them, so %%build resolves every dependency offline.
-tar -xf %{SOURCE1} -C userspace/logi-dd
-mkdir -p userspace/logi-dd/.cargo
-cat > userspace/logi-dd/.cargo/config.toml <<'EOF'
+tar -xf %{SOURCE1} -C userspace/logi-wheel
+mkdir -p userspace/logi-wheel/.cargo
+cat > userspace/logi-wheel/.cargo/config.toml <<'EOF'
 [source.crates-io]
 replace-with = "vendored-sources"
 
@@ -153,7 +161,7 @@ EOF
 %build
 # Nothing to compile here for the DKMS package: DKMS builds the module on
 # the target machine. The userspace companions do build here, including
-# logi-dd-gui (the Slint GUI): both openSUSE and Fedora ship a rustc new
+# logi-wheel-gui (the Slint GUI): both openSUSE and Fedora ship a rustc new
 # enough for its MSRV, so unlike packaging/debian/rules no version guard
 # is needed.
 # OBS builders have no network access, so every crate dependency comes
@@ -162,7 +170,7 @@ EOF
 # cargo discovers .cargo/config.toml (which redirects crates.io to the
 # vendor directory) by walking up from the CWD, not from --manifest-path,
 # so build from inside the workspace.
-cd userspace/logi-dd
+cd userspace/logi-wheel
 cargo build --release --offline --locked
 
 %install
@@ -196,23 +204,29 @@ install -D -m 0644 udev/73-logitech-g923-xbox-modeswitch.rules \
 install -D -m 0644 packaging/modprobe.d/hid-logitech-dd.conf \
     %{buildroot}%{_sysconfdir}/modprobe.d/hid-logitech-dd.conf
 
-# Headless toolset (the logi-dd subpackage).
-install -D -m 0755 userspace/logi-dd/target/release/logi-dd \
-    %{buildroot}%{_bindir}/logi-dd
-install -D -m 0755 userspace/logi-dd/target/release/logi-ffb \
+# Headless toolset (the logi-wheel subpackage).
+install -D -m 0755 userspace/logi-wheel/target/release/logi-wheel \
+    %{buildroot}%{_bindir}/logi-wheel
+install -D -m 0755 userspace/logi-wheel/target/release/logi-ffb \
     %{buildroot}%{_bindir}/logi-ffb
-install -D -m 0755 userspace/logi-dd/target/release/logi-tf-sim \
+install -D -m 0755 userspace/logi-wheel/target/release/logi-tf-sim \
     %{buildroot}%{_bindir}/logi-tf-sim
+# Transitional symlink: scripts and habits built around the old logi-dd
+# binary name keep working.
+ln -s logi-wheel %{buildroot}%{_bindir}/logi-dd
 # TrueForce-in-Proton shim installer (no-op without the proprietary SDK DLLs).
 install -D -m 0755 tools/install-tf-shim.sh \
     %{buildroot}%{_bindir}/logitech-trueforce-install-shim
-# The GUI + its desktop integration (the logi-dd-gui subpackage).
-install -D -m 0755 userspace/logi-dd/target/release/logi-dd-gui \
-    %{buildroot}%{_bindir}/logi-dd-gui
-install -D -m 0644 desktop/logi-dd-gui.desktop \
-    %{buildroot}%{_datadir}/applications/logi-dd-gui.desktop
-install -D -m 0644 desktop/logi-dd-gui.svg \
-    %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/logi-dd-gui.svg
+# The GUI + its desktop integration (the logi-wheel-gui subpackage).
+install -D -m 0755 userspace/logi-wheel/target/release/logi-wheel-gui \
+    %{buildroot}%{_bindir}/logi-wheel-gui
+install -D -m 0644 desktop/logi-wheel-gui.desktop \
+    %{buildroot}%{_datadir}/applications/logi-wheel-gui.desktop
+install -D -m 0644 desktop/logi-wheel-gui.svg \
+    %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/logi-wheel-gui.svg
+# Transitional symlink: scripts and habits built around the old
+# logi-dd-gui binary name keep working.
+ln -s logi-wheel-gui %{buildroot}%{_bindir}/logi-dd-gui
 
 %files
 %license COPYING
@@ -224,16 +238,18 @@ install -D -m 0644 desktop/logi-dd-gui.svg \
 %{_prefix}/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules
 %config(noreplace) %{_sysconfdir}/modprobe.d/hid-logitech-dd.conf
 
-%files -n logi-dd
+%files -n logi-wheel
+%{_bindir}/logi-wheel
 %{_bindir}/logi-dd
 %{_bindir}/logi-ffb
 %{_bindir}/logi-tf-sim
 %{_bindir}/logitech-trueforce-install-shim
 
-%files -n logi-dd-gui
+%files -n logi-wheel-gui
+%{_bindir}/logi-wheel-gui
 %{_bindir}/logi-dd-gui
-%{_datadir}/applications/logi-dd-gui.desktop
-%{_datadir}/icons/hicolor/scalable/apps/logi-dd-gui.svg
+%{_datadir}/applications/logi-wheel-gui.desktop
+%{_datadir}/icons/hicolor/scalable/apps/logi-wheel-gui.svg
 
 %post
 dkms add -m %{module} -v %{modver} --rpm_safe_upgrade >/dev/null 2>&1 || true
@@ -247,6 +263,12 @@ fi
 dkms remove -m %{module} -v %{modver} --all --rpm_safe_upgrade >/dev/null 2>&1 || true
 
 %changelog
+* Sun Jul 26 2026 mescon <5875228+mescon@users.noreply.github.com> - 0.20.0-1
+- Renamed the userspace subpackages: logi-dd -> logi-wheel, logi-dd-gui ->
+  logi-wheel-gui ("dd" meant direct-drive, but the app now also covers the
+  belt-driven G923). Provides/Obsoletes on the old names move existing
+  installs over automatically.
+
 * Mon Jul 20 2026 mescon <5875228+mescon@users.noreply.github.com> - 0.16.1-1
 - Build the Rust workspace offline against vendored crate dependencies
   (new Source1 tarball produced by the publish workflow): OBS builders
