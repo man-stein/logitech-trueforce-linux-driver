@@ -582,7 +582,12 @@ mod tests {
         };
         let status = v.spawn_sim(SimKind::Force);
         assert!(status.contains("playing"), "status: {status}");
-        assert!(v.sim_running());
+        // Deliberately no `assert!(v.sim_running())` here: the worker
+        // fails its open() immediately against a nonexistent node and
+        // clears the flag, so whether it is still set by the time this
+        // thread looks is a race the test must not depend on. What the
+        // flag does synchronously is covered by
+        // `stop_sim_flags_a_playing_sim`.
 
         // The sequence thread runs on its own; wait it out (bounded, no
         // synchronous join point from here).
