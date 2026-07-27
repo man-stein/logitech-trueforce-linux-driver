@@ -102,6 +102,9 @@ fn run(mut app: App<RealSysfs>) -> Result<(), Box<dyn std::error::Error>> {
         // Advance a ticking force-sim countdown (a no-op while none is
         // armed); fires the sim itself once its 5 s elapses.
         app.tick_sim_countdown();
+        // Pick up a just-finished sequence's summary (a no-op while none
+        // has posted one since the last tick).
+        app.tick_sim_status();
         // An idle tick (no key): check for external profile/mode drift, at
         // most once per `DRIFT_POLL_TIMEOUT` even while the monitor's 33ms
         // tick is driving the loop.

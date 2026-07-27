@@ -110,6 +110,10 @@ export component InfoPage inherits Rectangle {
     // the Stop button.
     in property <bool> sim-running: false;
     in property <string> sim-error: "";
+    // The current step's label while a sequence plays, or the
+    // just-finished sequence's one-line summary once it stops (set from
+    // Rust; see `App.test-sim-status`).
+    in property <string> sim-status: "";
 
     callback rescan();
     // Fired only from the confirm dialog's Continue button, never
@@ -574,7 +578,7 @@ export component InfoPage inherits Rectangle {
                             color: Theme.text-color;
                         }
                         Text {
-                            text: "Plays a short, gentle effect (25% strength, 2 seconds) through the wheel's force-feedback path. The texture test plays a rumble-style texture through the FFB path.";
+                            text: "Plays a short sequence of labelled steps (constant force both directions, a rising ramp, centering spring, damper, sine vibration) through the wheel's force-feedback path, at moderate strength. The texture test plays a frequency progression (low rumble through high-frequency buzz) through the TrueForce/FFB path.";
                             font-size: 12px;
                             color: Theme.muted-text-color;
                             wrap: word-wrap;
@@ -599,11 +603,12 @@ export component InfoPage inherits Rectangle {
                             alignment: start;
 
                             Text {
-                                text: "force playing...";
+                                text: root.sim-status;
                                 font-size: 12px;
                                 font-weight: 700;
                                 vertical-alignment: center;
                                 color: Theme.ok-color;
+                                wrap: word-wrap;
                             }
                             Button {
                                 text: "Stop";

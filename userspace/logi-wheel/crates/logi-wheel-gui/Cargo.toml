@@ -8,7 +8,7 @@ rust-version = "1.92"
 [dependencies]
 slint = "1.17"
 logi-wheel-core = { path = "../logi-wheel-core" }
-# Only for the Test page's evdev force-feedback ioctls (EVIOCSFF/EVIOCRMFF)
+# Only for the Test page's evdev force-feedback ioctls (EVIOCSFF/EVIOCRMFF/EVIOCGBIT)
 # and the non-blocking open flag; already present in the workspace tree.
 libc = "0.2"
 

@@ -180,56 +180,16 @@ fn apply_event(snapshot: &mut Snapshot, chunk: &[u8], codes: &[u16]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Force-feedback simulation.
+// Force-feedback test sequences: the evdev file handle and ioctls that
+// back `logi_wheel_core::fftest`'s `FfDevice` trait. The step tables and
+// the `ff_effect` byte layout live in core (shared with the TUI's
+// `wheel_test`); only this device plumbing is per-front-end.
 // ---------------------------------------------------------------------------
 
-/// Which canned effect a confirmed simulation plays. Both are fixed at
-/// ~25% magnitude for 2 seconds; nothing here is user-tunable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimKind {
-    /// A constant pull to one side (`FF_CONSTANT`).
-    ConstantForce,
-    /// A rumble-style sine texture played through the FFB path
-    /// (`FF_PERIODIC`/`FF_SINE`).
-    Texture,
-}
+pub use logi_wheel_core::fftest::SimKind;
+use logi_wheel_core::fftest::{self, DeviceError, FfDevice, FfEffect, SequenceEvent};
 
-/// ~25% of the i16 full scale.
-const SIM_LEVEL: i16 = 0x2000;
-/// How long the effect plays.
-const SIM_DURATION_MS: u16 = 2000;
-/// The sine texture's period (25 ms = 40 Hz, a gritty rumble).
-const SIM_PERIOD_MS: u16 = 25;
-/// How often the playback wait re-checks the cancel flag.
-const SIM_CANCEL_POLL: Duration = Duration::from_millis(10);
-
-const EV_FF: u16 = 0x15;
-const FF_PERIODIC: u16 = 0x51;
-const FF_CONSTANT: u16 = 0x52;
-const FF_SINE: u16 = 0x5a;
-const FF_GAIN: u16 = 0x60;
-
-/// Size of the union at the end of `struct ff_effect` (the largest
-/// member, `ff_periodic_effect`, is 32 bytes on a 64-bit kernel).
-const FF_UNION_SIZE: usize = 32;
-
-/// Mirrors the kernel's `struct ff_effect` (`linux/input.h`): type, id,
-/// direction, trigger (button+interval), replay (length+delay), then the
-/// union as an 8-byte-aligned byte array (see the module doc).
-#[repr(C)]
-struct FfEffect {
-    type_: u16,
-    id: i16,
-    direction: u16,
-    trigger_button: u16,
-    trigger_interval: u16,
-    replay_length: u16,
-    replay_delay: u16,
-    u: FfUnion,
-}
-
-#[repr(C, align(8))]
-struct FfUnion([u8; FF_UNION_SIZE]);
+const EVIOCGBIT_FF_NR: u8 = 0x20 + fftest::EV_FF as u8;
 
 /// `_IOW('E', nr, T)`: write-direction ioctl request number, as
 /// `linux/ioctl.h` encodes it on x86_64 (dir 1 in the top 2 bits, size
@@ -238,138 +198,116 @@ const fn iow(nr: u8, size: usize) -> libc::c_ulong {
     (1 << 30) | ((size as libc::c_ulong) << 16) | (('E' as libc::c_ulong) << 8) | nr as libc::c_ulong
 }
 
+/// `_IOR('E', nr, T)`, same encoding with the read-direction bits set.
+const fn ior(nr: u8, size: usize) -> libc::c_ulong {
+    (2 << 30) | ((size as libc::c_ulong) << 16) | (('E' as libc::c_ulong) << 8) | nr as libc::c_ulong
+}
+
 /// `EVIOCSFF` (`_IOW('E', 0x80, struct ff_effect)`).
 const EVIOCSFF: libc::c_ulong = iow(0x80, std::mem::size_of::<FfEffect>());
 /// `EVIOCRMFF` (`_IOW('E', 0x81, int)`).
 const EVIOCRMFF: libc::c_ulong = iow(0x81, std::mem::size_of::<libc::c_int>());
-
-/// Build the fixed test effect for `kind`, id -1 (kernel assigns one).
-fn sim_effect(kind: SimKind) -> FfEffect {
-    let mut u = [0u8; FF_UNION_SIZE];
-    let type_ = match kind {
-        SimKind::ConstantForce => {
-            // ff_constant_effect: level:i16 @0, envelope zeroed.
-            u[0..2].copy_from_slice(&SIM_LEVEL.to_le_bytes());
-            FF_CONSTANT
-        }
-        SimKind::Texture => {
-            // ff_periodic_effect: waveform:u16 @0, period:u16 @2,
-            // magnitude:i16 @4; offset/phase/envelope zeroed.
-            u[0..2].copy_from_slice(&FF_SINE.to_le_bytes());
-            u[2..4].copy_from_slice(&SIM_PERIOD_MS.to_le_bytes());
-            u[4..6].copy_from_slice(&SIM_LEVEL.to_le_bytes());
-            FF_PERIODIC
-        }
-    };
-    FfEffect {
-        type_,
-        id: -1,
-        // 0x4000 = 90 degrees; for a single-axis wheel this just picks a
-        // pull direction, the magnitude stays SIM_LEVEL.
-        direction: 0x4000,
-        trigger_button: 0,
-        trigger_interval: 0,
-        replay_length: SIM_DURATION_MS,
-        replay_delay: 0,
-        u: FfUnion(u),
-    }
-}
-
-/// Encode one `struct input_event` (64-bit ABI) with a zeroed timestamp;
-/// the kernel fills timestamps in itself for written FF events.
-fn encode_ff_event(code: u16, value: i32) -> [u8; EVENT_SIZE] {
-    let mut b = [0u8; EVENT_SIZE];
-    b[16..18].copy_from_slice(&EV_FF.to_le_bytes());
-    b[18..20].copy_from_slice(&code.to_le_bytes());
-    b[20..24].copy_from_slice(&value.to_le_bytes());
-    b
-}
-
-/// True for the errno that means the wheel went away mid-simulation; the
-/// caller cleans up silently instead of reporting an error.
-fn device_gone(e: &std::io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::ENODEV))
-}
-
-/// How a playback wait ended: the effect ran its full 2 s, or the user
-/// pressed Stop and `cancel` flipped mid-play.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitOutcome {
-    Completed,
-    Cancelled,
-}
-
-/// Sleep out `duration` in [`SIM_CANCEL_POLL`] ticks, returning early as
-/// soon as `cancel` flips. This is the sim's whole cancel state machine:
-/// both outcomes fall through to the same single cleanup site in
-/// [`run_simulation`], so complete-then-stop and cancel-then-stop clean
-/// up exactly once each.
-fn wait_out(duration: Duration, cancel: &AtomicBool) -> WaitOutcome {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
-        if cancel.load(Ordering::Relaxed) {
-            return WaitOutcome::Cancelled;
-        }
-        std::thread::sleep(SIM_CANCEL_POLL.min(duration));
-    }
-    WaitOutcome::Completed
-}
-
-/// Play `kind` on the wheel at `path`: upload, play, wait out the 2 s
-/// duration (or until `cancel` flips), then always stop and erase the
-/// effect (also on every error path). Blocking; callers run it on its
-/// own thread and cancel by setting the shared flag. A device that
-/// disappears mid-sim returns `Ok` (nothing left to clean up); a
-/// cancelled run is also `Ok` (the user asked for the stop).
-pub fn run_simulation(path: &str, kind: SimKind, cancel: &AtomicBool) -> Result<(), String> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("open {path}: {e}"))?;
-    let fd = file.as_raw_fd();
-
-    // The driver powers up with device gain unset and other tools (the
-    // logi-ffb proxy) zero it on shutdown; a zero gain would make the
-    // test silently do nothing, so assert full gain first.
-    write_event(&mut file, FF_GAIN, 0xFFFF).map_err(|e| format!("set gain: {e}"))?;
-
-    let mut effect = sim_effect(kind);
-    // SAFETY: fd is a valid open evdev fd and `effect` is a repr(C)
-    // mirror of the kernel's struct ff_effect (layout unit-tested
-    // below); the kernel writes the assigned id back through the
-    // pointer, which is why it must point at a mutable value.
-    let rc = unsafe { libc::ioctl(fd, EVIOCSFF, &mut effect as *mut FfEffect) };
-    if rc < 0 {
-        let e = std::io::Error::last_os_error();
-        return if device_gone(&e) { Ok(()) } else { Err(format!("upload effect: {e}")) };
-    }
-    let id = effect.id;
-
-    // Play, then wait for completion or cancellation; either way control
-    // falls through to the one cleanup site below.
-    let outcome = write_event(&mut file, id as u16, 1);
-    if outcome.is_ok() {
-        wait_out(Duration::from_millis(u64::from(SIM_DURATION_MS)), cancel);
-    }
-
-    // Unconditional cleanup: stop, then erase, whatever happened above
-    // (full 2 s, cancel, or a failed play write).
-    let _ = write_event(&mut file, id as u16, 0);
-    // SAFETY: same fd; EVIOCRMFF takes the effect id by value.
-    let _ = unsafe { libc::ioctl(fd, EVIOCRMFF, id as libc::c_ulong) };
-
-    match outcome {
-        Ok(()) => Ok(()),
-        Err(e) if device_gone(&e) => Ok(()),
-        Err(e) => Err(format!("play effect: {e}")),
-    }
-}
+/// `EVIOCGBIT(EV_FF, len)` (`_IOR('E', 0x20 + EV_FF, char[len])`).
+const EVIOCGBIT_FF: libc::c_ulong = ior(EVIOCGBIT_FF_NR, fftest::FF_BITS_LEN);
 
 /// Write one `EV_FF` event (play/stop/gain) to the device.
 fn write_event(file: &mut std::fs::File, code: u16, value: i32) -> std::io::Result<()> {
-    file.write_all(&encode_ff_event(code, value))
+    file.write_all(&fftest::encode_ff_event(code, value))
+}
+
+/// True for the errno that means the wheel is not there: `ENODEV` (a
+/// previously-open fd whose device vanished mid-sequence) or `ENOENT`
+/// (the node was already gone by the time we tried to open it, e.g. the
+/// countdown outlived an unplug). Either way the caller ends quietly
+/// instead of reporting an error.
+fn device_gone(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENOENT))
+}
+
+fn map_err(e: std::io::Error, what: &str) -> DeviceError {
+    if device_gone(&e) {
+        DeviceError::Gone
+    } else {
+        DeviceError::Other(format!("{what}: {e}"))
+    }
+}
+
+/// The open evdev node a sequence plays against, implementing
+/// `fftest::FfDevice` over `EVIOCSFF`/`EVIOCRMFF`/`EVIOCGBIT` and `EV_FF`
+/// writes.
+struct EvdevFf {
+    file: std::fs::File,
+}
+
+impl FfDevice for EvdevFf {
+    fn set_gain(&mut self, value: i32) -> Result<(), DeviceError> {
+        write_event(&mut self.file, fftest::FF_GAIN, value).map_err(|e| map_err(e, "set gain"))
+    }
+
+    fn upload(&mut self, effect: &FfEffect) -> Result<i16, DeviceError> {
+        let mut effect = *effect;
+        let fd = self.file.as_raw_fd();
+        // SAFETY: fd is a valid open evdev fd; `effect` is a repr(C)
+        // mirror of the kernel struct (layout unit-tested in
+        // `logi_wheel_core::fftest`) and stays alive across the call.
+        // The kernel writes the assigned id back through the same
+        // pointer, which is why `effect` is a local mutable copy.
+        let rc = unsafe { libc::ioctl(fd, EVIOCSFF, &mut effect as *mut FfEffect) };
+        if rc < 0 {
+            return Err(map_err(std::io::Error::last_os_error(), "upload effect"));
+        }
+        Ok(effect.id)
+    }
+
+    fn play(&mut self, id: i16, value: i32) -> Result<(), DeviceError> {
+        write_event(&mut self.file, id as u16, value).map_err(|e| map_err(e, "play effect"))
+    }
+
+    fn erase(&mut self, id: i16) {
+        // SAFETY: same fd; EVIOCRMFF takes the effect id by value.
+        // Best-effort: run_sequence calls this as unconditional cleanup,
+        // including after an error, so there is nothing left to do with
+        // a failure here.
+        let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCRMFF, id as libc::c_ulong) };
+    }
+
+    fn ff_bits(&mut self) -> [u8; fftest::FF_BITS_LEN] {
+        let mut bits = [0u8; fftest::FF_BITS_LEN];
+        // SAFETY: same fd; the buffer is exactly FF_BITS_LEN bytes, what
+        // the request number bakes in. A failed query (e.g. a device
+        // that does not support EVIOCGBIT at all) just leaves every bit
+        // clear, which run_sequence reads as "supports nothing" and
+        // skips every step - a safe fallback, not a panic.
+        let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGBIT_FF, bits.as_mut_ptr()) };
+        bits
+    }
+}
+
+/// Open `path` and run `steps` against it end to end (see
+/// `fftest::run_sequence`), reporting progress through `on_event` as it
+/// goes. Blocking; callers run it on its own thread and cancel by setting
+/// the shared flag. An open failure is folded into the same
+/// `SequenceOutcome` shape a mid-run failure would produce, so callers
+/// have one path to handle either.
+pub fn run_test_sequence(
+    path: &str,
+    steps: &'static [fftest::SimStep],
+    cancel: &AtomicBool,
+    on_event: impl FnMut(SequenceEvent),
+) -> fftest::SequenceOutcome {
+    let file = match std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            let end = if device_gone(&e) {
+                fftest::SequenceEnd::DeviceGone
+            } else {
+                fftest::SequenceEnd::Failed(format!("open {path}: {e}"))
+            };
+            return fftest::SequenceOutcome { end, ran: 0, skipped: Vec::new() };
+        }
+    };
+    let mut device = EvdevFf { file };
+    fftest::run_sequence(&mut device, steps, cancel, fftest::STEP_GAP, on_event)
 }
 
 #[cfg(test)]
@@ -377,67 +315,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ff_effect_layout_matches_kernel_abi() {
-        // sizeof(struct ff_effect) == 48, alignof == 8, union at offset
-        // 16 on a 64-bit kernel; the EVIOCSFF request number bakes the
-        // size in, so a mismatch fails the ioctl outright.
-        assert_eq!(std::mem::size_of::<FfEffect>(), 48);
-        assert_eq!(std::mem::align_of::<FfEffect>(), 8);
-        let e = sim_effect(SimKind::ConstantForce);
-        let union_offset = (&e.u as *const _ as usize) - (&e as *const _ as usize);
-        assert_eq!(union_offset, 16);
-    }
-
-    #[test]
     fn ioctl_request_numbers_match_linux_headers() {
         // Precomputed from <linux/input.h>: _IOW('E', 0x80, struct
-        // ff_effect) and _IOW('E', 0x81, int).
+        // ff_effect), _IOW('E', 0x81, int) and _IOR('E', 0x35, char[32])
+        // (0x35 = 0x20 + EV_FF).
         assert_eq!(EVIOCSFF, 0x4030_4580);
         assert_eq!(EVIOCRMFF, 0x4004_4581);
+        assert_eq!(EVIOCGBIT_FF, 0x8020_4535);
     }
 
     #[test]
-    fn sim_effects_are_gentle_and_bounded() {
-        let c = sim_effect(SimKind::ConstantForce);
-        assert_eq!(c.type_, FF_CONSTANT);
-        assert_eq!(c.replay_length, 2000);
-        assert_eq!(i16::from_le_bytes([c.u.0[0], c.u.0[1]]), 0x2000, "~25% level");
-
-        let t = sim_effect(SimKind::Texture);
-        assert_eq!(t.type_, FF_PERIODIC);
-        assert_eq!(u16::from_le_bytes([t.u.0[0], t.u.0[1]]), FF_SINE);
-        assert_eq!(i16::from_le_bytes([t.u.0[4], t.u.0[5]]), 0x2000, "~25% magnitude");
-        assert_eq!(t.replay_length, 2000);
-    }
-
-    #[test]
-    fn wait_out_completes_when_never_cancelled() {
+    fn run_test_sequence_against_a_missing_node_ends_quietly_as_device_gone() {
         let cancel = AtomicBool::new(false);
-        let start = Instant::now();
-        assert_eq!(wait_out(Duration::from_millis(30), &cancel), WaitOutcome::Completed);
-        assert!(start.elapsed() >= Duration::from_millis(30), "waits the full duration");
-    }
-
-    #[test]
-    fn wait_out_returns_early_on_a_preset_cancel() {
-        let cancel = AtomicBool::new(true);
-        let start = Instant::now();
-        assert_eq!(wait_out(Duration::from_secs(10), &cancel), WaitOutcome::Cancelled);
-        assert!(start.elapsed() < Duration::from_secs(1), "does not sleep out the duration");
-    }
-
-    #[test]
-    fn wait_out_reacts_to_a_mid_play_cancel() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let thread_cancel = cancel.clone();
-        let stopper = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
-            thread_cancel.store(true, Ordering::Relaxed);
-        });
-        let start = Instant::now();
-        assert_eq!(wait_out(Duration::from_secs(10), &cancel), WaitOutcome::Cancelled);
-        assert!(start.elapsed() < Duration::from_secs(1), "cancel cuts the wait short");
-        stopper.join().unwrap();
+        let outcome =
+            run_test_sequence("/nonexistent/event99", fftest::FORCE_SEQUENCE, &cancel, |_| {});
+        assert_eq!(outcome.end, fftest::SequenceEnd::DeviceGone);
+        assert_eq!(outcome.ran, 0);
     }
 
     #[test]

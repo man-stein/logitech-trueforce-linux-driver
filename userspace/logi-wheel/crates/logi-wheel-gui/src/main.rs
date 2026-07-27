@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use logi_wheel_core::curve::Curve;
 use logi_wheel_core::evtest;
+use logi_wheel_core::fftest::{self, SequenceEnd, SequenceEvent};
 use logi_wheel_core::{lightsync, shaping};
 use logi_wheel_core::{Category, Color, Mode, Value, WheelModel, REGISTRY};
 use slint::Model as _;
@@ -875,10 +876,12 @@ fn start_test_monitor(
 /// effect through its single cleanup site, then clears the cell.
 type SimCancelCell = Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>;
 
-/// Run one confirmed force simulation against the discovered wheel, off
-/// the UI thread, pushing completion (and any error) back into the Test
-/// page's properties. A missing device is a silent no-op: the buttons
-/// are disabled without a wheel, so this only races an unplug.
+/// Run one confirmed test sequence against the discovered wheel, off the
+/// UI thread, pushing each step's label (or a skip notice) into
+/// `test-sim-status` as it plays and the final summary (and any error)
+/// back into the Test page's properties once it ends. A missing device
+/// is a silent no-op: the buttons are disabled without a wheel, so this
+/// only races an unplug.
 fn run_test_sim(
     app_weak: slint::Weak<App>,
     device_cell: &Arc<Mutex<Option<evtest::WheelInput>>>,
@@ -892,21 +895,45 @@ fn run_test_sim(
     }
     app.set_test_sim_running(true);
     app.set_test_sim_error("".into());
+    app.set_test_sim_status(format!("{}: starting...", kind.label()).into());
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     *cancel_cell.lock().unwrap() = Some(cancel.clone());
     let cancel_cell = cancel_cell.clone();
     let weak = app.as_weak();
+    let step_weak = app.as_weak();
     std::thread::spawn(move || {
+        // Every step's label (and the once-only skip notice) is posted
+        // here, on the same background thread run_test_sequence runs on;
+        // each post hops to the UI thread itself before touching the
+        // Slint property, same as the completion step below.
+        let on_event = move |ev: SequenceEvent| {
+            let text = match ev {
+                SequenceEvent::Skipped(labels) => {
+                    format!("skipping (not supported by this wheel): {}", labels.join(", "))
+                }
+                SequenceEvent::Step { index, total, step } => fftest::step_status_text(index, total, step),
+            };
+            let step_weak = step_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = step_weak.upgrade() {
+                    app.set_test_sim_status(text.into());
+                }
+            });
+        };
         // Completion and cancellation both come back through here (the
-        // cancel flag only shortens the wait inside run_simulation, which
-        // cleans up on every path), so the UI state resets exactly once.
-        let result = testio::run_simulation(&wheel.event_path, kind, &cancel);
+        // cancel flag only shortens the wait inside run_test_sequence,
+        // which cleans up on every path), so the UI state resets exactly
+        // once.
+        let outcome = testio::run_test_sequence(&wheel.event_path, kind.steps(), &cancel, on_event);
         *cancel_cell.lock().unwrap() = None;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
             app.set_test_sim_running(false);
-            if let Err(e) = result {
-                app.set_test_sim_error(e.into());
+            let summary = format!("{} {}", kind.label(), outcome.summary());
+            if matches!(outcome.end, SequenceEnd::Failed(_)) {
+                app.set_test_sim_error(summary.into());
+            } else {
+                app.set_test_sim_status(summary.into());
             }
         });
     });
@@ -2168,7 +2195,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let test_device = test_device.clone();
         let test_sim_cancel = test_sim_cancel.clone();
         app.on_test_sim_constant(move || {
-            run_test_sim(app_weak.clone(), &test_device, &test_sim_cancel, testio::SimKind::ConstantForce);
+            run_test_sim(app_weak.clone(), &test_device, &test_sim_cancel, testio::SimKind::Force);
         });
     }
     {

@@ -1040,9 +1040,9 @@ fn draw_monitor<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         )));
     }
-    if t.sim_running() {
+    if let Some(line) = t.sim_status_line() {
         top.push(Line::from(Span::styled(
-            "force playing... (25%, 2 s; s to stop)",
+            format!("{line} (s to stop)"),
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )));
     }

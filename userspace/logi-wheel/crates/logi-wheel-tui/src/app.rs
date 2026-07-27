@@ -1134,6 +1134,17 @@ impl<S: SysfsIo> App<S> {
         }
     }
 
+    /// Pick up a just-finished sequence's one-line summary (see
+    /// `TestView::tick_sim_status`), run alongside `tick_sim_countdown`.
+    /// A no-op most ticks; the per-step text while a sequence plays is
+    /// shown inline by the Test area panel itself (`TestView::sim_status_line`),
+    /// not through this status line.
+    pub fn tick_sim_status(&mut self) {
+        if let Some(status) = self.test.tick_sim_status() {
+            self.status = status;
+        }
+    }
+
     /// Reap the test sweep once it exits; run by the main loop's ticks
     /// (the sweep is the TUI's only non-blocking child, so the loop polls
     /// with a short timeout while it plays). A failed run surfaces its
@@ -1916,7 +1927,7 @@ impl<S: SysfsIo> App<S> {
                         None => "input: no wheel found (r to rescan)".to_string(),
                     };
                 }
-                Char('f') => self.request_sim(SimKind::ConstantForce),
+                Char('f') => self.request_sim(SimKind::Force),
                 Char('t') => self.request_sim(SimKind::Texture),
                 // Show serial + firmware + the software versions on the
                 // status line. This TUI has no clipboard mechanism (and
@@ -2908,7 +2919,7 @@ mod tests {
             name: "Logitech RS50 Base".to_string(),
         });
         a.on_key(KeyCode::Char('f'));
-        assert_eq!(a.test.confirm, Some(SimKind::ConstantForce));
+        assert_eq!(a.test.confirm, Some(SimKind::Force));
         assert!(a.status.contains("WILL move"), "safety text shown: {}", a.status);
         a.on_key(KeyCode::Char('n'));
         assert!(a.test.confirm.is_none());
@@ -2932,7 +2943,7 @@ mod tests {
             name: "Logitech RS50 Base".to_string(),
         });
         a.on_key(KeyCode::Char('f'));
-        assert_eq!(a.test.confirm, Some(SimKind::ConstantForce));
+        assert_eq!(a.test.confirm, Some(SimKind::Force));
         a.on_key(KeyCode::Char('y'));
         assert!(a.test.confirm.is_none(), "confirm resolved");
         assert!(a.test.countdown_active(), "armed a countdown, not playing yet");

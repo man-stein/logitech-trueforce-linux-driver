@@ -1,51 +1,37 @@
 //! The Test view's state and device I/O: live wheel monitoring over the
-//! wheel's evdev node, and the two guarded force-feedback simulations.
+//! wheel's evdev node, and the two guarded force-feedback test
+//! sequences.
 //!
-//! The pure logic (event decoding, degrees, button names, discovery)
-//! comes from `logi_wheel_core::evtest`. This module owns the open file
-//! handle the synchronous TUI polls each tick, and the small
-//! `EVIOCSFF`/`EVIOCRMFF` ioctl surface the simulations need (mirroring
-//! the GUI crate's `testio` module; kept out of core so it stays
-//! dependency-free).
+//! The pure logic (event decoding, degrees, button names, discovery,
+//! and - since this task - the step tables and `ff_effect` construction
+//! for the sequences themselves) comes from `logi_wheel_core` (`evtest`
+//! and `fftest`). This module owns the open file handle the synchronous
+//! TUI polls each tick, the small `EVIOCSFF`/`EVIOCRMFF`/`EVIOCGBIT`
+//! ioctl surface a sequence needs (mirroring the GUI crate's `testio`
+//! module; kept out of core so it stays dependency-free), and the
+//! per-step status text the sequence thread hands back for the view to
+//! poll.
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use logi_wheel_core::evtest::{self, TestEvent, WheelInput, EVENT_SIZE};
+use logi_wheel_core::fftest::{self, DeviceError, FfDevice, FfEffect, SequenceEvent};
+pub use logi_wheel_core::fftest::SimKind;
 
-/// Which canned effect a confirmed simulation plays. Both are fixed at
-/// ~25% magnitude for 2 seconds; nothing is user-tunable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimKind {
-    /// A constant pull to one side (`FF_CONSTANT`).
-    ConstantForce,
-    /// A rumble-style sine texture through the FFB path
-    /// (`FF_PERIODIC`/`FF_SINE`).
-    Texture,
-}
+/// How long a confirmed sequence waits before it actually starts, giving
+/// the user time to get hands on (or off) the wheel.
+const SIM_COUNTDOWN: Duration = fftest::SIM_COUNTDOWN;
 
-impl SimKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            SimKind::ConstantForce => "constant force",
-            SimKind::Texture => "TrueForce texture",
-        }
-    }
-}
-
-/// How long a confirmed sim waits before it actually starts, giving the
-/// user time to get hands on (or off) the wheel.
-const SIM_COUNTDOWN: Duration = Duration::from_secs(5);
-
-/// A confirmed sim ('y' after `request_sim`'s prompt) waiting out
+/// A confirmed sequence ('y' after `request_sim`'s prompt) waiting out
 /// `SIM_COUNTDOWN` before [`TestView::tick_countdown`] actually starts it.
 /// Cancellable the whole time ('s', the same key that stops a playing
-/// sim); cancelling means it never starts at all.
+/// sequence); cancelling means it never starts at all.
 struct SimCountdown {
     kind: SimKind,
     started: Instant,
@@ -76,17 +62,27 @@ pub struct TestView {
     pub hat: (i32, i32),
     /// Raw throttle/brake/clutch/handbrake values.
     pub axes: [i32; 4],
-    /// A sim waiting for its y/n confirmation.
+    /// A sequence waiting for its y/n confirmation.
     pub confirm: Option<SimKind>,
-    /// A confirmed sim riding out its countdown before it actually starts
-    /// (see `SimCountdown`); `None` while nothing is counting down.
+    /// A confirmed sequence riding out its countdown before it actually
+    /// starts (see `SimCountdown`); `None` while nothing is counting
+    /// down.
     countdown: Option<SimCountdown>,
-    /// Set while a sim thread plays; cleared by the thread itself.
+    /// Set while a sequence thread plays; cleared by the thread itself.
     sim_running: Arc<AtomicBool>,
-    /// Set by `stop_sim` ('s' while playing); the sim thread polls it and
-    /// stops + erases the effect early. Re-armed (cleared) by the next
-    /// `spawn_sim`.
+    /// Set by `stop_sim` ('s' while playing); the sequence thread polls
+    /// it and stops + erases the current step's effect within one poll
+    /// tick, ending the run without starting any further step.
+    /// Re-armed (cleared) by the next `spawn_sim`.
     sim_cancel: Arc<AtomicBool>,
+    /// The current step's label (or a skip notice), updated by the
+    /// sequence thread on every step; read live by the view while
+    /// `sim_running()` (see `sim_status_line`).
+    sim_step_status: Arc<Mutex<String>>,
+    /// Set exactly once by the sequence thread when it ends, holding the
+    /// one-line summary for the main status line; taken (and cleared) by
+    /// `tick_sim_status`.
+    sim_final: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for TestView {
@@ -106,6 +102,8 @@ impl Default for TestView {
             countdown: None,
             sim_running: Arc::new(AtomicBool::new(false)),
             sim_cancel: Arc::new(AtomicBool::new(false)),
+            sim_step_status: Arc::new(Mutex::new(String::new())),
+            sim_final: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -129,6 +127,20 @@ impl TestView {
 
     pub fn sim_running(&self) -> bool {
         self.sim_running.load(Ordering::Relaxed)
+    }
+
+    /// The current step's label (or skip notice) while a sequence plays;
+    /// `None` once it has stopped (the final summary goes through
+    /// `tick_sim_status`/`self.status` instead).
+    pub fn sim_status_line(&self) -> Option<String> {
+        self.sim_running().then(|| self.sim_step_status.lock().unwrap().clone())
+    }
+
+    /// Take the just-finished sequence's one-line summary, if the thread
+    /// has posted one since the last call. Run every tick alongside
+    /// `tick_countdown` (see `App::tick_sim_status`); a no-op most ticks.
+    pub fn tick_sim_status(&mut self) -> Option<String> {
+        self.sim_final.lock().unwrap().take()
     }
 
     /// Start monitoring: open the wheel's evdev node read-only and
@@ -239,11 +251,13 @@ impl TestView {
         evtest::steering_degrees(self.steering_raw, 0, evtest::AXIS_MAX, self.range)
     }
 
-    /// Spawn the confirmed simulation on its own thread (the TUI's event
-    /// loop must keep drawing while the 2 s effect plays) and return the
-    /// status line to show. The thread stops + erases the effect on
-    /// every path (full duration, `stop_sim`, errors); a device that
-    /// vanished mid-sim cleans up silently.
+    /// Spawn the confirmed sequence on its own thread (the TUI's event
+    /// loop must keep drawing while it plays) and return the status line
+    /// to show immediately. The thread runs every runnable step to
+    /// completion, cancellation, or device-gone, posting per-step text
+    /// into `sim_step_status` and a final summary into `sim_final`
+    /// (`tick_sim_status` picks that up); a device that vanishes mid-run
+    /// cleans up silently, matching `sim_step_status`'s wording.
     pub fn spawn_sim(&mut self, kind: SimKind) -> String {
         let Some(dev) = &self.dev else { return "test: no wheel".to_string() };
         if self.sim_running() {
@@ -251,19 +265,27 @@ impl TestView {
         }
         self.sim_running.store(true, Ordering::Relaxed);
         self.sim_cancel.store(false, Ordering::Relaxed);
+        let steps = kind.steps();
+        *self.sim_step_status.lock().unwrap() = format!("{}: starting...", kind.label());
+        *self.sim_final.lock().unwrap() = None;
+
         let path = dev.event_path.clone();
         let running = self.sim_running.clone();
         let cancel = self.sim_cancel.clone();
+        let step_status = self.sim_step_status.clone();
+        let final_status = self.sim_final.clone();
         std::thread::spawn(move || {
-            let _ = run_simulation(&path, kind, &cancel);
+            let outcome = run_test_sequence(&path, steps, &cancel, &step_status);
+            *final_status.lock().unwrap() = Some(format!("test: {} {}", kind.label(), outcome.summary()));
             running.store(false, Ordering::Relaxed);
         });
-        format!("test: playing {} (25%, 2 s; s to stop)...", kind.label())
+        format!("test: playing {} ({} steps; s to stop)...", kind.label(), steps.len())
     }
 
-    /// Stop the playing simulation ('s' in the Info view): flag the sim
-    /// thread, which stops + erases the effect within its poll tick.
-    /// True when something was playing, false for a no-op.
+    /// Stop the playing sequence ('s' in the Info view): flag the sim
+    /// thread, which stops + erases the current step's effect within its
+    /// poll tick and ends the run without starting the next step. True
+    /// when something was playing, false for a no-op.
     pub fn stop_sim(&self) -> bool {
         if !self.sim_running() {
             return false;
@@ -272,8 +294,8 @@ impl TestView {
         true
     }
 
-    /// Arm the countdown after 'y' confirms a sim: nothing plays yet, the
-    /// wheel does not move, until `tick_countdown` runs it out.
+    /// Arm the countdown after 'y' confirms a sequence: nothing plays
+    /// yet, the wheel does not move, until `tick_countdown` runs it out.
     pub fn arm_countdown(&mut self, kind: SimKind) {
         self.countdown = Some(SimCountdown { kind, started: Instant::now() });
     }
@@ -284,7 +306,7 @@ impl TestView {
     }
 
     /// Seconds left in the countdown's whole-second display (5 down to 1;
-    /// the tick that would show 0 fires the sim instead, via
+    /// the tick that would show 0 fires the sequence instead, via
     /// `tick_countdown`). `None` while nothing is counting down.
     pub fn countdown_seconds_left(&self) -> Option<u64> {
         self.countdown.as_ref().map(|c| {
@@ -294,14 +316,14 @@ impl TestView {
     }
 
     /// Cancel a ticking countdown ('s' in the Info view, the same key that
-    /// stops an already-playing sim): the sim never starts. True when a
+    /// stops an already-playing sequence): it never starts. True when a
     /// countdown was actually cancelled, false for a no-op.
     pub fn cancel_countdown(&mut self) -> bool {
         self.countdown.take().is_some()
     }
 
     /// Advance the countdown; once `SIM_COUNTDOWN` has elapsed, starts the
-    /// confirmed sim (via `spawn_sim`) and returns the status line to
+    /// confirmed sequence (via `spawn_sim`) and returns the status line to
     /// show. Run every main-loop tick while `countdown_active()`; a no-op
     /// (returns `None`) before the deadline or with nothing armed.
     pub fn tick_countdown(&mut self) -> Option<String> {
@@ -312,162 +334,133 @@ impl TestView {
 }
 
 // ---------------------------------------------------------------------------
-// Force-feedback simulation (same fixed effects as the GUI's testio).
+// Force-feedback sequence I/O: the evdev file handle and ioctls that back
+// `logi_wheel_core::fftest`'s `FfDevice` trait. The step tables and the
+// `ff_effect` byte layout live in core (shared with the GUI's `testio`);
+// only this device plumbing is per-front-end.
 // ---------------------------------------------------------------------------
 
-/// ~25% of the i16 full scale.
-const SIM_LEVEL: i16 = 0x2000;
-const SIM_DURATION_MS: u16 = 2000;
-/// The sine texture's period (25 ms = 40 Hz).
-const SIM_PERIOD_MS: u16 = 25;
-/// How often the playback wait re-checks the cancel flag.
-const SIM_CANCEL_POLL: Duration = Duration::from_millis(10);
-
-const EV_FF: u16 = 0x15;
-const FF_PERIODIC: u16 = 0x51;
-const FF_CONSTANT: u16 = 0x52;
-const FF_SINE: u16 = 0x5a;
-const FF_GAIN: u16 = 0x60;
-
-const FF_UNION_SIZE: usize = 32;
-
-/// Mirrors the kernel's `struct ff_effect` (`linux/input.h`); the
-/// trailing union is an 8-byte-aligned byte array written via explicit
-/// offsets (same convention as the ffb-proxy crate's sink module).
-#[repr(C)]
-struct FfEffect {
-    type_: u16,
-    id: i16,
-    direction: u16,
-    trigger_button: u16,
-    trigger_interval: u16,
-    replay_length: u16,
-    replay_delay: u16,
-    u: FfUnion,
-}
-
-#[repr(C, align(8))]
-struct FfUnion([u8; FF_UNION_SIZE]);
+const EVIOCGBIT_FF_NR: u8 = 0x20 + fftest::EV_FF as u8;
 
 /// `_IOW('E', nr, T)` as `linux/ioctl.h` encodes it on x86_64.
 const fn iow(nr: u8, size: usize) -> libc::c_ulong {
     (1 << 30) | ((size as libc::c_ulong) << 16) | (('E' as libc::c_ulong) << 8) | nr as libc::c_ulong
 }
 
+/// `_IOR('E', nr, T)`, same encoding with the read-direction bits set.
+const fn ior(nr: u8, size: usize) -> libc::c_ulong {
+    (2 << 30) | ((size as libc::c_ulong) << 16) | (('E' as libc::c_ulong) << 8) | nr as libc::c_ulong
+}
+
 const EVIOCSFF: libc::c_ulong = iow(0x80, std::mem::size_of::<FfEffect>());
 const EVIOCRMFF: libc::c_ulong = iow(0x81, std::mem::size_of::<libc::c_int>());
-
-fn sim_effect(kind: SimKind) -> FfEffect {
-    let mut u = [0u8; FF_UNION_SIZE];
-    let type_ = match kind {
-        SimKind::ConstantForce => {
-            // ff_constant_effect: level:i16 @0, envelope zeroed.
-            u[0..2].copy_from_slice(&SIM_LEVEL.to_le_bytes());
-            FF_CONSTANT
-        }
-        SimKind::Texture => {
-            // ff_periodic_effect: waveform @0, period @2, magnitude @4.
-            u[0..2].copy_from_slice(&FF_SINE.to_le_bytes());
-            u[2..4].copy_from_slice(&SIM_PERIOD_MS.to_le_bytes());
-            u[4..6].copy_from_slice(&SIM_LEVEL.to_le_bytes());
-            FF_PERIODIC
-        }
-    };
-    FfEffect {
-        type_,
-        id: -1,
-        direction: 0x4000,
-        trigger_button: 0,
-        trigger_interval: 0,
-        replay_length: SIM_DURATION_MS,
-        replay_delay: 0,
-        u: FfUnion(u),
-    }
-}
-
-fn encode_ff_event(code: u16, value: i32) -> [u8; EVENT_SIZE] {
-    let mut b = [0u8; EVENT_SIZE];
-    b[16..18].copy_from_slice(&EV_FF.to_le_bytes());
-    b[18..20].copy_from_slice(&code.to_le_bytes());
-    b[20..24].copy_from_slice(&value.to_le_bytes());
-    b
-}
+const EVIOCGBIT_FF: libc::c_ulong = ior(EVIOCGBIT_FF_NR, fftest::FF_BITS_LEN);
 
 fn write_event(file: &mut std::fs::File, code: u16, value: i32) -> std::io::Result<()> {
-    file.write_all(&encode_ff_event(code, value))
+    file.write_all(&fftest::encode_ff_event(code, value))
 }
 
-/// How a playback wait ended: the effect ran its full 2 s, or the user
-/// pressed 's' and `cancel` flipped mid-play.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitOutcome {
-    Completed,
-    Cancelled,
+/// True for the errno that means the wheel is not there: `ENODEV` (a
+/// previously-open fd whose device vanished mid-sequence) or `ENOENT`
+/// (the node was already gone by the time we tried to open it, e.g. the
+/// countdown outlived an unplug). Either way the caller ends quietly
+/// instead of reporting an error.
+fn device_gone(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENOENT))
 }
 
-/// Sleep out `duration` in [`SIM_CANCEL_POLL`] ticks, returning early as
-/// soon as `cancel` flips. Both outcomes fall through to the same single
-/// cleanup site in [`run_simulation`], so complete-then-stop and
-/// cancel-then-stop clean up exactly once each.
-fn wait_out(duration: Duration, cancel: &AtomicBool) -> WaitOutcome {
-    let deadline = std::time::Instant::now() + duration;
-    while std::time::Instant::now() < deadline {
-        if cancel.load(Ordering::Relaxed) {
-            return WaitOutcome::Cancelled;
+fn map_err(e: std::io::Error, what: &str) -> DeviceError {
+    if device_gone(&e) {
+        DeviceError::Gone
+    } else {
+        DeviceError::Other(format!("{what}: {e}"))
+    }
+}
+
+/// The open evdev node a sequence plays against, implementing
+/// `fftest::FfDevice` over `EVIOCSFF`/`EVIOCRMFF`/`EVIOCGBIT` and `EV_FF`
+/// writes.
+struct EvdevFf {
+    file: std::fs::File,
+}
+
+impl FfDevice for EvdevFf {
+    fn set_gain(&mut self, value: i32) -> Result<(), DeviceError> {
+        write_event(&mut self.file, fftest::FF_GAIN, value).map_err(|e| map_err(e, "set gain"))
+    }
+
+    fn upload(&mut self, effect: &FfEffect) -> Result<i16, DeviceError> {
+        let mut effect = *effect;
+        let fd = self.file.as_raw_fd();
+        // SAFETY: fd is a valid open evdev fd; `effect` is a repr(C)
+        // mirror of the kernel struct (layout unit-tested in
+        // `logi_wheel_core::fftest`) and stays alive across the call.
+        // The kernel writes the assigned id back through the same
+        // pointer, which is why `effect` is a local mutable copy.
+        let rc = unsafe { libc::ioctl(fd, EVIOCSFF, &mut effect as *mut FfEffect) };
+        if rc < 0 {
+            return Err(map_err(std::io::Error::last_os_error(), "upload effect"));
         }
-        std::thread::sleep(SIM_CANCEL_POLL.min(duration));
+        Ok(effect.id)
     }
-    WaitOutcome::Completed
+
+    fn play(&mut self, id: i16, value: i32) -> Result<(), DeviceError> {
+        write_event(&mut self.file, id as u16, value).map_err(|e| map_err(e, "play effect"))
+    }
+
+    fn erase(&mut self, id: i16) {
+        // SAFETY: same fd; EVIOCRMFF takes the effect id by value.
+        // Best-effort: run_sequence calls this as unconditional cleanup,
+        // including after an error, so there is nothing left to do with
+        // a failure here.
+        let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCRMFF, id as libc::c_ulong) };
+    }
+
+    fn ff_bits(&mut self) -> [u8; fftest::FF_BITS_LEN] {
+        let mut bits = [0u8; fftest::FF_BITS_LEN];
+        // SAFETY: same fd; the buffer is exactly FF_BITS_LEN bytes, what
+        // the request number bakes in. A failed query (e.g. a device
+        // that does not support EVIOCGBIT at all) just leaves every bit
+        // clear, which run_sequence reads as "supports nothing" and
+        // skips every step - a safe fallback, not a panic.
+        let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGBIT_FF, bits.as_mut_ptr()) };
+        bits
+    }
 }
 
-/// Play `kind` on the wheel at `path`: upload, play, wait the fixed 2 s
-/// (or until `cancel` flips), then always stop and erase (also on every
-/// error path). Blocking; the caller runs it on a thread. A device that
-/// disappears mid-sim (`ENODEV`) is a silent cleanup, not an error; a
-/// cancelled run is `Ok` too (the user asked for the stop).
-fn run_simulation(path: &str, kind: SimKind, cancel: &AtomicBool) -> Result<(), String> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("open {path}: {e}"))?;
-    let fd = file.as_raw_fd();
-
-    // Device gain powers up unset and other tools may have zeroed it; a
-    // zero gain would make the test silently do nothing.
-    write_event(&mut file, FF_GAIN, 0xFFFF).map_err(|e| format!("set gain: {e}"))?;
-
-    let mut effect = sim_effect(kind);
-    // SAFETY: fd is a valid open evdev fd; `effect` is a repr(C) mirror
-    // of the kernel struct (layout unit-tested below) and stays alive
-    // across the call. The kernel writes the assigned id back.
-    let rc = unsafe { libc::ioctl(fd, EVIOCSFF, &mut effect as *mut FfEffect) };
-    if rc < 0 {
-        let e = std::io::Error::last_os_error();
-        return if e.raw_os_error() == Some(libc::ENODEV) {
-            Ok(())
-        } else {
-            Err(format!("upload effect: {e}"))
+/// Open `path` and run `steps` against it end to end (see
+/// `fftest::run_sequence`), posting each step's label (or the skip list)
+/// into `step_status` as it goes. Blocking; the caller runs it on its own
+/// thread. An open failure is folded into the same `SequenceOutcome`
+/// shape a mid-run failure would produce, so callers have one path to
+/// handle either.
+fn run_test_sequence(
+    path: &str,
+    steps: &'static [fftest::SimStep],
+    cancel: &AtomicBool,
+    step_status: &Arc<Mutex<String>>,
+) -> fftest::SequenceOutcome {
+    let file = match std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            let end = if device_gone(&e) {
+                fftest::SequenceEnd::DeviceGone
+            } else {
+                fftest::SequenceEnd::Failed(format!("open {path}: {e}"))
+            };
+            return fftest::SequenceOutcome { end, ran: 0, skipped: Vec::new() };
+        }
+    };
+    let mut device = EvdevFf { file };
+    fftest::run_sequence(&mut device, steps, cancel, fftest::STEP_GAP, |ev| {
+        let text = match ev {
+            SequenceEvent::Skipped(labels) => {
+                format!("skipping (not supported by this wheel): {}", labels.join(", "))
+            }
+            SequenceEvent::Step { index, total, step } => fftest::step_status_text(index, total, step),
         };
-    }
-    let id = effect.id;
-
-    let outcome = write_event(&mut file, id as u16, 1);
-    if outcome.is_ok() {
-        wait_out(Duration::from_millis(u64::from(SIM_DURATION_MS)), cancel);
-    }
-
-    // Unconditional cleanup: stop, then erase, whatever happened above.
-    let _ = write_event(&mut file, id as u16, 0);
-    // SAFETY: same fd; EVIOCRMFF takes the effect id by value.
-    let _ = unsafe { libc::ioctl(fd, EVIOCRMFF, id as libc::c_ulong) };
-
-    match outcome {
-        Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::ENODEV) => Ok(()),
-        Err(e) => Err(format!("play effect: {e}")),
-    }
+        *step_status.lock().unwrap() = text;
+    })
 }
 
 #[cfg(test)]
@@ -483,27 +476,13 @@ mod tests {
     }
 
     #[test]
-    fn ff_effect_layout_matches_kernel_abi() {
-        assert_eq!(std::mem::size_of::<FfEffect>(), 48);
-        assert_eq!(std::mem::align_of::<FfEffect>(), 8);
-        let e = sim_effect(SimKind::ConstantForce);
-        let union_offset = (&e.u as *const _ as usize) - (&e as *const _ as usize);
-        assert_eq!(union_offset, 16);
-        // Precomputed from <linux/input.h>.
+    fn ioctl_request_numbers_match_linux_headers() {
+        // Precomputed from <linux/input.h>: _IOW('E', 0x80, struct
+        // ff_effect), _IOW('E', 0x81, int) and _IOR('E', 0x35, char[32])
+        // (0x35 = 0x20 + EV_FF).
         assert_eq!(EVIOCSFF, 0x4030_4580);
         assert_eq!(EVIOCRMFF, 0x4004_4581);
-    }
-
-    #[test]
-    fn sim_effects_are_gentle_and_bounded() {
-        let c = sim_effect(SimKind::ConstantForce);
-        assert_eq!(c.type_, FF_CONSTANT);
-        assert_eq!(c.replay_length, 2000);
-        assert_eq!(i16::from_le_bytes([c.u.0[0], c.u.0[1]]), 0x2000);
-        let t = sim_effect(SimKind::Texture);
-        assert_eq!(t.type_, FF_PERIODIC);
-        assert_eq!(u16::from_le_bytes([t.u.0[0], t.u.0[1]]), FF_SINE);
-        assert_eq!(t.replay_length, 2000);
+        assert_eq!(EVIOCGBIT_FF, 0x8020_4535);
     }
 
     #[test]
@@ -537,7 +516,7 @@ mod tests {
     #[test]
     fn spawn_sim_without_a_wheel_reports_instead_of_playing() {
         let mut v = TestView::default();
-        let status = v.spawn_sim(SimKind::ConstantForce);
+        let status = v.spawn_sim(SimKind::Force);
         assert!(status.contains("no wheel"), "status: {status}");
         assert!(!v.sim_running());
     }
@@ -558,12 +537,27 @@ mod tests {
     }
 
     #[test]
+    fn sim_status_line_is_none_while_nothing_plays() {
+        let v = TestView::default();
+        assert_eq!(v.sim_status_line(), None);
+    }
+
+    #[test]
+    fn tick_sim_status_takes_the_final_summary_once() {
+        let mut v = TestView::default();
+        assert_eq!(v.tick_sim_status(), None, "nothing posted yet");
+        *v.sim_final.lock().unwrap() = Some("test: force feedback finished".to_string());
+        assert_eq!(v.tick_sim_status(), Some("test: force feedback finished".to_string()));
+        assert_eq!(v.tick_sim_status(), None, "taken, not re-read");
+    }
+
+    #[test]
     fn countdown_ticks_down_and_cancels_without_ever_playing() {
         let mut v = TestView::default();
         assert!(!v.countdown_active());
         assert_eq!(v.countdown_seconds_left(), None);
 
-        v.arm_countdown(SimKind::ConstantForce);
+        v.arm_countdown(SimKind::Force);
         assert!(v.countdown_active());
         assert_eq!(v.countdown_seconds_left(), Some(5));
         assert!(v.tick_countdown().is_none(), "deadline not reached yet");
@@ -574,7 +568,7 @@ mod tests {
         assert_eq!(v.countdown_seconds_left(), None);
         assert!(!v.cancel_countdown(), "a second cancel is a no-op");
         assert!(v.tick_countdown().is_none(), "nothing armed after cancel");
-        assert!(!v.sim_running(), "cancelling never starts the sim");
+        assert!(!v.sim_running(), "cancelling never starts the sequence");
     }
 
     #[test]
@@ -597,17 +591,50 @@ mod tests {
     }
 
     #[test]
-    fn wait_out_completes_when_never_cancelled() {
-        let cancel = AtomicBool::new(false);
-        assert_eq!(wait_out(Duration::from_millis(30), &cancel), WaitOutcome::Completed);
+    fn spawn_sim_end_to_end_posts_its_final_summary_for_tick_sim_status_to_pick_up() {
+        // The full wire-up a real run goes through once the countdown
+        // fires: spawn_sim starts the background thread, which (against a
+        // device that is not really there) ends quickly as "gone" and
+        // posts a summary that `tick_sim_status` (polled by the main
+        // loop alongside `tick_countdown`) then surfaces.
+        let mut v = TestView {
+            dev: Some(WheelInput {
+                event_path: "/nonexistent/event99".to_string(),
+                name: "Logitech RS50 Base".to_string(),
+            }),
+            ..TestView::default()
+        };
+        let status = v.spawn_sim(SimKind::Force);
+        assert!(status.contains("playing"), "status: {status}");
+        assert!(v.sim_running());
+        assert!(v.sim_status_line().is_some());
+
+        // The sequence thread runs on its own; wait it out (bounded, no
+        // synchronous join point from here).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while v.sim_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!v.sim_running(), "must finish against a nonexistent node quickly");
+
+        let summary = v.tick_sim_status().expect("a final summary was posted");
+        assert!(summary.contains("force feedback"), "summary: {summary}");
+        assert!(summary.contains("disconnected"), "ENOENT reads as gone, not a raw error: {summary}");
+        assert_eq!(v.tick_sim_status(), None, "taken, not re-read");
     }
 
     #[test]
-    fn wait_out_returns_early_on_cancel() {
-        let cancel = AtomicBool::new(true);
-        let start = std::time::Instant::now();
-        assert_eq!(wait_out(Duration::from_secs(10), &cancel), WaitOutcome::Cancelled);
-        assert!(start.elapsed() < Duration::from_secs(1), "does not sleep out the duration");
+    fn run_test_sequence_against_a_missing_node_ends_quietly_as_device_gone() {
+        // ENOENT on open (no such node at all) is folded into the same
+        // "gone" outcome ENODEV mid-run would produce, so a wheel that
+        // was already unplugged before the countdown fired behaves the
+        // same as one unplugged mid-sequence.
+        let cancel = AtomicBool::new(false);
+        let status = Arc::new(Mutex::new(String::new()));
+        let outcome =
+            run_test_sequence("/nonexistent/event99", fftest::FORCE_SEQUENCE, &cancel, &status);
+        assert_eq!(outcome.end, fftest::SequenceEnd::DeviceGone);
+        assert_eq!(outcome.ran, 0);
     }
 
     #[test]
