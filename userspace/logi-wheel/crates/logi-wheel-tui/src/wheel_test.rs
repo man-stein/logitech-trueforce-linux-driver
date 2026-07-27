@@ -278,8 +278,8 @@ impl TestView {
     /// to show immediately. The full plan (every row `Pending`) is
     /// visible the instant this returns, before the thread has even
     /// opened the device - see `sim_progress`'s doc comment - and the
-    /// thread's own first act is `fftest::STEP_COUNTDOWN`'s lead-in for
-    /// row 0, so nothing plays without a visible countdown, including
+    /// thread's own first act is row 0's own `SimStep::countdown` lead-in,
+    /// so nothing plays without a visible countdown, including
     /// the very first step. The thread runs every runnable step to
     /// completion, cancellation, or device-gone, folding each step event
     /// into `sim_progress` and posting a final summary into `sim_final`
@@ -381,6 +381,10 @@ impl FfDevice for EvdevFf {
         write_event(&mut self.file, fftest::FF_GAIN, value).map_err(|e| map_err(e, "set gain"))
     }
 
+    fn set_autocenter(&mut self, value: i32) -> Result<(), DeviceError> {
+        write_event(&mut self.file, fftest::FF_AUTOCENTER, value).map_err(|e| map_err(e, "set autocenter"))
+    }
+
     fn upload(&mut self, effect: &FfEffect) -> Result<i16, DeviceError> {
         let mut effect = *effect;
         let fd = self.file.as_raw_fd();
@@ -421,13 +425,13 @@ impl FfDevice for EvdevFf {
 }
 
 /// Open `path` and run `steps` against it end to end (see
-/// `fftest::run_sequence`, with `fftest::STEP_COUNTDOWN`'s 3s lead-in
-/// before every step), folding each event into `progress` as it goes.
-/// `model` resolves each step's logical direction to the raw value its
-/// engine expects (see `fftest::resolve_direction`). Blocking; the caller
-/// runs it on its own thread. An open failure is folded into the same
-/// `SequenceOutcome` shape a mid-run failure would produce, so callers
-/// have one path to handle either.
+/// `fftest::run_sequence`, each step counting down for its own
+/// `SimStep::countdown` before it plays), folding each event into
+/// `progress` as it goes. `model` resolves each step's logical direction
+/// to the raw value its engine expects (see `fftest::resolve_direction`).
+/// Blocking; the caller runs it on its own thread. An open failure is
+/// folded into the same `SequenceOutcome` shape a mid-run failure would
+/// produce, so callers have one path to handle either.
 fn run_test_sequence(
     path: &str,
     steps: &'static [fftest::SimStep],
@@ -447,7 +451,7 @@ fn run_test_sequence(
         }
     };
     let mut device = EvdevFf { file };
-    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_COUNTDOWN, |ev| {
+    fftest::run_sequence(&mut device, steps, model, cancel, |ev| {
         progress.lock().unwrap().apply(&ev);
     })
 }

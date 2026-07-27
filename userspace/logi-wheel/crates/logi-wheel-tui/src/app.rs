@@ -2937,8 +2937,8 @@ mod tests {
         // The whole plan (every row pending) is visible immediately -
         // before the background thread has even opened the device - and
         // there is no separate pre-sequence countdown left to arm: the
-        // sequence itself, via fftest::STEP_COUNTDOWN, counts down before
-        // its own first step.
+        // sequence itself, via each step's own SimStep::countdown, counts
+        // down before its own first step.
         let progress = a.test.sim_progress();
         assert_eq!(progress.states.len(), fftest::FORCE_SEQUENCE.len());
         assert!(progress.states.iter().all(|s| *s == fftest::StepState::Pending));

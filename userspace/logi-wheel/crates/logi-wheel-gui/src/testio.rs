@@ -244,6 +244,10 @@ impl FfDevice for EvdevFf {
         write_event(&mut self.file, fftest::FF_GAIN, value).map_err(|e| map_err(e, "set gain"))
     }
 
+    fn set_autocenter(&mut self, value: i32) -> Result<(), DeviceError> {
+        write_event(&mut self.file, fftest::FF_AUTOCENTER, value).map_err(|e| map_err(e, "set autocenter"))
+    }
+
     fn upload(&mut self, effect: &FfEffect) -> Result<i16, DeviceError> {
         let mut effect = *effect;
         let fd = self.file.as_raw_fd();
@@ -284,13 +288,14 @@ impl FfDevice for EvdevFf {
 }
 
 /// Open `path` and run `steps` against it end to end (see
-/// `fftest::run_sequence`), reporting progress through `on_event` as it
-/// goes. `model` resolves each step's logical direction to the raw value
-/// its engine expects (see `fftest::resolve_direction`). Blocking;
-/// callers run it on its own thread and cancel by setting the shared
-/// flag. An open failure is folded into the same `SequenceOutcome` shape
-/// a mid-run failure would produce, so callers have one path to handle
-/// either.
+/// `fftest::run_sequence`, each step counting down for its own
+/// `SimStep::countdown` before it plays), reporting progress through
+/// `on_event` as it goes. `model` resolves each step's logical direction
+/// to the raw value its engine expects (see `fftest::resolve_direction`).
+/// Blocking; callers run it on its own thread and cancel by setting the
+/// shared flag. An open failure is folded into the same `SequenceOutcome`
+/// shape a mid-run failure would produce, so callers have one path to
+/// handle either.
 pub fn run_test_sequence(
     path: &str,
     steps: &'static [fftest::SimStep],
@@ -310,7 +315,7 @@ pub fn run_test_sequence(
         }
     };
     let mut device = EvdevFf { file };
-    fftest::run_sequence(&mut device, steps, model, cancel, fftest::STEP_COUNTDOWN, on_event)
+    fftest::run_sequence(&mut device, steps, model, cancel, on_event)
 }
 
 #[cfg(test)]
