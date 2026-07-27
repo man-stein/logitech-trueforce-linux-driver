@@ -137,7 +137,11 @@ pub fn validate_name(name: &str) -> Result<String, Error> {
     Ok(name.to_string())
 }
 
-fn profile_path(dir: &Path, name: &str) -> Result<PathBuf, Error> {
+/// `<dir>/<name>.profile`, validating `name` first. `pub(crate)` so
+/// [`crate::onboard`]'s "copy a computer profile into this slot" action can
+/// read the same file `apply_in` would, without duplicating the naming
+/// scheme.
+pub(crate) fn profile_path(dir: &Path, name: &str) -> Result<PathBuf, Error> {
     Ok(dir.join(format!("{}.profile", validate_name(name)?)))
 }
 

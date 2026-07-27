@@ -21,6 +21,7 @@ pub mod registry;
 pub use registry::{CLASSIC_REGISTRY, REGISTRY};
 pub mod helpers;
 pub mod launchers;
+pub mod onboard;
 pub mod profiles;
 pub mod shaping;
 pub mod steam;
