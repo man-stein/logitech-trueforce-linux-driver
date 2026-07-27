@@ -10,10 +10,10 @@ G HUB-equivalent wheel settings to Linux, including in Proton/Wine sims -
 all managed from a desktop app (**logi-wheel-gui**) or a terminal one
 (**logi-wheel**).
 
-> Not a direct-drive wheel? The belt-driven **G920** is already served by the
-> in-tree `hid-logitech-hidpp` driver and does not need this one. The **G923**
-> (all editions) gets its own feature set from this driver instead - see
-> [G923 support](#g923-support) below.
+> Not a direct-drive wheel? The **G923** (both editions) is supported here,
+> with force feedback and TrueForce: see [G923 support](#g923-support). The
+> older **G920** is already served by the in-tree `hid-logitech-hidpp` driver
+> and does not need this one.
 
 ## What works
 
@@ -51,9 +51,8 @@ Six pieces, all built from this repository:
 - **The kernel driver** (`hid-logitech-dd`) is the core. It exposes force
   feedback through the standard Linux evdev interface and every wheel setting
   under `/sys/.../wheel_*`, and coexists with the in-tree Logitech driver
-  everywhere else - no blanket module blacklisting. It also covers the G923
-  (`c266`/`c267`/`c26e`) with a separate feature set; see
-  [G923 support](#g923-support) below for how that differs.
+  everywhere else - no blanket module blacklisting. It also drives the G923
+  (see [G923 support](#g923-support)).
 
 - **logi-wheel**, a terminal settings app: a native-Linux stand-in for the parts of
   G HUB that configure the wheel, with typed, validated edits and a G HUB-style
@@ -90,46 +89,37 @@ The distribution packages install the driver plus the `logi-wheel`, `logi-wheel-
 
 ## G923 support
 
-The **G923** gets a separate feature set from this driver, distinct from the
-direct-drive wheels above: it is belt-driven and speaks a different classic
-protocol, not the RS50/G PRO's endpoint-based one.
+Both editions of the G923 work with this driver, and it gives them something
+no other Linux driver does: **force feedback and TrueForce on the same wheel**.
+The G923 is belt-driven and speaks an older Logitech protocol, so internally it
+takes a different path than the RS50 and G PRO above, but the result is the
+same: real forces in games, engine haptics through the rim, working rev lights,
+and the settings app.
 
-- **PlayStation edition** (`046d:c266`/`c267`): a classic force-feedback
-  engine ported from berarma's [new-lg4ff](https://github.com/berarma/new-lg4ff)
-  drives constant force, spring/damper/friction/inertia, periodic and ramp
-  effects, and autocenter, with an automatic PlayStation-to-PC mode switch.
-  Settings use the classic `range`/`gain`/`autocenter`/`combine_pedals` sysfs
-  names (Oversteer-compatible, not the `wheel_*` names above, since it is a
-  different FFB engine), plus a read-only `ffb_output`. Rev lights (5
-  mirrored LED pairs) are exposed as standard Linux LED devices
-  (`::RPM1` to `::RPM5` under `/sys/class/leds`). Hardware-verified:
-  constant force and autocenter feel correct in Assetto Corsa Competizione,
-  and the LED sweep.
-- **No launch options needed for force feedback**: unlike the SDK-aware
-  recipe below, the G923 needs no `PROTON_ENABLE_HIDRAW` - just turn off
-  Steam Input.
-- **TrueForce is simulated, not native**: Logitech's SDK path does not work
-  for the PlayStation G923 on Linux (the SDK DLL just delegates the haptics
-  to G HUB, which Proton does not provide). `logi-tf-sim` streams the same
-  telemetry-driven haptics used on the other wheels to the G923 instead, over
-  the wheel's TrueForce interface (which this driver exposes as a hidraw
-  node), mirroring live force feedback into
-  the same stream so the two agree. Hardware-confirmed as vibration; the feel
-  check under real game telemetry is still pending.
-- **Xbox edition** (`046d:c26e` PC mode): force feedback routes through the
-  same HID++ 0x8123 path as the G920. It boots into a console-only mode
-  (`046d:c26d`) with no input node at all; installing `usb_modeswitch` (a
-  recommended, not required, package) lets a udev rule switch it into PC mode
-  automatically on plug-in. If it never switches, the out-of-tree `xone`
-  driver may have claimed the device first. Unverified pending an
-  Xbox-edition tester.
-- A PID-scoped udev rule pre-empts a competing driver that wins the initial
-  bind race for these three PIDs only (unbind, then bind this driver); every
-  other Logitech device - G29/G27/DFGT/G920, mice, keyboards, receivers - is
-  untouched. The one exception is berarma's new-lg4ff (`hid-logitech-new`),
-  blacklisted outright since it otherwise races us for `c266`/`c267`.
-- `logi-wheel` and `logi-wheel-gui` recognise the G923 and expose its four classic
-  settings, with its own wheel image on the Info/Testing page.
+**PlayStation edition** (`046d:c266`/`c267`) is fully supported and verified on
+hardware:
+
+- **Force feedback** in games. No launch options are needed: just turn Steam
+  Input off. Do not set `PROTON_ENABLE_HIDRAW` for this wheel, it is meant for
+  the direct-drive wheels and it disables the G923's force feedback.
+- **TrueForce** engine haptics through `logi-tf-sim`, driven by game telemetry.
+  Logitech's own SDK cannot deliver TrueForce here (it hands the haptics to
+  G HUB, which does not exist on Linux), so this driver streams them itself.
+- **Rev lights**, driven from telemetry or controllable as ordinary Linux LEDs.
+- **Settings**: rotation range, force strength, autocenter and combined pedals,
+  through `logi-wheel` or Oversteer.
+
+**Xbox edition** (`046d:c26e`) is implemented but **untested**, since we have no
+Xbox unit. It boots into a console-only mode that Linux cannot use, so install
+`usb_modeswitch` and a udev rule flips it to PC mode automatically when you plug
+it in. Reports from owners are very welcome.
+
+Two notes for the curious: the wheel plugs in as `c267` (PlayStation) or `c26d`
+(Xbox) and the driver switches it to its PC mode automatically, and the G923's
+sysfs settings use the classic Oversteer-compatible names rather than the
+`wheel_*` names the direct-drive wheels use. The
+[wiki](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/G923)
+has the details, including the LED devices and the driver-precedence rule.
 
 ## Install
 
