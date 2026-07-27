@@ -29,6 +29,7 @@
 //! `std` only, like the rest of the core crate.
 
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::device::Device;
@@ -43,23 +44,29 @@ pub const FILE_HEADER: &str = "# logi-wheel profile";
 /// The store directory: `$XDG_CONFIG_HOME/logi-wheel/profiles`, falling back
 /// to `~/.config/logi-wheel/profiles` when the variable is unset or empty.
 ///
-/// Pre-rename installs saved profiles under `logi-dd/profiles` instead. To
-/// avoid ever losing a profile, [`default_dir`] prefers the new directory
-/// when it exists, otherwise transparently falls back to the old one (read
-/// AND write - no copy step, so there is nothing to fail partway through);
-/// a fresh install with neither directory yet gets the new path, so the
-/// first save creates it. Once anything exists under the new path, it wins
-/// permanently, even if the old directory is still around.
+/// Pre-rename installs saved profiles under `logi-dd/profiles` instead. The
+/// first time the new directory is needed and does not exist yet,
+/// [`default_dir`] copies every profile out of the old directory (if it has
+/// any) into the new one, then uses the new directory from then on; the old
+/// directory is left untouched as a safety net, and a file already present
+/// at the destination is never overwritten. A fresh install with neither
+/// directory yet gets the new path directly, with nothing to migrate. Once
+/// the new directory exists, it always wins and no further migration is
+/// attempted, even if the old directory is still around. If the copy itself
+/// cannot be completed (for example the new location is not writable), this
+/// falls back to the old directory for the current run instead of losing
+/// anything.
 pub fn default_dir() -> PathBuf {
     resolve_subdir_in(&config_root(), "profiles")
 }
 
-/// `<root>/logi-wheel/<subdir>` if it exists, else `<root>/logi-dd/<subdir>`
-/// if that exists, else the new path (for a directory that does not exist
-/// yet). Split out from [`default_dir`] as a pure function of `root` (no
-/// environment access) so the new/old/both-exist migration behavior is
-/// testable without touching `XDG_CONFIG_HOME` - [`crate::tfsim`] has its
-/// own equivalent split for the same reason.
+/// `<root>/logi-wheel/<subdir>` if it exists, else a one-time copy of
+/// `<root>/logi-dd/<subdir>` (when that exists) followed by the new path,
+/// else the new path outright (fresh install, nothing to migrate). Split
+/// out from [`default_dir`] as a pure function of `root` (no environment
+/// access) so the migration behavior is testable without touching
+/// `XDG_CONFIG_HOME` - [`crate::tfsim`] has its own equivalent split for the
+/// same reason.
 fn resolve_subdir_in(root: &Path, subdir: &str) -> PathBuf {
     let new_dir = root.join("logi-wheel").join(subdir);
     if new_dir.is_dir() {
@@ -67,9 +74,38 @@ fn resolve_subdir_in(root: &Path, subdir: &str) -> PathBuf {
     }
     let old_dir = root.join("logi-dd").join(subdir);
     if old_dir.is_dir() {
+        if migrate_dir(&old_dir, &new_dir).is_ok() {
+            return new_dir;
+        }
         return old_dir;
     }
     new_dir
+}
+
+/// Copy every regular file directly under `old_dir` into `new_dir`,
+/// creating `new_dir` first. A destination file that already exists is
+/// left alone (create-if-absent per file, tolerating `AlreadyExists`), so
+/// running this concurrently from two processes - or finding a partial
+/// migration from an earlier failed attempt - never overwrites anything.
+/// The originals in `old_dir` are never touched or removed. Any other I/O
+/// failure aborts and is returned so the caller can fall back to the old
+/// directory for this run rather than losing data.
+fn migrate_dir(old_dir: &Path, new_dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(new_dir)?;
+    for entry in fs::read_dir(old_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let data = fs::read(entry.path())?;
+        let dest = new_dir.join(entry.file_name());
+        match fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+            Ok(mut f) => f.write_all(&data)?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// `$XDG_CONFIG_HOME`, falling back to `~/.config` when unset or empty.
@@ -412,46 +448,110 @@ mod tests {
         std::env::remove_var("XDG_CONFIG_HOME");
     }
 
-    /// The pre-rename `logi-dd` directory migration: new-only, old-only
-    /// (still readable, no copy performed), and both-exist (new wins).
-    /// Exercises [`resolve_subdir_in`] directly with an explicit root
-    /// (rather than `default_dir` + `XDG_CONFIG_HOME`) so it cannot race
-    /// [`default_dir_honors_xdg_config_home`] over that environment
-    /// variable.
+    /// Fresh install: neither directory exists yet. [`resolve_subdir_in`]
+    /// returns the new path outright and never even creates a `logi-dd`
+    /// directory to check.
     #[test]
-    fn resolve_subdir_in_migrates_from_the_pre_rename_directory() {
-        // new-only: no logi-dd directory at all, brand new install.
-        let root_new = tempdir();
-        fs::create_dir_all(root_new.join("logi-wheel").join("profiles")).unwrap();
-        fs::write(root_new.join("logi-wheel").join("profiles").join("a.profile"), FILE_HEADER)
-            .unwrap();
-        let new_dir = resolve_subdir_in(&root_new, "profiles");
-        assert_eq!(new_dir, root_new.join("logi-wheel").join("profiles"));
-        assert_eq!(list_in(&new_dir), vec!["a".to_string()]);
+    fn resolve_subdir_in_fresh_install_is_the_new_path_untouched() {
+        let root = tempdir();
+        let dir = resolve_subdir_in(&root, "profiles");
+        assert_eq!(dir, root.join("logi-wheel").join("profiles"));
+        assert!(!dir.exists(), "nothing to migrate, nothing created");
+        assert!(!root.join("logi-dd").exists(), "the old directory was never touched");
+    }
 
-        // old-only: a pre-rename install with no new directory yet. The old
-        // one must still be read transparently, with nothing copied.
-        let root_old = tempdir();
-        fs::create_dir_all(root_old.join("logi-dd").join("profiles")).unwrap();
-        fs::write(root_old.join("logi-dd").join("profiles").join("legacy.profile"), FILE_HEADER)
+    /// Old-only: a pre-rename install with no new directory yet. Every
+    /// profile is copied to the new directory, the resolved path is the new
+    /// one, and the originals are left in place as a safety net.
+    #[test]
+    fn resolve_subdir_in_migrates_every_profile_once() {
+        let root = tempdir();
+        fs::create_dir_all(root.join("logi-dd").join("profiles")).unwrap();
+        fs::write(root.join("logi-dd").join("profiles").join("legacy.profile"), FILE_HEADER)
             .unwrap();
-        let old_dir = resolve_subdir_in(&root_old, "profiles");
-        assert_eq!(old_dir, root_old.join("logi-dd").join("profiles"));
-        assert_eq!(list_in(&old_dir), vec!["legacy".to_string()]);
-        assert!(!root_old.join("logi-wheel").exists(), "old dir is read in place, never copied");
+        fs::write(root.join("logi-dd").join("profiles").join("second.profile"), FILE_HEADER)
+            .unwrap();
 
-        // both exist: the new directory wins, even though the old one is
-        // still there.
-        let root_both = tempdir();
-        fs::create_dir_all(root_both.join("logi-dd").join("profiles")).unwrap();
-        fs::write(root_both.join("logi-dd").join("profiles").join("old.profile"), FILE_HEADER)
-            .unwrap();
-        fs::create_dir_all(root_both.join("logi-wheel").join("profiles")).unwrap();
-        fs::write(root_both.join("logi-wheel").join("profiles").join("new.profile"), FILE_HEADER)
-            .unwrap();
-        let both_dir = resolve_subdir_in(&root_both, "profiles");
-        assert_eq!(both_dir, root_both.join("logi-wheel").join("profiles"));
-        assert_eq!(list_in(&both_dir), vec!["new".to_string()], "the new directory wins");
+        let dir = resolve_subdir_in(&root, "profiles");
+        assert_eq!(dir, root.join("logi-wheel").join("profiles"), "the new directory wins after migrating");
+        assert_eq!(list_in(&dir), vec!["legacy".to_string(), "second".to_string()], "every profile migrated");
+        assert_eq!(
+            list_in(&root.join("logi-dd").join("profiles")),
+            vec!["legacy".to_string(), "second".to_string()],
+            "the originals are left in place"
+        );
+
+        // A second resolution finds the new directory directly and does
+        // not need to migrate again.
+        assert_eq!(resolve_subdir_in(&root, "profiles"), root.join("logi-wheel").join("profiles"));
+    }
+
+    /// Both exist: the new directory wins outright, and the old one is left
+    /// completely alone (no copy is even attempted).
+    #[test]
+    fn resolve_subdir_in_prefers_the_new_directory_when_both_exist() {
+        let root = tempdir();
+        fs::create_dir_all(root.join("logi-dd").join("profiles")).unwrap();
+        fs::write(root.join("logi-dd").join("profiles").join("old.profile"), FILE_HEADER).unwrap();
+        fs::create_dir_all(root.join("logi-wheel").join("profiles")).unwrap();
+        fs::write(root.join("logi-wheel").join("profiles").join("new.profile"), FILE_HEADER).unwrap();
+
+        let dir = resolve_subdir_in(&root, "profiles");
+        assert_eq!(dir, root.join("logi-wheel").join("profiles"));
+        assert_eq!(list_in(&dir), vec!["new".to_string()], "the new directory wins");
+        assert_eq!(
+            list_in(&root.join("logi-dd").join("profiles")),
+            vec!["old".to_string()],
+            "the old directory is untouched, not overwritten by the new one's content"
+        );
+    }
+
+    /// A file with the same name already sitting at the destination (as if
+    /// a concurrent migration, or an earlier partial attempt, got there
+    /// first) is left alone, while every other profile is still copied
+    /// over. Exercises [`migrate_dir`] directly: going through
+    /// [`resolve_subdir_in`] would short-circuit on its own "new directory
+    /// already exists" gate before ever reaching the copy step, which is
+    /// exactly why this per-file protection lives in the copy step itself
+    /// rather than the gate.
+    #[test]
+    fn migrate_dir_never_overwrites_an_existing_destination_file() {
+        let root = tempdir();
+        let old_dir = root.join("logi-dd").join("profiles");
+        let new_dir = root.join("logi-wheel").join("profiles");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("race.profile"), "old-content").unwrap();
+        fs::write(old_dir.join("wet.profile"), FILE_HEADER).unwrap();
+        // Pre-seed the destination with a same-named file the migration
+        // must not clobber.
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("race.profile"), "new-content").unwrap();
+
+        migrate_dir(&old_dir, &new_dir).unwrap();
+        assert_eq!(list_in(&new_dir), vec!["race".to_string(), "wet".to_string()]);
+        assert_eq!(
+            fs::read_to_string(new_dir.join("race.profile")).unwrap(),
+            "new-content",
+            "the pre-existing destination file is never overwritten"
+        );
+        assert_eq!(fs::read_to_string(new_dir.join("wet.profile")).unwrap(), FILE_HEADER, "the other file still migrated");
+    }
+
+    /// Migration failure (the new location cannot be created, simulated
+    /// cheaply by putting a plain file where the `logi-wheel` directory
+    /// needs to go): resolution still falls back to the old directory
+    /// rather than panicking or losing the originals.
+    #[test]
+    fn resolve_subdir_in_falls_back_to_the_old_directory_when_migration_fails() {
+        let root = tempdir();
+        fs::create_dir_all(root.join("logi-dd").join("profiles")).unwrap();
+        fs::write(root.join("logi-dd").join("profiles").join("legacy.profile"), FILE_HEADER).unwrap();
+        // Block `<root>/logi-wheel` from ever becoming a directory.
+        fs::write(root.join("logi-wheel"), "not a directory").unwrap();
+
+        let dir = resolve_subdir_in(&root, "profiles");
+        assert_eq!(dir, root.join("logi-dd").join("profiles"), "falls back to the old directory");
+        assert_eq!(list_in(&dir), vec!["legacy".to_string()], "the original is still usable");
     }
 
     /// A fake G923 (classic engine): no `wheel_*` attrs, no onboard profile

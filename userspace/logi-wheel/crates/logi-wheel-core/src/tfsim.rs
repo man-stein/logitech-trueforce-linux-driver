@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
@@ -90,23 +91,28 @@ impl Default for Config {
 /// Same resolution as tf-sim's own `default_path`.
 ///
 /// Pre-rename installs saved this file under `logi-dd/tf-sim.conf` instead.
-/// To avoid ever losing an existing config, the new file wins when it
-/// exists, otherwise the old one is read transparently (no copy step, so
-/// there is nothing to fail partway through); with neither present yet
-/// (fresh install) this returns the new path, so the first write creates it
-/// there. Once the new file exists, it wins permanently, even if the old
-/// one is still around. Mirrored, not shared, in tf-sim's own
-/// `default_path` (see the module doc for why the crates cannot link).
+/// The first time the new file is needed and does not exist yet,
+/// [`default_path`] copies the old file (if it exists) to the new location,
+/// then uses the new path from then on; the old file is left untouched as a
+/// safety net, and the copy never overwrites a file already at the new
+/// path. A fresh install with neither file yet gets the new path directly,
+/// with nothing to migrate. Once the new file exists, it always wins and no
+/// further migration is attempted, even if the old one is still around. If
+/// the copy itself cannot be completed (for example the new location is not
+/// writable), this falls back to the old path for the current run instead
+/// of losing anything. Mirrored, not shared, in tf-sim's own `default_path`
+/// (see the module doc for why the crates cannot link).
 pub fn default_path() -> PathBuf {
     resolve_path_in(&crate::profiles::config_root())
 }
 
-/// `<root>/logi-wheel/tf-sim.conf` if it exists, else
-/// `<root>/logi-dd/tf-sim.conf` if that exists, else the new path (for a
-/// file that does not exist yet). Split out from [`default_path`] as a pure
-/// function of `root` (no environment access) so the new/old/both-exist
-/// migration behavior is testable without touching `XDG_CONFIG_HOME` -
-/// [`crate::profiles`] has its own equivalent split for the same reason.
+/// `<root>/logi-wheel/tf-sim.conf` if it exists, else a one-time copy of
+/// `<root>/logi-dd/tf-sim.conf` (when that exists) followed by the new
+/// path, else the new path outright (fresh install, nothing to migrate).
+/// Split out from [`default_path`] as a pure function of `root` (no
+/// environment access) so the migration behavior is testable without
+/// touching `XDG_CONFIG_HOME` - [`crate::profiles`] has its own equivalent
+/// split for the same reason.
 fn resolve_path_in(root: &Path) -> PathBuf {
     let new_path = root.join("logi-wheel").join(FILE_NAME);
     if new_path.is_file() {
@@ -114,9 +120,32 @@ fn resolve_path_in(root: &Path) -> PathBuf {
     }
     let old_path = root.join("logi-dd").join(FILE_NAME);
     if old_path.is_file() {
+        if migrate_file(&old_path, &new_path).is_ok() {
+            return new_path;
+        }
         return old_path;
     }
     new_path
+}
+
+/// Copy `old_path` to `new_path`, creating the parent directory first. The
+/// destination is created with create-if-absent semantics: an
+/// `AlreadyExists` from the per-file create (another process winning the
+/// same race, or a file already there for some other reason) is not an
+/// error and leaves that file untouched. The original at `old_path` is
+/// never touched or removed. Any other I/O failure is returned so the
+/// caller can fall back to reading the old path for this run rather than
+/// losing data.
+fn migrate_file(old_path: &Path, new_path: &Path) -> io::Result<()> {
+    if let Some(dir) = new_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let data = fs::read(old_path)?;
+    match fs::OpenOptions::new().write(true).create_new(true).open(new_path) {
+        Ok(mut f) => f.write_all(&data),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// tf-sim's boolean spellings.
@@ -386,43 +415,76 @@ mod tests {
         }
     }
 
-    /// The pre-rename `logi-dd` file migration: new-only, old-only (still
-    /// readable, no copy performed), and both-exist (new wins). Exercises
-    /// [`resolve_path_in`] directly with an explicit root, so it never
-    /// touches `XDG_CONFIG_HOME` (no environment tests exist elsewhere in
-    /// this module to race).
+    /// Fresh install: neither directory exists yet. [`resolve_path_in`]
+    /// returns the new path outright and never even creates a `logi-dd`
+    /// directory to check.
     #[test]
-    fn resolve_path_in_migrates_from_the_pre_rename_file() {
-        // new-only: no logi-dd file at all, brand new install.
-        let new_tree = TempTree::new();
-        let new_dir_path = new_tree.path().join("logi-wheel");
-        fs::create_dir_all(&new_dir_path).unwrap();
-        fs::write(new_dir_path.join(FILE_NAME), "intensity=11\n").unwrap();
-        let resolved = resolve_path_in(new_tree.path());
-        assert_eq!(resolved, new_dir_path.join(FILE_NAME));
-        assert_eq!(Config::load_from(&resolved).intensity, 11);
+    fn resolve_path_in_fresh_install_is_the_new_path_untouched() {
+        let tree = TempTree::new();
+        let resolved = resolve_path_in(tree.path());
+        assert_eq!(resolved, tree.path().join("logi-wheel").join(FILE_NAME));
+        assert!(!resolved.exists(), "nothing to migrate, nothing created");
+        assert!(!tree.path().join("logi-dd").exists(), "the old directory was never touched");
+    }
 
-        // old-only: a pre-rename install with no new file yet. The old one
-        // must still be read transparently, with nothing copied.
-        let old_tree = TempTree::new();
-        let old_dir_path = old_tree.path().join("logi-dd");
-        fs::create_dir_all(&old_dir_path).unwrap();
-        fs::write(old_dir_path.join(FILE_NAME), "intensity=22\n").unwrap();
-        let resolved = resolve_path_in(old_tree.path());
-        assert_eq!(resolved, old_dir_path.join(FILE_NAME));
+    /// Old-only: a pre-rename install with no new file yet. The old file is
+    /// copied to the new location, the resolved path is the new one, and
+    /// the original is left in place as a safety net.
+    #[test]
+    fn resolve_path_in_migrates_the_old_file_once() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.path().join("logi-dd")).unwrap();
+        fs::write(tree.path().join("logi-dd").join(FILE_NAME), "intensity=22\n").unwrap();
+
+        let resolved = resolve_path_in(tree.path());
+        assert_eq!(resolved, tree.path().join("logi-wheel").join(FILE_NAME), "the new path wins after migrating");
         assert_eq!(Config::load_from(&resolved).intensity, 22);
-        assert!(!old_tree.path().join("logi-wheel").exists(), "old file read in place, never copied");
+        assert_eq!(
+            fs::read_to_string(tree.path().join("logi-dd").join(FILE_NAME)).unwrap(),
+            "intensity=22\n",
+            "the original is left in place untouched"
+        );
 
-        // both exist: the new file wins, even though the old one is still
-        // there.
-        let both_tree = TempTree::new();
-        fs::create_dir_all(both_tree.path().join("logi-dd")).unwrap();
-        fs::write(both_tree.path().join("logi-dd").join(FILE_NAME), "intensity=33\n").unwrap();
-        fs::create_dir_all(both_tree.path().join("logi-wheel")).unwrap();
-        fs::write(both_tree.path().join("logi-wheel").join(FILE_NAME), "intensity=44\n").unwrap();
-        let resolved = resolve_path_in(both_tree.path());
-        assert_eq!(resolved, both_tree.path().join("logi-wheel").join(FILE_NAME));
+        // A second resolution finds the new file directly and does not
+        // need to migrate again.
+        assert_eq!(resolve_path_in(tree.path()), tree.path().join("logi-wheel").join(FILE_NAME));
+    }
+
+    /// Both exist: the new file wins outright, and the old one is left
+    /// completely alone (no copy is even attempted).
+    #[test]
+    fn resolve_path_in_prefers_the_new_file_when_both_exist() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.path().join("logi-dd")).unwrap();
+        fs::write(tree.path().join("logi-dd").join(FILE_NAME), "intensity=33\n").unwrap();
+        fs::create_dir_all(tree.path().join("logi-wheel")).unwrap();
+        fs::write(tree.path().join("logi-wheel").join(FILE_NAME), "intensity=44\n").unwrap();
+
+        let resolved = resolve_path_in(tree.path());
+        assert_eq!(resolved, tree.path().join("logi-wheel").join(FILE_NAME));
         assert_eq!(Config::load_from(&resolved).intensity, 44, "the new file wins");
+        assert_eq!(
+            fs::read_to_string(tree.path().join("logi-dd").join(FILE_NAME)).unwrap(),
+            "intensity=33\n",
+            "the old file is untouched"
+        );
+    }
+
+    /// Migration failure (the new location cannot be created, simulated
+    /// cheaply by putting a plain file where the `logi-wheel` directory
+    /// needs to go): resolution still falls back to the old path rather
+    /// than panicking or losing the original.
+    #[test]
+    fn resolve_path_in_falls_back_to_the_old_file_when_migration_fails() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.path().join("logi-dd")).unwrap();
+        fs::write(tree.path().join("logi-dd").join(FILE_NAME), "intensity=55\n").unwrap();
+        // Block `<root>/logi-wheel` from ever becoming a directory.
+        fs::write(tree.path().join("logi-wheel"), "not a directory").unwrap();
+
+        let resolved = resolve_path_in(tree.path());
+        assert_eq!(resolved, tree.path().join("logi-dd").join(FILE_NAME), "falls back to the old file");
+        assert_eq!(Config::load_from(&resolved).intensity, 55);
     }
 
     /// A file in tf-sim's own save layout (see its `Config::save_to`),

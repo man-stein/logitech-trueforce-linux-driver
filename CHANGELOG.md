@@ -63,12 +63,12 @@ the contract is "it works on RS50 and G Pro as listed here".
   `logi-ffb` and `logi-tf-sim` keep their names). Reason: "dd" meant
   direct-drive, but the driver now also supports the belt-driven G923, and
   the app configures every supported wheel, not just the direct-drive ones.
-  - **Config files keep working automatically.** Profiles and
+  - **Config files migrate automatically, once.** Profiles and
     `tf-sim.conf` move to `$XDG_CONFIG_HOME/logi-wheel` (falling back to
-    `~/.config/logi-wheel`); the old `logi-dd` directory is still read
-    transparently whenever the new one does not exist yet, so existing
-    profiles and tf-sim settings are picked up with no manual migration.
-    Once anything is saved under the new path, it wins over the old one.
+    `~/.config/logi-wheel`); the first time the new location is needed and
+    the old `logi-dd` one still has data, it is copied over (the originals
+    are left in place) and the new location is used from then on, so
+    nothing is ever written back to `logi-dd` again.
   - **`LOGI_DD_SYSFS_DIR`/`LOGI_DD_TEST_OVERLAYS`** still work as deprecated
     aliases for the new `LOGI_WHEEL_SYSFS_DIR`/`LOGI_WHEEL_TEST_OVERLAYS`;
     the new name wins if both are set.
