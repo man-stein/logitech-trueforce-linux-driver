@@ -2080,6 +2080,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     worker.request(Request::LoadCategory(get(&current_category)));
 
+    // Info is the startup category, and the live input monitor is normally
+    // started by the category-change handler. Nothing changes category on
+    // the way in, so start the reader here too, or the page would sit on
+    // "Scanning /dev/input for the wheel..." forever.
+    if get(&current_category) == Category::Info {
+        start_test_monitor(app.as_weak(), test_reader.clone(), test_device.clone());
+    }
+
     let outcome = app.run();
     // The reader thread must not outlive the window (it holds an open fd
     // and a Weak<App> that would just go stale).

@@ -424,6 +424,12 @@ impl<S: SysfsIo> App<S> {
         a.no_wheel = !wheel_present(&a.device);
         a.sdk_resolved = a.resolve_sdk();
         a.reload();
+        // Info is the startup view and its live monitor is otherwise only
+        // started when a view change lands on it, which never happens on
+        // the way in; without this the monitor would never scan.
+        if a.is_info() {
+            a.rescan_input();
+        }
         a
     }
 
@@ -2896,6 +2902,16 @@ mod tests {
         std::fs::remove_file(&stamp).unwrap();
         assert!(a.status.contains("driver: v0.16.0"), "status: {}", a.status);
         assert_eq!(a.driver_version_text(), "(module not loaded)", "gone after unload");
+    }
+
+    #[test]
+    fn the_startup_info_view_scans_for_the_wheel_input() {
+        // Info is the startup view; its monitor is otherwise only started
+        // by a view change, so construction must scan on its own or the
+        // page sits on "scanning" forever.
+        let a = app();
+        assert!(a.is_info(), "Info is expected to be the startup view");
+        assert!(a.test.scanned, "construction must run the input discovery");
     }
 
     #[test]
