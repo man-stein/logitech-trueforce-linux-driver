@@ -382,6 +382,9 @@ Device → Host: Interrupt IN (endpoint 0x82)
 | 0x0D | `0x80A4` | AxisResponseCurve | Per-axis 64-point response curves (see 5.1) |
 | 0x0F | `0x8120` | GamingAttachments | Attachment/module management (openlogi registry name) |
 | 0x10 | `0x8123` | ForceFeedback | HID++ FFB (unused by this driver; documented at openlogi.org) |
+| 0x11 | `0x8127` | (undecoded, hidden) | fn2 result is constant across every onboard slot - not slot content; not sent by this driver (see "Onboard Profile Authoring" above) |
+| 0x12 | `0x8130` | (undecoded) | Not touched by any sysfs attribute |
+| 0x13 | `0x8132` | (undecoded) | Not touched by any sysfs attribute |
 | **0x14** | **`0x8133`** | **Damping** | Damping slider |
 | **0x15** | **`0x8134`** | **BrakeForce** | Brake Force slider |
 | **0x16** | **`0x8136`** | **FFBStrength** | Strength slider |
@@ -646,6 +649,62 @@ Switch to Desktop:  10 FF 17 2D 00 00 00
 Switch to Onboard 1: 10 FF 17 2D 01 00 00
 Switch to Onboard 3: 10 FF 17 2D 03 00 00
 ```
+
+#### Onboard Profile Authoring
+
+There is no block-write/upload protocol for an onboard slot's contents.
+Confirmed by a full USB capture of G Hub's onboard settings page
+(`dev/captures/2026-07-14_profile_save.pcapng`, 342 HID++ frames) plus a
+read-only live cross-check against a connected RS50: **a slot is authored
+by activating it (the Set Mode/Profile call above) and then sending the
+same per-setting SET commands every other view uses.** The wheel persists
+each value to the active slot's own storage immediately; there is no
+separate commit/save call afterwards.
+
+**Select-then-set model:**
+```
+1. Set: 10 FF 17 2D [1-5] 00 00      activate the slot to author
+2. Set: 10 FF 18 2A [range] 00       wheel_range's normal SET, RotationRange
+3. Set: 10 FF 16 2A [strength] 00    wheel_strength's normal SET, FFBStrength
+4. ...                               any other setting's normal SET
+```
+Each SET is answered by the same unsolicited broadcast event the driver
+already consumes when running live in that mode; there is no additional
+frame that means "saved" or "committed". Reading a setting back always
+reports the ACTIVE slot's stored value: switching to a different slot and
+back shows the values it was last written with, confirming the writes
+land in that slot's own storage, not a shared/desktop-only location.
+
+**What a slot stores** (per-slot, confirmed by the capture and the live
+cross-check): rotation range (`0x8138`), FFB strength (`0x8136`),
+TrueForce intensity (`0x8139`), damping (`0x8133`), the FFB filter pair
+(`0x8140`), brake force (`0x8134`, onboard-mode-only on the wheel itself),
+LED effect + brightness, and the slot's own name (`0x8137` fn3/fn4). NOT
+slot content: the steering sensitivity curve (G Hub actively reverts axis
+0 to linear at the start of every onboard settings burst - the Sensitivity
+slider is a desktop-only concept), combined-pedals, and the pedal/
+handbrake response curves (a desktop-only software shaping layer; ignored
+by the pedal MCU in native PC mode).
+
+**Slot-0/name edge case:** `0x8137` fn3 (get slot name) against slot
+argument `0x00` (the desktop state) returns an empty name rather than an
+error - desktop has no onboard name to report, which is expected, not a
+fault.
+
+**Feature indices pinned this session** (request/response pairing against
+a live G Hub startup capture; previously missing from the table below):
+index `0x11` = `0x8127` (a hidden feature whose fn2 result reads back
+identical across every slot, i.e. NOT part of a slot's content - some
+kind of commit/sync call G Hub issues but this driver has never needed to
+send), `0x12` = `0x8130`, `0x13` = `0x8132` (both undecoded; not touched
+by any sysfs attribute).
+
+**Application-level implementation:** see `docs/SYSFS_API.md`'s "Editing
+an onboard slot" section for how logi-wheel's userspace turns this wire
+model into a guarded "select a slot, edit its values, optionally revert"
+flow - the kernel driver itself needs no new attributes for any of it,
+since authoring a slot is just writing the existing per-setting attrs
+while `wheel_profile` names that slot.
 
 #### Centre Calibration (Feature 0x812C, sub-device 0x05)
 

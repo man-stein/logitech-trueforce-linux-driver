@@ -72,6 +72,50 @@ echo 3 > wheel_profile
 echo 0 > wheel_profile
 ```
 
+### Editing an onboard slot
+
+There is no separate "write a whole profile" attribute or protocol. A slot
+is authored by making it active (write `wheel_profile`) and then writing
+the same per-setting attrs everything else on this page uses -
+`wheel_range`, `wheel_strength`, `wheel_trueforce`, `wheel_damping`,
+`wheel_ffb_filter`/`wheel_ffb_filter_auto`, `wheel_brake_force`,
+`wheel_led_effect`/`wheel_led_brightness`, and `wheel_profile_names` for
+the slot's own name. The wheel persists each write to the active slot's
+own storage **immediately**, exactly like every other write on this page;
+there is no commit/save step afterwards. See
+`docs/PROTOCOL_SPECIFICATION.md`'s "Onboard Profile Authoring" section for
+the wire-level evidence.
+
+```bash
+# Author slot 3: activate it, then set its values one at a time.
+echo 3 > wheel_profile
+echo 540 > wheel_range
+echo 80 > wheel_strength
+echo "3:RACE NITE" > wheel_profile_names
+```
+
+Two things follow directly from "immediate write, no commit step":
+
+- **Activating a slot changes the wheel's live feel right away.** The
+  moment `wheel_profile` lands on a slot, the motor runs whatever
+  strength/damping/range that slot already has stored, before you write
+  anything else. Never do this while driving.
+- **A half-finished edit cannot be rolled back on the wire.** If a script
+  or tool is interrupted partway through authoring a slot, whatever was
+  written so far stays written; there is nothing to "cancel". A caller
+  that wants an undo path has to read every value it is about to touch
+  *before* writing anything, so it has something to write back if it needs
+  to revert. `logi-wheel`'s GUI/TUI "Edit onboard slot" flow does exactly
+  this (snapshot on entry, an explicit Revert action that replays it); see
+  `logi_wheel_core::onboard` in the userspace crate for the reusable
+  implementation.
+
+Also worth knowing when scripting this: the wheel can be switched to a
+different slot from its own OLED menu at any time, including in the
+middle of a multi-attribute edit like the one above. Re-read `wheel_profile`
+before trusting that a write landed on the slot you intended, rather than
+assuming nothing changed underneath you.
+
 ---
 
 ## Force Feedback Settings
