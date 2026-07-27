@@ -740,9 +740,14 @@ analysis; index-to-ID mapping derived from IFeatureSet fn1 pairing in
   driver drives:
   - **Steering** (base dev `0xff`, axis 0): `wheel_response_curve` and
     `wheel_sensitivity`.
-  - **Pedals** (pedal sub-device `0x02`, axes 0/1/2 = throttle/brake/clutch):
+  - **Pedals** (pedal sub-device, axes 0/1/2 = throttle/brake/clutch):
     `wheel_{throttle,brake,clutch}_{curve,sensitivity,deadzone}`. The pedal MCU
     applies its curve to the axis it reports to the PC (hardware-verified).
+    The pedal sub-device index was `0x02` in every census below but is not
+    fixed - it shifts when another accessory occupies a lower index
+    (hardware-verified 2026-07-28 with an RS Shifter & Handbrake attached,
+    which pushed the pedal MCU to `0x03`). The driver discovers the index at
+    runtime rather than assuming `0x02`; see `hidpp_dd_discover_settings_features`.
   - **Analog handbrake** (base dev `0xff`, axis 4, HID usage 0x32 = Z, evdev
     `ABS_Z`): `wheel_handbrake_curve` and `wheel_handbrake_sensitivity`.
 

@@ -756,12 +756,19 @@ echo 1 > wheel_led_apply
 
 ## Pedal Configuration
 
-The pedal unit is a separate MCU (HID++ sub-device `0x02`) that applies a
-64-point `0x80A4` response curve to each axis it reports to the PC. This was
-verified live on an RS50 (2026-07-16) with a two-plateau throttle curve: the
-reported axis dwelt at exactly the two programmed output values with an empty
-gap between them, which a linear axis cannot do. So these are real shaping
-controls, the same mechanism as the steering `wheel_response_curve`.
+The pedal unit is a separate MCU that applies a 64-point `0x80A4` response
+curve to each axis it reports to the PC. This was verified live on an RS50
+(2026-07-16) with a two-plateau throttle curve: the reported axis dwelt at
+exactly the two programmed output values with an empty gap between them,
+which a linear axis cannot do. So these are real shaping controls, the same
+mechanism as the steering `wheel_response_curve`.
+
+The pedal MCU's HID++ sub-device index is not fixed: it depends on what
+else is attached to the base (an RS Shifter & Handbrake accessory, for
+example, can push it from `0x02` to `0x03`). The driver discovers the
+index at startup and re-discovers it on replug, so no user action is
+needed; if the pedal MCU cannot be found on any candidate index, these
+attributes return `EOPNOTSUPP` the same as on a wheel without pedals.
 
 Each pedal `<p>` in {`throttle`, `brake`, `clutch`} exposes three attributes.
 **They all write the single curve the axis holds, so the last write wins.** The

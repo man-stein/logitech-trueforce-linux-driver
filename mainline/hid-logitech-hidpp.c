@@ -4254,10 +4254,42 @@ static void hidpp_ff_retry_work(struct work_struct *work)
 #define HIDPP_DD_PAGE_TRUEFORCE		0x8139	/* TRUEFORCE Bass Shaker */
 #define HIDPP_DD_PAGE_FILTER		0x8140	/* FFB Filter */
 #define HIDPP_DD_PAGE_RESPONSE_CURVE	0x80A4	/* Per-axis 64-point response curves */
-#define HIDPP_DD_PEDAL_DEV_IDX		0x02	/* HID++ sub-device index of the pedal unit (0x80A4 axis curves) */
+/*
+ * The pedal MCU's HID++ device index is NOT fixed: it shifts when another
+ * accessory (e.g. the RS Shifter & Handbrake) occupies a lower index.
+ * Hardware-verified 2026-07-28: it sat at 0x02 for years, then moved to
+ * 0x03 once a shifter/handbrake was attached to the same base. The actual
+ * index is discovered at runtime (see hidpp_dd_discover_settings_features)
+ * and cached in ff->pedal_dev_idx; this is only the first probe candidate,
+ * kept because it is still the common case on a base with no accessory.
+ */
+#define HIDPP_DD_PEDAL_DEV_IDX_DEFAULT	0x02
+/*
+ * 0x80A4 fn0 reports the axis count for a sub-device's response-curve
+ * store. The base reports 7, the RS Shifter & Handbrake's own store
+ * reports 1; only the pedal MCU reports 3 (throttle/brake/clutch,
+ * hardware-verified 2026-07-16 and re-confirmed 2026-07-28). Used to
+ * disambiguate which sub-device answering ROOT.GetFeature(0x80A4) is
+ * actually the pedal MCU.
+ */
+#define HIDPP_DD_PEDAL_AXIS_COUNT		3
 #define HIDPP_DD_HANDBRAKE_AXIS		4	/* 0x80A4 axis on the base (dev 0xff) for the RS handbrake (HID usage 0x32 = Z) */
 #define HIDPP_DD_PAGE_CALIBRATE		0x812C	/* Centre calibration (G Pro sub-device 0x05) */
 #define HIDPP_DD_PAGE_SYNC			0x1BC0	/* Unknown sync/prepare feature */
+
+/*
+ * Candidate HID++ device indices for the pedal MCU, tried in this order at
+ * discovery. 0x02 first (the historical/common-case index, so a base with
+ * no accessory attached pays no extra probe over what this driver has
+ * always sent); 0x03 second (hardware-verified new position once an
+ * accessory occupies 0x02); then the remaining indices the base can
+ * plausibly enumerate a sub-device on. Each candidate that nothing answers
+ * on costs one HID++ transport timeout (see __do_hidpp_send_message_sync),
+ * so this list is deliberately not longer than it needs to be.
+ */
+static const u8 hidpp_dd_pedal_dev_candidates[] = {
+	HIDPP_DD_PEDAL_DEV_IDX_DEFAULT, 0x03, 0x01, 0x04, 0x05, 0x06,
+};
 
 /*
  * RS50 HID descriptor declares buttons 1-92 but only ~20 are physically present.
@@ -4515,7 +4547,8 @@ struct hidpp_dd_ff_data {
 	u8 idx_brakeforce;		/* Feature index for brake force */
 	u8 idx_filter;			/* Feature index for FFB filter */
 	u8 idx_response_curve;		/* Feature index for 0x80A4 axis response curves (steering, base dev 0xff) */
-	u8 idx_pedal_curve;		/* Feature index for 0x80A4 curves on the pedal unit (dev 0x02, axes 0-2) */
+	u8 idx_pedal_curve;		/* Feature index for 0x80A4 curves on the pedal unit (dev pedal_dev_idx, axes 0-2) */
+	u8 pedal_dev_idx;		/* HID++ device index of the pedal MCU, discovered at runtime; HIDPP_DD_FEATURE_NOT_FOUND if none answered */
 	u8 idx_brightness;		/* Feature index for LED brightness */
 	u8 idx_lightsync;		/* Feature index for LIGHTSYNC effects */
 	u8 idx_rgb_config;		/* Feature index for RGB Zone Config */
@@ -6817,6 +6850,30 @@ static int hidpp_dd_ff_raw_hidpp_event(struct hidpp_device *hidpp, u8 *data,
 }
 
 /*
+ * Read the axis count 0x80A4 fn0 reports for one (device index, feature
+ * index) pair. Used only to disambiguate which sub-device answering
+ * ROOT.GetFeature(0x80A4) is actually the pedal MCU - see
+ * HIDPP_DD_PEDAL_AXIS_COUNT. Returns 0 with *count filled in on success, or
+ * the raw hidpp_send_fap_to_device_sync result (negative transport errno,
+ * positive HID++ error byte) on failure.
+ */
+static int hidpp_dd_pedal_axis_count(struct hidpp_device *hidpp, u8 dev_idx,
+				     u8 idx, u8 *count)
+{
+	struct hidpp_report response;
+	int ret;
+
+	memset(&response, 0, sizeof(response));
+	ret = hidpp_send_fap_to_device_sync(hidpp, dev_idx, idx,
+					    0x00 /* fn0 axis count/caps */,
+					    NULL, 0, &response);
+	if (ret)
+		return ret;
+	*count = response.fap.params[0];
+	return 0;
+}
+
+/*
  * Discover HID++ feature indices for the "settings" surface: per-wheel
  * tuning exposed as wheel_* sysfs attributes, plus profile / mode /
  * calibrate. These features are shared between RS50 and G Pro (though
@@ -6828,7 +6885,7 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 {
 	struct hidpp_device *hidpp = ff->hidpp;
 	struct hid_device *hid = hidpp->hid_dev;
-	int ret;
+	int ret, i;
 
 	ff->idx_range = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->idx_strength = HIDPP_DD_FEATURE_NOT_FOUND;
@@ -6838,6 +6895,7 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 	ff->idx_filter = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->idx_response_curve = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->idx_pedal_curve = HIDPP_DD_FEATURE_NOT_FOUND;
+	ff->pedal_dev_idx = HIDPP_DD_FEATURE_NOT_FOUND;
 	/*
 	 * Re-discovery (e.g. after a replug) drops the wheel's uploaded curves
 	 * back to built-in, so the generator caches must reset to match: 50 =
@@ -6890,18 +6948,44 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 		       ff->idx_response_curve);
 
 	/*
-	 * The pedal unit is a separate MCU (device index 0x02) that exposes the
-	 * same 0x80A4 feature at its own index, covering three axes (0=throttle,
-	 * 1=brake, 2=clutch). Hardware-verified 2026-07-16: the pedal MCU applies
-	 * an uploaded curve to its PC HID output, so these are real shaping
-	 * controls, not just onboard/console storage.
+	 * The pedal unit is a separate MCU that exposes the same 0x80A4
+	 * feature at its own index, covering three axes (0=throttle,
+	 * 1=brake, 2=clutch). Hardware-verified 2026-07-16: the pedal MCU
+	 * applies an uploaded curve to its PC HID output, so these are real
+	 * shaping controls, not just onboard/console storage.
+	 *
+	 * Its device index moves depending on what else is attached to the
+	 * base (see hidpp_dd_pedal_dev_candidates), so probe the candidates
+	 * in order and confirm the match by axis count: the base and an
+	 * attached shifter/handbrake accessory both answer
+	 * ROOT.GetFeature(0x80A4) too, but report 7 and 1 axes respectively,
+	 * never HIDPP_DD_PEDAL_AXIS_COUNT. A candidate nothing answers on
+	 * costs one transport timeout; a candidate that answers but lacks
+	 * the feature (-ENOENT) or has the wrong axis count is cheap and
+	 * moves on immediately.
 	 */
-	ret = hidpp_root_get_feature_on_device(hidpp, HIDPP_DD_PEDAL_DEV_IDX,
-					       HIDPP_DD_PAGE_RESPONSE_CURVE,
-					       &ff->idx_pedal_curve);
-	if (ret == 0)
+	for (i = 0; i < ARRAY_SIZE(hidpp_dd_pedal_dev_candidates); i++) {
+		u8 cand = hidpp_dd_pedal_dev_candidates[i];
+		u8 cand_idx, axes;
+
+		ret = hidpp_root_get_feature_on_device(hidpp, cand,
+						       HIDPP_DD_PAGE_RESPONSE_CURVE,
+						       &cand_idx);
+		if (ret)
+			continue;
+		if (hidpp_dd_pedal_axis_count(hidpp, cand, cand_idx, &axes))
+			continue;
+		if (axes != HIDPP_DD_PEDAL_AXIS_COUNT)
+			continue;
+		ff->pedal_dev_idx = cand;
+		ff->idx_pedal_curve = cand_idx;
+		break;
+	}
+	if (ff->pedal_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND)
 		dd_dbg(hid, "Pedal response curve feature at index 0x%02x (dev 0x%02x)\n",
-		       ff->idx_pedal_curve, HIDPP_DD_PEDAL_DEV_IDX);
+		       ff->idx_pedal_curve, ff->pedal_dev_idx);
+	else
+		dd_dbg(hid, "Pedal response curve feature not found on any candidate sub-device\n");
 
 	ret = hidpp_root_get_feature(hidpp, HIDPP_DD_PAGE_BRIGHTNESS, &ff->idx_brightness);
 	if (ret == 0)
@@ -8584,7 +8668,8 @@ static ssize_t wheel_sensitivity_show(struct device *dev, struct device_attribut
  * 63^3 (t = i/63). Verified against the capture: reproduces G Hub's uploaded
  * points for sliders 100/75/25/0 to within 1 LSB. Slider 50 is the linear
  * built-in curve and is handled by callers via fn6 revert, not here. Used for
- * both the steering (dev 0xff) and pedal (dev 0x02) sensitivity sliders.
+ * both the steering (dev 0xff) and pedal (dev ff->pedal_dev_idx, discovered
+ * at runtime) sensitivity sliders.
  */
 static size_t hidpp_dd_build_sensitivity_curve(int sensitivity, char *curve,
 					       size_t cap)
@@ -11132,7 +11217,8 @@ static int hidpp_dd_response_curve_revert(struct hidpp_device *hidpp,
  * Parse an "in:out" pair list, validate it, resample to the wheel's 64-point
  * store, and upload it to one 0x80A4 axis via fn3 open / 22x fn4 chunks /
  * fn5 commit. This is the shared body behind both the steering
- * (dev 0xff, axis 0) and pedal (dev 0x02, axis 0-2) store paths.
+ * (dev 0xff, axis 0) and pedal (dev ff->pedal_dev_idx, discovered at
+ * runtime, axis 0-2) store paths.
  *
  * `buf`/`count` cover just the pair list (the pedal store strips its leading
  * axis token first). Every send goes through hidpp_send_fap_to_device_sync:
@@ -11545,9 +11631,11 @@ static DEVICE_ATTR(wheel_handbrake_sensitivity, 0664,
 		   wheel_handbrake_sensitivity_store);
 
 /*
- * Pedal shaping: 0x80A4 response curves on the pedal sub-device (0x02), axes
- * 0=throttle, 1=brake, 2=clutch. Hardware-verified 2026-07-16 that the pedal
- * MCU applies an uploaded curve to its PC HID output (double-plateau test).
+ * Pedal shaping: 0x80A4 response curves on the pedal sub-device
+ * (ff->pedal_dev_idx, discovered at runtime - see
+ * hidpp_dd_discover_settings_features), axes 0=throttle, 1=brake, 2=clutch.
+ * Hardware-verified 2026-07-16 that the pedal MCU applies an uploaded curve
+ * to its PC HID output (double-plateau test).
  *
  * Each pedal exposes three sysfs generators that all write the ONE curve the
  * axis holds, so the last write wins:
@@ -11598,7 +11686,7 @@ static ssize_t hidpp_dd_pedal_curve_show(struct hid_device *hid, u8 axis,
 		return ret;
 
 	memset(&response, 0, sizeof(response));
-	ret = hidpp_send_fap_to_device_sync(hidpp, HIDPP_DD_PEDAL_DEV_IDX,
+	ret = hidpp_send_fap_to_device_sync(hidpp, ff->pedal_dev_idx,
 					    ff->idx_pedal_curve,
 					    0x10 /* fn1 axis info */,
 					    params, 1, &response);
@@ -11622,11 +11710,11 @@ static ssize_t hidpp_dd_pedal_curve_store(struct hid_device *hid, u8 axis,
 		return ret;
 
 	if (sysfs_streq(buf, "reset")) {
-		ret = hidpp_dd_response_curve_revert(hidpp, HIDPP_DD_PEDAL_DEV_IDX,
+		ret = hidpp_dd_response_curve_revert(hidpp, ff->pedal_dev_idx,
 						     axis, ff->idx_pedal_curve);
 		return ret ? hidpp_errno(hid, ret, "reset pedal curve") : count;
 	}
-	ret = hidpp_dd_response_curve_upload(hidpp, ff, HIDPP_DD_PEDAL_DEV_IDX,
+	ret = hidpp_dd_response_curve_upload(hidpp, ff, ff->pedal_dev_idx,
 					     axis, ff->idx_pedal_curve, buf, count);
 	return ret < 0 ? ret : count;
 }
@@ -11662,7 +11750,7 @@ static ssize_t hidpp_dd_pedal_sensitivity_store(struct hid_device *hid, u8 axis,
 	sensitivity = clamp(sensitivity, 0, 100);
 
 	if (sensitivity == 50) {
-		ret = hidpp_dd_response_curve_revert(hidpp, HIDPP_DD_PEDAL_DEV_IDX,
+		ret = hidpp_dd_response_curve_revert(hidpp, ff->pedal_dev_idx,
 						     axis, ff->idx_pedal_curve);
 		if (ret)
 			return hidpp_errno(hid, ret, "set pedal sensitivity");
@@ -11675,7 +11763,7 @@ static ssize_t hidpp_dd_pedal_sensitivity_store(struct hid_device *hid, u8 axis,
 		return -ENOMEM;
 	len = hidpp_dd_build_sensitivity_curve(sensitivity, curve,
 					       HIDPP_DD_SENS_CURVE_BUFSZ);
-	ret = hidpp_dd_response_curve_upload(hidpp, ff, HIDPP_DD_PEDAL_DEV_IDX,
+	ret = hidpp_dd_response_curve_upload(hidpp, ff, ff->pedal_dev_idx,
 					     axis, ff->idx_pedal_curve, curve, len);
 	kfree(curve);
 	if (ret)
@@ -11716,7 +11804,7 @@ static ssize_t hidpp_dd_pedal_deadzone_store(struct hid_device *hid, u8 axis,
 		return -EINVAL;
 
 	if (lower == 0 && upper == 0) {
-		ret = hidpp_dd_response_curve_revert(hidpp, HIDPP_DD_PEDAL_DEV_IDX,
+		ret = hidpp_dd_response_curve_revert(hidpp, ff->pedal_dev_idx,
 						     axis, ff->idx_pedal_curve);
 		if (ret)
 			return hidpp_errno(hid, ret, "reset pedal deadzone");
@@ -11740,7 +11828,7 @@ static ssize_t hidpp_dd_pedal_deadzone_store(struct hid_device *hid, u8 axis,
 		n += scnprintf(curve + n, sizeof(curve) - n, " %u:65535", hi_in);
 	n += scnprintf(curve + n, sizeof(curve) - n, " 65535:65535");
 
-	ret = hidpp_dd_response_curve_upload(hidpp, ff, HIDPP_DD_PEDAL_DEV_IDX,
+	ret = hidpp_dd_response_curve_upload(hidpp, ff, ff->pedal_dev_idx,
 					     axis, ff->idx_pedal_curve, curve, n);
 	if (ret)
 		return ret;
