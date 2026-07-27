@@ -55,7 +55,41 @@ the contract is "it works on RS50 and G Pro as listed here".
   in-tree `hid-logitech` driver instead.
 - **logi-wheel G923 support**: the TUI and GUI recognise the G923 and expose
   its four classic settings, with its own wheel image on the Info/Testing
-  page alongside the RS50 and G PRO.
+  page alongside the RS50 and G PRO. Gain and autocenter show as a rounded
+  0-100% in the UI instead of the raw 0-65535 sysfs value (the sysfs
+  attribute itself is unchanged, so Oversteer and scripts see the same
+  numbers as before). Settings a wheel does not have are hidden instead of
+  shown empty; for the G923 that means no LIGHTSYNC, no onboard profile
+  slots, and no desktop/onboard mode toggle. Desktop (computer-side)
+  profiles now work for any wheel without onboard slots, including the
+  G923. The button tester shows the G923's real button labels from a live
+  capture (X, Square, Circle, Triangle, the paddles, R2/L2/R3/L3, Share,
+  Options, the Plus/Minus pair, the dial's CW/CCW/push, and PS) - only the
+  18 buttons the wheel actually has - and the RS50 callout-diagram overlay
+  no longer draws over other wheels.
+- **Info/Testing is now the first page you see**: it is the first sidebar
+  entry and the app's startup view in both frontends, naming the detected
+  wheel and showing its serial and firmware. On the G923, which has no
+  `wheel_serial`/`wheel_firmware` sysfs at all, both are queried live over
+  HID++ feature `0x0003` (DeviceInformation). A scrollbar now appears
+  whenever a view scrolls, instead of silently swallowing the mouse wheel
+  with no sign there is more below.
+- **The force feedback and TrueForce-texture self-tests are full
+  sequences, not a single 2-second effect.** Both frontends list the whole
+  plan up front - one row per step, with its label and duration - and
+  track each row's live state (pending, counting down, playing, done, or
+  skipped) off a shared state machine, with a countdown before every step.
+  The force feedback plan covers constant force in both directions, a
+  rising ramp, spring, damper, friction, inertia, sine, square, triangle
+  and sawtooth waves, an envelope demo, simultaneous mixed effects, a gain
+  demo and an autocenter demo; the TrueForce plan steps through four
+  rising texture frequencies. A step whose effect type the wheel does not
+  advertise is marked skipped instead of erroring - the G923 skips
+  friction, the direct-drive wheels run everything. Force direction in
+  these tests is per-model, hardware-verified: the G923's classic engine
+  and the direct-drive engine use opposite sign conventions for the same
+  logical direction, so each step resolves to the correct raw value for
+  the connected wheel instead of assuming one global convention.
 
 ### Changed
 - **The settings app is renamed from `logi-dd` to `logi-wheel`** (TUI binary
