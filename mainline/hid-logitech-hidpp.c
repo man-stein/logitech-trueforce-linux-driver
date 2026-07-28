@@ -504,6 +504,14 @@ static int __hidpp_send_report(struct hid_device *hdev,
 }
 
 /*
+ * Timeout used by every ordinary HID++ sync send (settings GET/SET, feature
+ * lookups on a sub-device known to exist, etc). Left untouched by the
+ * discovery probe timeout below - a short timeout here could break slow but
+ * legitimate operations, so this constant only ever feeds the normal path.
+ */
+#define HIDPP_SEND_TIMEOUT (5 * HZ)
+
+/*
  * Effectively send the message to the device, waiting for its answer.
  *
  * Must be called with hidpp->send_mutex locked
@@ -515,7 +523,8 @@ static int __hidpp_send_report(struct hid_device *hdev,
  */
 static int __do_hidpp_send_message_sync(struct hidpp_device *hidpp,
 	struct hidpp_report *message,
-	struct hidpp_report *response)
+	struct hidpp_report *response,
+	unsigned long timeout)
 {
 	int ret;
 
@@ -552,7 +561,7 @@ static int __do_hidpp_send_message_sync(struct hidpp_device *hidpp,
 	}
 
 	if (!wait_event_timeout(hidpp->wait, hidpp->answer_available,
-				5*HZ)) {
+				timeout)) {
 		dbg_hid("%s:timeout waiting for response\n", __func__);
 		memset(response, 0, sizeof(struct hidpp_report));
 		return -ETIMEDOUT;
@@ -582,10 +591,18 @@ static int __do_hidpp_send_message_sync(struct hidpp_device *hidpp,
  *
  * See __do_hidpp_send_message_sync() for a detailed explanation of the returned
  * value.
+ *
+ * hidpp_send_message_sync_timeout() is the same, but lets the caller pick the
+ * per-attempt wait_event_timeout() value instead of the standard
+ * HIDPP_SEND_TIMEOUT. Only the RS50/G Pro discovery presence probe uses a
+ * shorter value (see HIDPP_DD_PROBE_TIMEOUT); every other caller goes through
+ * hidpp_send_message_sync(), which is unchanged and always uses
+ * HIDPP_SEND_TIMEOUT.
  */
-static int hidpp_send_message_sync(struct hidpp_device *hidpp,
+static int hidpp_send_message_sync_timeout(struct hidpp_device *hidpp,
 	struct hidpp_report *message,
-	struct hidpp_report *response)
+	struct hidpp_report *response,
+	unsigned long timeout)
 {
 	int ret;
 	int max_retries = 3;
@@ -593,12 +610,12 @@ static int hidpp_send_message_sync(struct hidpp_device *hidpp,
 	mutex_lock(&hidpp->send_mutex);
 
 	do {
-		ret = __do_hidpp_send_message_sync(hidpp, message, response);
+		ret = __do_hidpp_send_message_sync(hidpp, message, response, timeout);
 		/*
 		 * A transport failure (ret < 0, e.g. -ETIMEDOUT: the device
 		 * sent no answer) memsets `response`, so the report_id-keyed
 		 * BUSY checks below would never break and we would retry a dead
-		 * query up to 3x - each a full 5s timeout, all while holding
+		 * query up to 3x - each a full timeout, all while holding
 		 * send_mutex. That is what turned one silent query into a
 		 * 15-20s init stall and blocked every other HID++ user behind
 		 * it. Retrying only helps for an explicit HID++ BUSY error;
@@ -620,6 +637,14 @@ static int hidpp_send_message_sync(struct hidpp_device *hidpp,
 	mutex_unlock(&hidpp->send_mutex);
 	return ret;
 
+}
+
+static int hidpp_send_message_sync(struct hidpp_device *hidpp,
+	struct hidpp_report *message,
+	struct hidpp_report *response)
+{
+	return hidpp_send_message_sync_timeout(hidpp, message, response,
+						HIDPP_SEND_TIMEOUT);
 }
 
 /*
@@ -716,10 +741,15 @@ static int hidpp_send_fap_command_sync(struct hidpp_device *hidpp,
  * Same as hidpp_send_fap_command_sync() but addresses a specific sub-device
  * index rather than the root (0xff). Used for features that only live on a
  * sub-device (e.g. G Pro centre calibration on sub-device 0x05).
+ *
+ * hidpp_send_fap_to_device_sync_timeout() is the same, with an explicit
+ * per-attempt timeout; see hidpp_send_message_sync_timeout(). Used only by
+ * the RS50/G Pro sub-device discovery presence probe.
  */
-static int hidpp_send_fap_to_device_sync(struct hidpp_device *hidpp,
+static int hidpp_send_fap_to_device_sync_timeout(struct hidpp_device *hidpp,
 	u8 device_index, u8 feat_index, u8 funcindex_clientid,
-	u8 *params, int param_count, struct hidpp_report *response)
+	u8 *params, int param_count, struct hidpp_report *response,
+	unsigned long timeout)
 {
 	struct hidpp_report *message;
 	int ret;
@@ -752,9 +782,18 @@ static int hidpp_send_fap_to_device_sync(struct hidpp_device *hidpp,
 	message->fap.funcindex_clientid = funcindex_clientid | LINUX_KERNEL_SW_ID;
 	memcpy(&message->fap.params, params, param_count);
 
-	ret = hidpp_send_message_sync(hidpp, message, response);
+	ret = hidpp_send_message_sync_timeout(hidpp, message, response, timeout);
 	kfree(message);
 	return ret;
+}
+
+static int hidpp_send_fap_to_device_sync(struct hidpp_device *hidpp,
+	u8 device_index, u8 feat_index, u8 funcindex_clientid,
+	u8 *params, int param_count, struct hidpp_report *response)
+{
+	return hidpp_send_fap_to_device_sync_timeout(hidpp, device_index,
+		feat_index, funcindex_clientid, params, param_count, response,
+		HIDPP_SEND_TIMEOUT);
 }
 
 /*
@@ -1361,17 +1400,22 @@ static int hidpp_root_get_feature(struct hidpp_device *hidpp, u16 feature,
  * sub-device address instead of 0xff. Needed for features that only
  * respond on an auxiliary HID++ device (e.g. the G Pro's centre
  * calibration engine lives on sub-device 0x05).
+ *
+ * hidpp_root_get_feature_on_device_timeout() is the same query with an
+ * explicit per-attempt timeout, used only by the RS50/G Pro sub-device
+ * discovery presence probe (see HIDPP_DD_PROBE_TIMEOUT) to avoid paying the
+ * full HIDPP_SEND_TIMEOUT for every candidate index nothing answers on.
  */
-static int hidpp_root_get_feature_on_device(struct hidpp_device *hidpp,
-	u8 device_index, u16 feature, u8 *feature_index)
+static int hidpp_root_get_feature_on_device_timeout(struct hidpp_device *hidpp,
+	u8 device_index, u16 feature, u8 *feature_index, unsigned long timeout)
 {
 	struct hidpp_report response;
 	int ret;
 	u8 params[2] = { feature >> 8, feature & 0x00FF };
 
-	ret = hidpp_send_fap_to_device_sync(hidpp, device_index,
+	ret = hidpp_send_fap_to_device_sync_timeout(hidpp, device_index,
 			HIDPP_PAGE_ROOT_IDX, CMD_ROOT_GET_FEATURE,
-			params, 2, &response);
+			params, 2, &response, timeout);
 	if (ret)
 		return ret;
 
@@ -1380,6 +1424,13 @@ static int hidpp_root_get_feature_on_device(struct hidpp_device *hidpp,
 
 	*feature_index = response.fap.params[0];
 	return 0;
+}
+
+static int hidpp_root_get_feature_on_device(struct hidpp_device *hidpp,
+	u8 device_index, u16 feature, u8 *feature_index)
+{
+	return hidpp_root_get_feature_on_device_timeout(hidpp, device_index,
+		feature, feature_index, HIDPP_SEND_TIMEOUT);
 }
 
 static int hidpp_root_get_protocol_version(struct hidpp_device *hidpp)
@@ -4365,14 +4416,30 @@ static void hidpp_ff_retry_work(struct work_struct *work)
  * then the remaining indices the base can plausibly enumerate a sub-device
  * on, which is also where the accessory itself has been found (0x04,
  * hardware-verified 2026-07-28, though its index is not assumed to be
- * stable either). Each candidate that nothing answers on costs one HID++
- * transport timeout (see __do_hidpp_send_message_sync), so this list is
- * deliberately not longer than it needs to be. Both discoveries share this
- * one candidate list (see hidpp_dd_discover_settings_features).
+ * stable either). A silent candidate's cost is bounded by HIDPP_DD_PROBE_TIMEOUT
+ * below rather than a full HID++ transport timeout (see
+ * hidpp_dd_discover_settings_features), so this list is deliberately not
+ * longer than it needs to be even though the per-candidate cost is now
+ * small. Both discoveries share this one candidate list.
  */
 static const u8 hidpp_dd_pedal_dev_candidates[] = {
 	HIDPP_DD_PEDAL_DEV_IDX_DEFAULT, 0x03, 0x01, 0x04, 0x05, 0x06,
 };
+
+/*
+ * Presence-probe timeout for the discovery loop below. A sub-device that
+ * actually exists answers ROOT.GetFeature in about 2.5 ms (hardware-verified
+ * on this rig with both the pedal MCU and the RS Shifter & Handbrake
+ * attached). An absent index never answers at all and would otherwise cost
+ * the full HIDPP_SEND_TIMEOUT (5 s) before the driver gives up on it. 300 ms
+ * is roughly 100x the observed round-trip - generous headroom for USB
+ * scheduling and interrupt jitter - while remaining negligible next to the
+ * 5 s worst case a genuinely silent candidate would otherwise impose. Used
+ * only for the first, presence-establishing query per candidate; once a
+ * candidate is confirmed present, every further query against it uses the
+ * normal HIDPP_SEND_TIMEOUT like any other HID++ exchange.
+ */
+#define HIDPP_DD_PROBE_TIMEOUT msecs_to_jiffies(300)
 
 /*
  * RS50 HID descriptor declares buttons 1-92 but only ~20 are physically present.
@@ -7103,16 +7170,32 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 	 * probe the shared candidate list ONCE and classify whatever answers
 	 * ROOT.GetFeature(0x80A4) by its fn0 axis count - 3 axes is the
 	 * pedal MCU, 1 axis is a shifter candidate. This keeps the probe
-	 * cost to one candidate-list pass total (each silent index costs one
-	 * transport timeout, paid once for both discoveries) rather than
-	 * running a second full loop just for the accessory. A candidate
-	 * that answers but lacks the feature (-ENOENT) or has neither axis
-	 * count is cheap and moves on immediately. The loop only stops early
-	 * once both the pedal and the accessory have been resolved; if
-	 * either is genuinely absent, every candidate is tried (worst case:
+	 * cost to one candidate-list pass total rather than running a second
+	 * full loop just for the accessory. A candidate that answers but
+	 * lacks the feature (-ENOENT) or has neither axis count is cheap and
+	 * moves on immediately. The loop only stops early once both the
+	 * pedal and the accessory have been resolved; if either is
+	 * genuinely absent, every candidate is tried (worst case:
 	 * ARRAY_SIZE(hidpp_dd_pedal_dev_candidates) probes, same upper bound
 	 * as the pre-existing pedal-only loop had when the pedal was not
 	 * found at all).
+	 *
+	 * The first query against each candidate (the ROOT.GetFeature(0x80A4)
+	 * presence check right below) uses HIDPP_DD_PROBE_TIMEOUT instead of
+	 * the normal HIDPP_SEND_TIMEOUT: a silent index would otherwise cost
+	 * a full 5 s transport timeout before the loop could move on, and a
+	 * typical accessory-less wheel has several silent candidates in this
+	 * list. Bounding that first query to 300 ms caps the new worst case
+	 * at ARRAY_SIZE(hidpp_dd_pedal_dev_candidates) * 300 ms (about 1.8 s,
+	 * all candidates silent - no pedal, no accessory) instead of
+	 * ARRAY_SIZE(...) * 5 s (about 30 s). A fully-populated base like
+	 * this rig's still answers every candidate and never hits the probe
+	 * timeout at all, so its cost is unchanged (sub-second, dominated by
+	 * real responses, not waiting). Once a candidate answers this first
+	 * query, it is confirmed present and every further query against it
+	 * (axis count, BANDED_AXIS, DEVICE_MODE, device name) uses the normal
+	 * HIDPP_SEND_TIMEOUT, matching how a known-good sub-device is queried
+	 * everywhere else in this driver.
 	 *
 	 * A 1-axis candidate is only a shifter CANDIDATE until confirmed:
 	 * 0x80B1 (BANDED_AXIS) is unique to the accessory across every
@@ -7130,9 +7213,9 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 		    ff->shifter_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND)
 			break;
 
-		ret = hidpp_root_get_feature_on_device(hidpp, cand,
+		ret = hidpp_root_get_feature_on_device_timeout(hidpp, cand,
 						       HIDPP_DD_PAGE_RESPONSE_CURVE,
-						       &cand_idx);
+						       &cand_idx, HIDPP_DD_PROBE_TIMEOUT);
 		if (ret)
 			continue;
 		if (hidpp_dd_pedal_axis_count(hidpp, cand, cand_idx, &axes))
