@@ -413,13 +413,19 @@ export component InfoPage inherits Rectangle {
                                         height: 100%;
                                         // RS50 (0): the numbered layout photo
                                         // the callout overlay below is drawn
-                                        // against. G PRO (1) / G923 (2): a
-                                        // plain product photo, no numbers.
+                                        // against.
+                                        //
+                                        // All three are our own vector
+                                        // drawings. They replaced vendor
+                                        // product photography, which was not
+                                        // ours to redistribute; the shapes
+                                        // are drawn to be recognisable, not
+                                        // traced.
                                         source: root.wheel-kind == 2
-                                            ? @image-url("assets/g923-wheel.png")
+                                            ? @image-url("assets/g923-wheel.svg")
                                             : root.wheel-kind == 1
-                                                ? @image-url("assets/g-pro-wheel.png")
-                                                : @image-url("assets/rs-wheel-hub-button-layout.png");
+                                                ? @image-url("assets/g-pro-wheel.svg")
+                                                : @image-url("assets/rs50-wheel.svg");
                                         image-fit: contain;
                                     }
                                     // Pressed-button tints over the RS50

@@ -157,24 +157,24 @@ pub fn g923_button_label(code: u16) -> Option<&'static str> {
     G923_BUTTONS.iter().find(|(c, _)| *c == code).map(|(_, l)| *l)
 }
 
-/// One numbered callout box on the button-layout diagram
-/// (`docs/images/rs-wheel-hub-button-layout.png`, 2500x2160): the box's
-/// center and size as fractions of the image dimensions, and the evdev
-/// button codes that light it up. Extracted from the PNG itself
-/// (connected-components analysis of the white boxes), so a front-end can
-/// tint the pressed button's box by scaling these fractions to whatever
-/// size it draws the image at.
+/// One tintable control on the wheel artwork
+/// (`ui/assets/rs50-wheel.svg`, a 420x300 viewBox): the control's centre and
+/// size as fractions of the image, and the evdev button codes that light it
+/// up. A front-end scales these to whatever size it draws the artwork at.
 ///
-/// The numbering on the diagram follows the wheel manual, not the
-/// joystick indices in `docs/BUTTON_MAPPING.md`. Two quirks:
-/// - The hub's round GL/GR buttons (boxes 13 and 7) report the same gear
-///   inputs as the shift paddles (boxes 16 and 17), so both boxes of a
-///   pair light together.
-/// - Each encoder's twist/push callout (boxes 12 and 8) is one block for
-///   all three of its codes (CW, CCW, push).
+/// These used to be the numbered callout boxes of an annotated vendor
+/// diagram, extracted from that PNG by connected-components analysis. The
+/// artwork is now our own drawing, which labels its controls directly and
+/// has no callout boxes, so each entry sits on the control itself.
 ///
-/// An empty `codes` slice marks the D-pad box: the hat is not a button,
-/// so the front-end lights it whenever the hat leaves center.
+/// Two quirks worth keeping in mind:
+/// - The hub's round GL/GR buttons report the same gear inputs as the
+///   shift paddles, so a paddle and its GL/GR button light together.
+/// - Each encoder is one entry covering all three of its codes (twist CW,
+///   twist CCW, push).
+///
+/// An empty `codes` slice marks the D-pad: the hat is not a button, so the
+/// front-end lights it whenever the hat leaves centre.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CalloutBox {
     /// Box center, as fractions of the image width/height.
@@ -187,51 +187,58 @@ pub struct CalloutBox {
     pub codes: &'static [u16],
 }
 
-/// Standard callout box size on the diagram (77x52 px of 2500x2160).
-const BOX_W: f32 = 0.0308;
-const BOX_H: f32 = 0.0241;
-/// The two encoder twist/push label blocks (177x127 px).
-const KNOB_W: f32 = 0.0708;
-const KNOB_H: f32 = 0.0588;
+/// Callout sizes, as fractions of the artwork's 420x300 viewBox.
+///
+/// These sit on the controls themselves. The overlay was originally built
+/// against an annotated vendor diagram and pointed at its numbered label
+/// boxes; the artwork is now our own drawing, which has no such labels, so
+/// tinting the control that was pressed is both the only option and the
+/// clearer one.
+const BOX_W: f32 = 0.0714;   // 30px: a face button
+const BOX_H: f32 = 0.1000;   // 30px
+const KNOB_W: f32 = 0.0952;  // 40px: an encoder body
+const KNOB_H: f32 = 0.1267;  // 38px
+const PAD_W: f32 = 0.1190;   // 50px: a wing-grip paddle
+const PAD_H: f32 = 0.2000;   // 60px
 
-/// Every callout box on the layout diagram; see [`CalloutBox`].
+/// Every control the overlay can tint; see [`CalloutBox`].
 pub const CALLOUT_BOXES: &[CalloutBox] = &[
-    // Box 1: X.
-    CalloutBox { cx: 0.1082, cy: 0.0269, w: BOX_W, h: BOX_H, codes: &[0x121] },
-    // Box 2: Y.
-    CalloutBox { cx: 0.1882, cy: 0.0269, w: BOX_W, h: BOX_H, codes: &[0x123] },
-    // Box 3: A.
-    CalloutBox { cx: 0.7682, cy: 0.0269, w: BOX_W, h: BOX_H, codes: &[0x120] },
-    // Box 4: B.
-    CalloutBox { cx: 0.8482, cy: 0.0269, w: BOX_W, h: BOX_H, codes: &[0x122] },
-    // Box 5: RT.
-    CalloutBox { cx: 0.9722, cy: 0.1750, w: BOX_W, h: BOX_H, codes: &[0x126] },
-    // Box 6: RSB.
-    CalloutBox { cx: 0.9722, cy: 0.2444, w: BOX_W, h: BOX_H, codes: &[0x12a] },
-    // Box 7: GR (its own button, hardware-verified 2026-07-20).
-    CalloutBox { cx: 0.9722, cy: 0.3370, w: BOX_W, h: BOX_H, codes: &[0x2cd] },
-    // Box 8: right encoder (twist CW/CCW + push).
-    CalloutBox { cx: 0.9522, cy: 0.6553, w: KNOB_W, h: KNOB_H, codes: &[0x2c5, 0x2c6, 0x2c7] },
-    // Box 9: Menu.
-    CalloutBox { cx: 0.9722, cy: 0.4528, w: BOX_W, h: BOX_H, codes: &[0x129] },
-    // Box 10: G1 (Logitech logo).
-    CalloutBox { cx: 0.4842, cy: 0.7769, w: BOX_W, h: BOX_H, codes: &[0x2cb] },
-    // Box 11: Camera / View.
-    CalloutBox { cx: 0.0282, cy: 0.5222, w: BOX_W, h: BOX_H, codes: &[0x128] },
-    // Box 12: left encoder (twist CW/CCW + push).
-    CalloutBox { cx: 0.0482, cy: 0.6553, w: KNOB_W, h: KNOB_H, codes: &[0x2c8, 0x2c9, 0x2ca] },
-    // Box 13: GL (its own button, hardware-verified 2026-07-20).
-    CalloutBox { cx: 0.0282, cy: 0.4065, w: BOX_W, h: BOX_H, codes: &[0x2cc] },
-    // Box 14: LSB.
-    CalloutBox { cx: 0.0282, cy: 0.2444, w: BOX_W, h: BOX_H, codes: &[0x12b] },
-    // Box 15: LT.
-    CalloutBox { cx: 0.0282, cy: 0.1750, w: BOX_W, h: BOX_H, codes: &[0x127] },
-    // Box 16: left paddle.
-    CalloutBox { cx: 0.0282, cy: 0.0269, w: BOX_W, h: BOX_H, codes: &[0x125] },
-    // Box 17: right paddle.
-    CalloutBox { cx: 0.9682, cy: 0.0269, w: BOX_W, h: BOX_H, codes: &[0x124] },
-    // Box D: the D-pad hat (62x52 px box; lit while the hat is off center).
-    CalloutBox { cx: 0.0252, cy: 0.3139, w: 0.0248, h: BOX_H, codes: &[] },
+    // X.
+    CalloutBox { cx: 0.3143, cy: 0.2600, w: BOX_W, h: BOX_H, codes: &[0x121] },
+    // Y.
+    CalloutBox { cx: 0.3762, cy: 0.2600, w: BOX_W, h: BOX_H, codes: &[0x123] },
+    // A.
+    CalloutBox { cx: 0.6238, cy: 0.2600, w: BOX_W, h: BOX_H, codes: &[0x120] },
+    // B.
+    CalloutBox { cx: 0.6857, cy: 0.2600, w: BOX_W, h: BOX_H, codes: &[0x122] },
+    // RT.
+    CalloutBox { cx: 0.6762, cy: 0.4000, w: BOX_W, h: BOX_H, codes: &[0x126] },
+    // RSB.
+    CalloutBox { cx: 0.6762, cy: 0.5067, w: BOX_W, h: BOX_H, codes: &[0x12a] },
+    // GR.
+    CalloutBox { cx: 0.6238, cy: 0.6400, w: BOX_W, h: BOX_H, codes: &[0x2cd] },
+    // right encoder.
+    CalloutBox { cx: 0.7524, cy: 0.6833, w: KNOB_W, h: KNOB_H, codes: &[0x2c5, 0x2c6, 0x2c7] },
+    // Menu.
+    CalloutBox { cx: 0.5667, cy: 0.7000, w: BOX_W, h: BOX_H, codes: &[0x129] },
+    // G1.
+    CalloutBox { cx: 0.5000, cy: 0.7067, w: BOX_W, h: BOX_H, codes: &[0x2cb] },
+    // Camera / View.
+    CalloutBox { cx: 0.4333, cy: 0.7000, w: BOX_W, h: BOX_H, codes: &[0x128] },
+    // left encoder.
+    CalloutBox { cx: 0.2476, cy: 0.6833, w: KNOB_W, h: KNOB_H, codes: &[0x2c8, 0x2c9, 0x2ca] },
+    // GL.
+    CalloutBox { cx: 0.3762, cy: 0.6400, w: BOX_W, h: BOX_H, codes: &[0x2cc] },
+    // LSB.
+    CalloutBox { cx: 0.3238, cy: 0.5067, w: BOX_W, h: BOX_H, codes: &[0x12b] },
+    // LT.
+    CalloutBox { cx: 0.3238, cy: 0.4000, w: BOX_W, h: BOX_H, codes: &[0x127] },
+    // left paddle.
+    CalloutBox { cx: 0.1857, cy: 0.4667, w: PAD_W, h: PAD_H, codes: &[0x125] },
+    // right paddle.
+    CalloutBox { cx: 0.8143, cy: 0.4667, w: PAD_W, h: PAD_H, codes: &[0x124] },
+    // D-pad hat.
+    CalloutBox { cx: 0.4143, cy: 0.4400, w: BOX_W, h: BOX_H, codes: &[] },
 ];
 
 /// Whether `b` should be tinted: any of its button codes held, or (for
