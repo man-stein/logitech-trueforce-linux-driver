@@ -134,7 +134,14 @@ Requires:       hicolor-icon-theme
 # than linking them, so ldd alone would miss them. Fedora tracks current
 # Rust, so logi-wheel-gui's MSRV (1.92, from Slint 1.17.1) always builds here;
 # no version guard needed (contrast packaging/debian/rules).
-Requires:       wayland
+# Fedora has no binary package called "wayland" - that is the SOURCE
+# package name. The runtime libraries ship as libwayland-client /
+# libwayland-cursor / libwayland-egl, so "Requires: wayland" made the
+# package uninstallable with "nothing provides wayland" (issue #27).
+# packaging/debian/control had this right all along.
+Requires:       libwayland-client
+Requires:       libwayland-cursor
+Requires:       libwayland-egl
 Requires:       libxkbcommon
 Requires:       libxkbcommon-x11
 Requires:       libX11

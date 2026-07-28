@@ -124,7 +124,14 @@ Requires:       Mesa-libGL1
 Requires:       libfontconfig1
 Requires:       libfreetype6
 %else
-Requires:       wayland
+# Fedora has no binary package called "wayland" - that is the SOURCE
+# package name. The runtime libraries ship as libwayland-client /
+# libwayland-cursor / libwayland-egl, so "Requires: wayland" made the
+# package uninstallable with "nothing provides wayland" (issue #27).
+# packaging/debian/control had this right all along.
+Requires:       libwayland-client
+Requires:       libwayland-cursor
+Requires:       libwayland-egl
 Requires:       libxkbcommon
 Requires:       libxkbcommon-x11
 Requires:       libX11
