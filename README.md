@@ -2,18 +2,21 @@
 
 # Logitech TrueForce Linux Driver
 
-A Linux kernel driver and userspace tools for Logitech's direct-drive racing
-wheels: the **RS50** and the **G PRO Racing Wheel**. It brings force feedback,
-TrueForce haptics (native, and simulated from game telemetry for titles
-without it), a live RPM rev-light display, LIGHTSYNC LED control, and
-G HUB-equivalent wheel settings to Linux, including in Proton/Wine sims -
-all managed from a desktop app (**logi-wheel-gui**) or a terminal one
-(**logi-wheel**).
+A Linux kernel driver and userspace tools for three Logitech racing wheels:
+the direct-drive **RS50** and **G PRO Racing Wheel**, and the belt-driven
+**G923**. It brings force feedback, TrueForce haptics (native, and simulated
+from game telemetry for titles without it), a live RPM rev-light display,
+LIGHTSYNC LED control, and G HUB-equivalent wheel settings to Linux,
+including in Proton/Wine sims - all managed from a desktop app
+(**logi-wheel-gui**) or a terminal one (**logi-wheel**).
 
-> Not a direct-drive wheel? The **G923** (both editions) is supported here,
-> with force feedback and TrueForce: see [G923 support](#g923-support). The
-> older **G920** is already served by the in-tree `hid-logitech-hidpp` driver
-> and does not need this one.
+The **G923** matters as much here as the direct-drive wheels. This is the
+first Linux driver to give it TrueForce at all, and the only one that gives
+the PlayStation edition force feedback at all - that edition had none on
+Linux before this. See [G923 support](#g923-support).
+
+> The older **G920** is already served by the in-tree `hid-logitech-hidpp`
+> driver and does not need this one.
 
 ## What works
 
@@ -51,7 +54,8 @@ Six pieces, all built from this repository:
 - **The kernel driver** (`hid-logitech-dd`) makes the wheel work: games get
   standard Linux force feedback, and every wheel setting appears under
   `/sys/.../wheel_*`. Your other Logitech devices stay on their usual drivers.
-  It also drives the G923 (see [G923 support](#g923-support)).
+  It drives the G923 too, through a separate force-feedback engine suited to
+  that wheel (see [G923 support](#g923-support)).
 
 - **logi-wheel** lets you change wheel settings from a terminal: everything
   G HUB configures on Windows, with validated edits and a G HUB-style curve
@@ -88,12 +92,19 @@ The distribution packages install the driver plus the `logi-wheel`, `logi-wheel-
 
 ## G923 support
 
-Both editions of the G923 work with this driver, and it gives them something
-no other Linux driver does: **force feedback and TrueForce on the same wheel**.
-The G923 is belt-driven and speaks an older Logitech protocol, so internally it
+The G923 gets something no other Linux driver offers: **force feedback and
+TrueForce on the same wheel**. TrueForce has never been available for it on
+Linux before, and the PlayStation edition had no force feedback at all - the
+in-tree drivers do not cover it.
+
+It is belt-driven and speaks an older Logitech protocol, so internally it
 takes a different path than the RS50 and G PRO above, but the result is the
-same: real forces in games, engine haptics through the rim, working rev lights,
-and the settings app.
+same: real forces in games, engine haptics through the rim, working rev
+lights, and the settings app.
+
+The PlayStation edition is verified on hardware. The Xbox edition is
+implemented from the same protocol but has never been run on a real unit -
+details on both below.
 
 **PlayStation edition** (`046d:c266`/`c267`) is fully supported and verified on
 hardware:
