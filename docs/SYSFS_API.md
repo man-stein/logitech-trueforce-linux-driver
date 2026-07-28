@@ -917,6 +917,30 @@ echo 0 > wheel_combined_pedals   # separate (default)
 cat wheel_combined_pedals        # 0 or 1
 ```
 
+### wheel_accessory_mode
+**Access**: Read-only
+**Values**: `shifter`, `digital-handbrake`, `analog-handbrake`
+
+Which of its three jobs the **RS Shifter & Handbrake** is currently doing,
+read live from feature `0x1B30` on the accessory. The unit has a physical
+three-position switch and only one mode is active at a time, so most of its
+settings apply to only one of them. Returns `EOPNOTSUPP` when no accessory is
+attached.
+
+```bash
+cat wheel_accessory_mode
+# analog-handbrake
+```
+
+The desktop and terminal apps use this to grey out the settings that belong
+to a different mode and say which mode each needs. The greying is
+presentation only: the attributes below stay writable in every mode, because
+their values persist across a mode change and setting one up before flipping
+the switch is a reasonable thing to do.
+
+An unrecognised value reads as `unknown (N)`, and the apps treat that as
+"cannot tell" and hide nothing.
+
 ### wheel_shift_actuation / wheel_handbrake_actuation
 **Access**: Read/Write
 **Values**: `1`-`100` (G HUB's own range; it refuses `0`)

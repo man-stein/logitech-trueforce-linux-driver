@@ -977,15 +977,34 @@ on every init:
     complaint - so there is no range to discover by probing, and a bad value
     is not rejected.
   - **`0x1B30` DEVICE_MODE** - also unique to this sub-device. Same
-    first-party naming source as `0x80B1`. Plausible role: reports the
-    physical mode switch's current position (sequential shifter /
-    digital handbrake / analog handbrake). Function table undocumented;
-    **no capture exists**.
+    first-party naming source as `0x80B1`.
+
+    **Decoded 2026-07-28**: it reports the physical mode switch's current
+    position. `fn2` (no params) returns the mode in its first byte; `fn0`
+    returns a static `1a 03 01` on this firmware and is NOT the mode.
+    `fn1` and `fn3` return errors.
+
+    | value | switch position |
+    |---|---|
+    | `0` | sequential shifter (LEFT) |
+    | `2` | digital handbrake (MIDDLE) |
+    | `1` | analog handbrake (RIGHT) |
+
+    Note the ordering: middle and right are **2 and 1**, not 1 and 2. It
+    was measured by moving the switch through all three positions while
+    watching `fn2`, precisely because assuming left-to-right numbering is
+    the obvious guess and would have been wrong.
+
+    A caution for anyone probing this feature: match a reply on the
+    function/sw byte as well as the feature index. Matching on the feature
+    index alone hands an `fn2` reply back as the answer to an `fn0` request,
+    which is what first made `fn0` look like it was changing with the
+    switch.
 
   The driver discovers this sub-device, resolves the three feature
   indices, exposes presence via `wheel_accessory`, and drives `0x80B1`
   through `wheel_shift_actuation` and `wheel_handbrake_actuation`.
-  `0x1B30` is still only resolved, never called. See `docs/SYSFS_API.md`.
+  `0x1B30` is read through `wheel_accessory_mode`. See `docs/SYSFS_API.md`.
 
   The accessory's own `0x80A4` store is deliberately NOT used: G Hub writes
   the handbrake curve there, but on this hardware a curve written to the
@@ -1951,4 +1970,5 @@ This returns the PAGE ID at each index. G Hub queries indices 0x00 through ~0x1F
 | 6.8 | 2026-07-19 | LIGHTSYNC slot-direction wire encoding decoded from `dev/captures/2026-07-19_lightsync_direction.pcapng`: byte 5 of the 0x807B RGB config is a 1-4 value (1=Inside-Out, 2=Outside-In, 3=Left->Right, 4=Right->Left), not the driver's 0-3 enum (9.4.1). Fixed the driver's `direction + 2` encoding, which both mislabelled the sweeps and sent an out-of-range 5 for Outside-In (firmware NAK -> -EIO). Documented the 5-mirrored-pair (palindrome) behaviour of the two symmetric directions (9.8). |
 | 6.9 | 2026-07-20 | Hardware-verified on the RS50: (a) all four 9.4.1 slot-direction wire values watched live via rev-fill sweeps - the driver-enum labels are correct as tabled; (b) the RS50 accepts the G PRO level-based rev-light command (0x807A fn2+fn6, byte 9 = 0-10) - the fill renders the active slot's colours and follows its direction, making a live RPM rev display possible without G HUB's own feed format; (c) fn3 SET_EFFECT only STAGES an effect - the strip repaints on a zero-parameter fn6 commit (driver now sends the pair). |
 | 7.0 | 2026-07-20 | LIGHTSYNC slot selection decoded (`2026-01-30_desktop_led_colors.pcapng` frames 219/339/715 + 279/525/775, hardware-confirmed live): 0x807A fn3 effect values 5-9 ARE the five custom slots (0x05 = CUSTOM 1 .. 0x09 = CUSTOM 5) - selecting a slot is selecting its effect number, staged by fn3 and repainted by the fn6 commit (zero-parameter standalone; the full-config forms bracket an RGB upload). No separate "activate slot" function exists: 0x807B fn3 is GET_NAME, a pure read (the driver's old "activate" step did nothing, and its hardcoded fn3 = 0x05 pinned the strip to CUSTOM 1 on every slot switch; both fixed). Section 9 effect tables and sequences corrected; rev-display note reconciled - the rev fill renders the SELECTED slot's config (the earlier "not the active slot" reading was an artifact of the broken switch; post-fix colour source expected, re-verify); the arm burst's effect stomp is healed by re-asserting the pre-arm effect value after the one-time burst. |
-| 7.1 | 2026-07-28 | RS Shifter & Handbrake accessory (dev `0x04`) catalogued (5.3): full 18-feature map, names via 0x0005/0x0007, own 0x80A4 store, and the two accessory-unique public features `0x80B1` BANDED_AXIS / `0x1B30` DEVICE_MODE (first-party names, no captured wire format). Driver now discovers the accessory alongside the pedal MCU in one candidate-list pass and exposes presence via `wheel_accessory`; its own three settings remain unimplemented pending a G HUB capture. Sub-device index instability documented explicitly: no index is fixed for either the pedal MCU or the accessory. |
+| 7.2 | 2026-07-28 | Accessory fully decoded and driven. `0x80B1` BANDED_AXIS: `[group][band]` addressing, fn2 reads / fn3 writes a signed 32-bit lever position, group 0 = shifter (two bands, one per direction), group 1 = digital handbrake (one); both scales given, including G Hub's 16-bit overflow above ~69% which this driver does not reproduce. `0x1B30` DEVICE_MODE: fn2 returns the switch position, values 0/2/1 for shifter/digital/analog. Pedal curves corrected to the BASE axes 1/2/3 - the pedal MCU stores an upload and never applies it. Sub-device index established as a property of the physical PORT, not the device type. |
+| 7.1 | 2026-07-28 | RS Shifter & Handbrake accessory (dev `0x04`) catalogued (5.3): full 18-feature map, names via 0x0005/0x0007, own 0x80A4 store, and the two accessory-unique public features `0x80B1` BANDED_AXIS / `0x1B30` DEVICE_MODE (first-party names, no captured wire format). Driver now discovers the accessory alongside the pedal MCU in one candidate-list pass and exposes presence via `wheel_accessory`; its own three settings were unimplemented at that revision (see 7.2). Sub-device index instability documented explicitly: no index is fixed for either the pedal MCU or the accessory. |

@@ -39,6 +39,12 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Added
 
+- **The accessory's mode switch is now read**, `wheel_accessory_mode`. The RS
+  Shifter and Handbrake is one of three things at a time, chosen by a switch
+  on its base, and most of its settings apply to only one of them. Both apps
+  now show which mode it is in and grey out the settings that do not apply,
+  saying which mode each one needs. The settings stay writable regardless, so
+  you can still set one up before flipping the switch.
 - **The RS Shifter and Handbrake's last two settings**, `wheel_shift_actuation`
   and `wheel_handbrake_actuation` (1-100), matching G HUB's Shift Sensitivity
   and Handbrake Actuation sliders. Both appear in the desktop and terminal
@@ -50,6 +56,13 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 - Pedal shaping now targets the wheel base's axes rather than the pedal
   unit's. No attribute names changed, and nothing needs reconfiguring.
+
+### Changed (cosmetic)
+
+- **The wheel pictures in the desktop app** are cleaner: the RS50 now uses a
+  photo with its background removed, so it sits on the page rather than in a
+  white box, and the button-press highlights on the Info page land on the
+  buttons themselves instead of on a diagram's numbered labels.
 
 ### Documentation
 
