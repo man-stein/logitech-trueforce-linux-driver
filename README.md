@@ -155,6 +155,14 @@ right away, no group membership needed.
   not work and `PROTON_ENABLE_HIDRAW` must stay unset - see
   [G923 support](#g923-support).
 
+  One side effect to know about: with `PROTON_ENABLE_HIDRAW=1` some games
+  read the wheel's raw HID reports instead of the normal Linux input layer,
+  and read the pedals the other way up - resting reads as fully pressed. If
+  that happens, turn on the game's own "invert axis" option for the affected
+  pedals. Nothing is wrong with the wheel or the driver; the two layers just
+  use opposite conventions, and the game is reading the raw one. Confirmed
+  on Assetto Corsa EVO, and it goes away if you unset the variable.
+
 - **DirectInput sims** (Le Mans Ultimate, for example): put `logi-ffb
   %command%` in the game's Steam launch options. It presents a virtual wheel
   the game can drive force feedback on and passes the forces through to the

@@ -801,12 +801,18 @@ cat wheel_accessory
 # RS Shifter & Handbrake
 ```
 
-The accessory's own three G HUB settings (Shift Sensitivity, Handbrake
-Actuation, Handbrake Sensitivity) are not yet exposed as sysfs attributes:
-their HID++ wire format has not been captured. `wheel_handbrake_curve` /
-`wheel_handbrake_sensitivity` below already shape the handbrake axis
-through the wheel base's own response-curve store and are unaffected by
-this gap.
+All three of the accessory's G HUB settings are now exposed:
+
+| G HUB slider | sysfs attribute |
+|---|---|
+| Shift Sensitivity | `wheel_shift_actuation` |
+| Handbrake Actuation | `wheel_handbrake_actuation` |
+| Handbrake Sensitivity | `wheel_handbrake_sensitivity` (+ `wheel_handbrake_curve`) |
+
+The first two are trigger POINTS on the lever's travel and are named
+`_actuation` for that reason, even though G HUB calls the shifter one
+"sensitivity": in this driver a `*_sensitivity` attribute means one of an
+axis's response-shaping generators, which these are not.
 
 ### wheel_led_apply
 **Access**: Write-only
@@ -823,19 +829,26 @@ echo 1 > wheel_led_apply
 
 ## Pedal Configuration
 
-The pedal unit is a separate MCU that applies a 64-point `0x80A4` response
-curve to each axis it reports to the PC. This was verified live on an RS50
-(2026-07-16) with a two-plateau throttle curve: the reported axis dwelt at
-exactly the two programmed output values with an empty gap between them,
-which a linear axis cannot do. So these are real shaping controls, the same
-mechanism as the steering `wheel_response_curve`.
+Pedal shaping is a 64-point `0x80A4` response curve, the same mechanism as
+the steering `wheel_response_curve`, applied on the **wheel base** at axes
+1/2/3 (throttle/brake/clutch).
 
-The pedal MCU's HID++ sub-device index is not fixed: it depends on what
-else is attached to the base (an RS Shifter & Handbrake accessory, for
-example, can push it from `0x02` to `0x03`). The driver discovers the
-index at startup and re-discovers it on replug, so no user action is
-needed; if the pedal MCU cannot be found on any candidate index, these
-attributes return `EOPNOTSUPP` the same as on a wheel without pedals.
+Not on the pedal unit. The pedal MCU has its own `0x80A4` store and will
+accept an upload, reporting it back as loaded, but never applies it to the
+axis it reports to the PC. Anything written there is silently inert. This
+was proven on an RS50 (2026-07-28) with a step curve, which makes the band
+between its two output plateaus unreachable if it is applied: loaded on the
+pedal MCU the axis swept straight through that band, while the same curve on
+base axis 1 pinned the axis to the plateau exactly, with the pedals
+untouched.
+
+Driver versions before 0.21.0 wrote these to the pedal MCU, so every pedal
+curve, sensitivity and deadzone did nothing at all - while reading back
+plausible values, which is why it went unnoticed for so long.
+
+These attributes still require a pedal unit to be present: the base has
+axes 1/2/3 regardless, but shaping an axis nothing drives is pointless, so
+they return `EOPNOTSUPP` when no pedal unit answered discovery.
 
 Each pedal `<p>` in {`throttle`, `brake`, `clutch`} exposes three attributes.
 **They all write the single curve the axis holds, so the last write wins.** The
@@ -903,6 +916,36 @@ echo 1 > wheel_combined_pedals   # merge (legacy games)
 echo 0 > wheel_combined_pedals   # separate (default)
 cat wheel_combined_pedals        # 0 or 1
 ```
+
+### wheel_shift_actuation / wheel_handbrake_actuation
+**Access**: Read/Write
+**Values**: `1`-`100` (G HUB's own range; it refuses `0`)
+
+The **RS Shifter & Handbrake**'s two trigger points, on feature `0x80B1`
+(BANDED_AXIS) on the accessory itself. Both return `EOPNOTSUPP` when no
+accessory is attached.
+
+- `wheel_shift_actuation` - how far the sequential shifter must be pushed
+  before a shift registers. Writes both of the shifter's bands, one per
+  direction, symmetric about centre. G HUB calls this "Shift Sensitivity";
+  it is a trigger point, not response shaping, hence the name here.
+- `wheel_handbrake_actuation` - how far the handbrake must be pulled before
+  the digital handbrake button (`BTN_THUMB2`) fires. Applies in
+  digital-handbrake mode; the analog mode uses the handbrake curve instead.
+
+```bash
+echo 30 > wheel_shift_actuation        # shift triggers early
+echo 70 > wheel_handbrake_actuation    # handbrake fires late in the pull
+```
+
+Neither is mode-gated: unlike G HUB's UI, which will not let these be
+changed in onboard mode, the wire accepts them in either mode (tested).
+
+**A deliberate difference from G HUB.** The handbrake scale overflows 16
+bits above about 69%, and G HUB truncates there - it writes 75% as a point
+*shorter* than 50%. The wheel accepts the full value, so this driver writes
+the true one and stays monotonic across the whole 1-100 range. Above ~69%,
+values set here and values set in G HUB will not correspond.
 
 ### wheel_handbrake_curve / wheel_handbrake_sensitivity
 

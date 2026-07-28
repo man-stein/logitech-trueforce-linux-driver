@@ -799,14 +799,34 @@ analysis; index-to-ID mapping derived from IFeatureSet fn1 pairing in
   driver drives:
   - **Steering** (base dev `0xff`, axis 0): `wheel_response_curve` and
     `wheel_sensitivity`.
-  - **Pedals** (pedal sub-device, axes 0/1/2 = throttle/brake/clutch):
-    `wheel_{throttle,brake,clutch}_{curve,sensitivity,deadzone}`. The pedal MCU
-    applies its curve to the axis it reports to the PC (hardware-verified).
-    The pedal sub-device index was `0x02` in every census below but is not
-    fixed - it shifts when another accessory occupies a lower index
-    (hardware-verified 2026-07-28 with an RS Shifter & Handbrake attached,
-    which pushed the pedal MCU to `0x03`). The driver discovers the index at
-    runtime rather than assuming `0x02`; see `hidpp_dd_discover_settings_features`.
+  - **Pedals** (base dev `0xff`, axes **1/2/3** = throttle/brake/clutch):
+    `wheel_{throttle,brake,clutch}_{curve,sensitivity,deadzone}`.
+
+    **On the BASE, not the pedal MCU.** The pedal sub-device exposes its own
+    `0x80A4` store and will accept a 64-point upload, reporting it back as
+    loaded - but it never applies it to the axis it reports to the PC. The
+    curve that actually shapes a pedal lives on the base, one axis up from
+    the pedal index. Hardware-proven 2026-07-28 with a step curve (output
+    plateaus `0x2000`/`0xE000`, which an applied curve makes the band between
+    unreachable):
+
+    | destination | result |
+    |---|---|
+    | pedal MCU | readback said 64/64 points, axis swept straight through the forbidden band |
+    | base axis 1 | axis snapped to exactly `0x2000` with the pedals untouched |
+
+    Each mapping was then confirmed individually, nothing touched: base axis 1
+    moves only `ABS_RX` (throttle), axis 2 only `ABS_RY` (brake), axis 3 only
+    `ABS_RZ` (clutch). G Hub writes its throttle curve to base axis 1 as well
+    (capture, same date), so this is also the path the wheel is designed
+    around.
+
+    Earlier revisions of this document said the pedal MCU applied its curve
+    and that the base's pedal axes were inert. Both were wrong, and the driver
+    was built on them - every pedal curve, sensitivity and deadzone was
+    silently doing nothing until it was retargeted. Note the trap: `fn1`
+    readback reports what a sub-device has STORED, which is not the same as
+    what it APPLIES, and only the latter can be seen on evdev.
   - **Analog handbrake** (base dev `0xff`, axis 4, HID usage 0x32 = Z, evdev
     `ABS_Z`): `wheel_handbrake_curve` and `wheel_handbrake_sensitivity`.
 
@@ -918,28 +938,77 @@ on every init:
     whole wheel (verified absent on `0xff`/`0x01`/`0x03`/`0x05`), so the
     driver uses `Root.getFeature(0x80B1)` as the accessory confirmation
     test. Name is first-party (Solaar commit b9e0cf8, sourced from LGHUB
-    itself; listed in Solaar's "racing peripherals" group). Plausible
-    role: the actuation-point threshold behind the Shift Sensitivity and
-    Handbrake Actuation sliders. Function table undocumented; **no
-    capture exists**, so nothing beyond `Root.getFeature` has been
-    called.
+    itself; listed in Solaar's "racing peripherals" group).
+
+    **Decoded 2026-07-28** from G Hub captures. This is the actuation-point
+    store behind the Shift Sensitivity and Handbrake Actuation sliders.
+
+    A band is addressed by `[group][band]`, and carries a signed 32-bit
+    position on the lever's travel:
+
+    | fn | direction | params | meaning |
+    |---|---|---|---|
+    | `fn0` | read | - | `[groups][?]` - 2 groups on this accessory |
+    | `fn1 [group]` | read | | group info; byte 5 is the band count |
+    | `fn2 [group][band]` | read | | `[group][band][value s32-LE]` |
+    | `fn3 [group][band][value s32-LE]` | write | | set the band |
+
+    Group 0 is the sequential shifter and holds **two** bands, one per shift
+    direction; group 1 is the digital handbrake and holds **one**. Asking for
+    a band that does not exist (e.g. `(1,1)`) returns error `0x2a`.
+
+    G Hub's scales, both linear in the 1-100 its UI accepts (it refuses 0):
+
+    - **shift**: `+/- pct * 0.008` of full scale, written to BOTH of group 0's
+      bands, symmetric about centre. The slider therefore spans 80% of the
+      lever's travel, not all of it.
+    - **handbrake**: `pct * 944.64` in the same units, negative, group 1
+      band 0.
+
+    **G Hub overflows here.** The handbrake scale exceeds 16 bits above about
+    69%, and G Hub truncates: it writes 75% as `5312` rather than `70848` -
+    a point far SHORTER than 50%. That wraparound is what makes a captured
+    sweep look non-monotonic and undecodable until you spot it. The wheel
+    itself accepts the full 32-bit value (`-94464` stored and read back
+    verbatim), so this driver writes the true value and stays monotonic;
+    above ~69% our behaviour and G Hub's will not agree.
+
+    The firmware validates nothing - it stored `+/-2000000000` without
+    complaint - so there is no range to discover by probing, and a bad value
+    is not rejected.
   - **`0x1B30` DEVICE_MODE** - also unique to this sub-device. Same
     first-party naming source as `0x80B1`. Plausible role: reports the
     physical mode switch's current position (sequential shifter /
     digital handbrake / analog handbrake). Function table undocumented;
     **no capture exists**.
 
-  The driver (Phase 1, see `hidpp_dd_discover_settings_features`)
-  discovers this sub-device and resolves `0x80A4`/`0x80B1`/`0x1B30`'s
-  indices, and exposes presence via `wheel_accessory` - but does not yet
-  read or write `0x80B1` or `0x1B30`, since their wire protocol is
-  uncaptured. See `docs/SYSFS_API.md`'s `wheel_accessory` entry.
+  The driver discovers this sub-device, resolves the three feature
+  indices, exposes presence via `wheel_accessory`, and drives `0x80B1`
+  through `wheel_shift_actuation` and `wheel_handbrake_actuation`.
+  `0x1B30` is still only resolved, never called. See `docs/SYSFS_API.md`.
 
-**Sub-device index instability**: no HID++ sub-device index on this
-wheel is fixed. The pedal MCU sat at `0x02` for years, then moved to
-`0x03` once the RS Shifter & Handbrake accessory was attached to the
-same base (hardware-verified 2026-07-28); the accessory itself has only
-been observed at `0x04`, and is not assumed to stay there either. The
+  The accessory's own `0x80A4` store is deliberately NOT used: G Hub writes
+  the handbrake curve there, but on this hardware a curve written to the
+  accessory has no observable effect, while the same curve on base axis 4
+  shapes `ABS_Z` immediately (both tested 2026-07-28 with the unit confirmed
+  in analog-handbrake mode). So `wheel_handbrake_curve` targets the base.
+  "G Hub writes somewhere else" and "our target is wrong" are different
+  claims, and only the second justifies a change.
+
+**A sub-device index belongs to a physical port, not to a device type.**
+The base has two USB-A ports, and the SAME accessory reports at dev `0x04`
+on the accessory port and at dev `0x03` on the pedals' port
+(hardware-verified 2026-07-28: with the pedals unplugged and the accessory
+in their port, `0x03` was the accessory and no 3-axis sub-device existed at
+all). On this wheel the pedal MCU answers at `0x03` whether or not the
+accessory is attached, so the earlier claim here that it "moved from `0x02`
+to `0x03` when the accessory attached" was wrong: `0x02` was simply a bad
+hardcoded guess.
+
+Two consequences, both now enforced in the driver: never key on an index to
+identify a device, and never skip an index because another device was once
+found there - a rescan optimisation that skipped the pedals' index made the
+accessory permanently undiscoverable on the second port. The
 driver never hardcodes a sub-device index for either device: it probes
 a small candidate list (`0x02, 0x03, 0x01, 0x04, 0x05, 0x06`) and
 classifies whatever answers by feature content (axis count for
