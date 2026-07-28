@@ -1554,6 +1554,65 @@ static int hidpp_devicenametype_get_device_name(struct hidpp_device *hidpp,
 	return count;
 }
 
+/*
+ * Device-scoped counterparts of the two helpers above: same DeviceNameType
+ * (0x0005) protocol, but addressed to a specific sub-device instead of the
+ * root. Used to read the RS Shifter & Handbrake accessory's own name once
+ * discovered (see hidpp_dd_query_accessory_name) rather than the wheel's.
+ */
+static int hidpp_devicenametype_get_count_on_device(struct hidpp_device *hidpp,
+	u8 device_index, u8 feature_index, u8 *nameLength)
+{
+	struct hidpp_report response;
+	int ret;
+
+	ret = hidpp_send_fap_to_device_sync(hidpp, device_index, feature_index,
+		CMD_GET_DEVICE_NAME_TYPE_GET_COUNT, NULL, 0, &response);
+	if (ret)
+		return ret;
+
+	*nameLength = response.fap.params[0];
+
+	return 0;
+}
+
+static int hidpp_devicenametype_get_device_name_on_device(struct hidpp_device *hidpp,
+	u8 device_index, u8 feature_index, u8 char_index, char *device_name,
+	int len_buf)
+{
+	struct hidpp_report response;
+	int ret, i;
+	int count;
+
+	ret = hidpp_send_fap_to_device_sync(hidpp, device_index, feature_index,
+		CMD_GET_DEVICE_NAME_TYPE_GET_DEVICE_NAME, &char_index, 1,
+		&response);
+	if (ret)
+		return ret;
+
+	switch (response.report_id) {
+	case REPORT_ID_HIDPP_VERY_LONG:
+		count = hidpp->very_long_report_length - 4;
+		break;
+	case REPORT_ID_HIDPP_LONG:
+		count = HIDPP_REPORT_LONG_LENGTH - 4;
+		break;
+	case REPORT_ID_HIDPP_SHORT:
+		count = HIDPP_REPORT_SHORT_LENGTH - 4;
+		break;
+	default:
+		return -EPROTO;
+	}
+
+	if (len_buf < count)
+		count = len_buf;
+
+	for (i = 0; i < count; i++)
+		device_name[i] = response.fap.params[i];
+
+	return count;
+}
+
 static char *hidpp_get_device_name(struct hidpp_device *hidpp)
 {
 	u8 feature_index;
@@ -4273,19 +4332,43 @@ static void hidpp_ff_retry_work(struct work_struct *work)
  * actually the pedal MCU.
  */
 #define HIDPP_DD_PEDAL_AXIS_COUNT		3
+/*
+ * The RS Shifter & Handbrake accessory's own 0x80A4 store reports exactly
+ * 1 axis (HID usage 0x32 = Z, hardware-verified 2026-07-28), which is what
+ * distinguishes it from the pedal MCU (3 axes) and the base (7 axes) when
+ * classifying an answering candidate in hidpp_dd_discover_settings_features.
+ */
+#define HIDPP_DD_SHIFTER_AXIS_COUNT		1
 #define HIDPP_DD_HANDBRAKE_AXIS		4	/* 0x80A4 axis on the base (dev 0xff) for the RS handbrake (HID usage 0x32 = Z) */
 #define HIDPP_DD_PAGE_CALIBRATE		0x812C	/* Centre calibration (G Pro sub-device 0x05) */
 #define HIDPP_DD_PAGE_SYNC			0x1BC0	/* Unknown sync/prepare feature */
+/*
+ * BANDED_AXIS and DEVICE_MODE: names are first-party (Solaar's HID++ 2.0
+ * constants, commit b9e0cf8 "Add names for HID++ 2.0 features and sort by
+ * ID", sourced from LGHUB itself; BANDED_AXIS is listed in Solaar's
+ * "racing peripherals" group). Both are unique to the RS Shifter &
+ * Handbrake accessory across every RS50 sub-device (hardware-verified
+ * 2026-07-28: absent on the base, rim, pedal MCU and motor unit). Their
+ * function tables are undocumented anywhere public; only Root.getFeature
+ * has been probed. Do not call any function on either until a G HUB
+ * capture decodes the wire format (see docs/PROTOCOL_SPECIFICATION.md).
+ */
+#define HIDPP_DD_PAGE_BANDED_AXIS		0x80B1	/* Shift/handbrake actuation-point config (accessory-only, undecoded) */
+#define HIDPP_DD_PAGE_DEVICE_MODE		0x1B30	/* Accessory operating-mode indicator (accessory-only, undecoded) */
 
 /*
- * Candidate HID++ device indices for the pedal MCU, tried in this order at
- * discovery. 0x02 first (the historical/common-case index, so a base with
- * no accessory attached pays no extra probe over what this driver has
- * always sent); 0x03 second (hardware-verified new position once an
- * accessory occupies 0x02); then the remaining indices the base can
- * plausibly enumerate a sub-device on. Each candidate that nothing answers
- * on costs one HID++ transport timeout (see __do_hidpp_send_message_sync),
- * so this list is deliberately not longer than it needs to be.
+ * Candidate HID++ device indices for the pedal MCU and the RS Shifter &
+ * Handbrake accessory, tried in this order at discovery. 0x02 first (the
+ * historical/common-case pedal index, so a base with no accessory attached
+ * pays no extra probe over what this driver has always sent); 0x03 second
+ * (hardware-verified new pedal position once an accessory occupies 0x02);
+ * then the remaining indices the base can plausibly enumerate a sub-device
+ * on, which is also where the accessory itself has been found (0x04,
+ * hardware-verified 2026-07-28, though its index is not assumed to be
+ * stable either). Each candidate that nothing answers on costs one HID++
+ * transport timeout (see __do_hidpp_send_message_sync), so this list is
+ * deliberately not longer than it needs to be. Both discoveries share this
+ * one candidate list (see hidpp_dd_discover_settings_features).
  */
 static const u8 hidpp_dd_pedal_dev_candidates[] = {
 	HIDPP_DD_PEDAL_DEV_IDX_DEFAULT, 0x03, 0x01, 0x04, 0x05, 0x06,
@@ -4549,6 +4632,19 @@ struct hidpp_dd_ff_data {
 	u8 idx_response_curve;		/* Feature index for 0x80A4 axis response curves (steering, base dev 0xff) */
 	u8 idx_pedal_curve;		/* Feature index for 0x80A4 curves on the pedal unit (dev pedal_dev_idx, axes 0-2) */
 	u8 pedal_dev_idx;		/* HID++ device index of the pedal MCU, discovered at runtime; HIDPP_DD_FEATURE_NOT_FOUND if none answered */
+	/*
+	 * RS Shifter & Handbrake accessory (Phase 1: discovery + presence
+	 * only, see hidpp_dd_discover_settings_features). idx_shifter_curve
+	 * is the accessory's own 0x80A4 store (1 axis, HID usage 0x32); the
+	 * driver does not read or write it yet. idx_shifter_banded (0x80B1)
+	 * and idx_shifter_mode (0x1B30) are resolved for the same reason
+	 * they exist at all: their wire format is uncaptured, so Phase 2
+	 * settings attrs are blocked pending a Windows G HUB capture.
+	 */
+	u8 shifter_dev_idx;		/* HID++ device index of the accessory, discovered at runtime; HIDPP_DD_FEATURE_NOT_FOUND if none answered */
+	u8 idx_shifter_curve;		/* Feature index for 0x80A4 on the accessory (dev shifter_dev_idx, axis 0 = handbrake) */
+	u8 idx_shifter_banded;		/* Feature index for 0x80B1 BANDED_AXIS on the accessory */
+	u8 idx_shifter_mode;		/* Feature index for 0x1B30 DEVICE_MODE on the accessory */
 	u8 idx_brightness;		/* Feature index for LED brightness */
 	u8 idx_lightsync;		/* Feature index for LIGHTSYNC effects */
 	u8 idx_rgb_config;		/* Feature index for RGB Zone Config */
@@ -4623,6 +4719,7 @@ struct hidpp_dd_ff_data {
 	char serial[13];		/* 12-char Base34 serial + NUL */
 	char fw_main[16];		/* base firmware, e.g. "U1 65.03.B0038" */
 	char fw_motor[16];		/* motor firmware (sub-device 0x05) */
+	char accessory_name[32];	/* RS Shifter & Handbrake's own 0x0005 name; empty if not discovered */
 	u8 led_effect;			/* LED effect mode (1-5, 5=custom) */
 
 	/* LIGHTSYNC per-slot configuration (full RGB control) */
@@ -6874,6 +6971,45 @@ static int hidpp_dd_pedal_axis_count(struct hidpp_device *hidpp, u8 dev_idx,
 }
 
 /*
+ * Read the RS Shifter & Handbrake accessory's own DeviceNameType (0x0005)
+ * name into ff->accessory_name, once the accessory has been confirmed at
+ * dev_idx (see hidpp_dd_discover_settings_features). Best-effort: any
+ * failure leaves accessory_name empty, which wheel_accessory_show reports
+ * as "none" - the same as a genuinely absent accessory, since without a
+ * name the sysfs attribute cannot usefully distinguish the two anyway.
+ */
+static void hidpp_dd_query_accessory_name(struct hidpp_dd_ff_data *ff, u8 dev_idx)
+{
+	struct hidpp_device *hidpp = ff->hidpp;
+	u8 name_idx, name_length;
+	unsigned int index = 0;
+	int ret;
+
+	ff->accessory_name[0] = '\0';
+
+	if (hidpp_root_get_feature_on_device(hidpp, dev_idx,
+					     HIDPP_PAGE_GET_DEVICE_NAME_TYPE,
+					     &name_idx))
+		return;
+	if (hidpp_devicenametype_get_count_on_device(hidpp, dev_idx, name_idx,
+						     &name_length))
+		return;
+
+	while (index < name_length && index < sizeof(ff->accessory_name) - 1) {
+		ret = hidpp_devicenametype_get_device_name_on_device(hidpp,
+			dev_idx, name_idx, index,
+			ff->accessory_name + index,
+			sizeof(ff->accessory_name) - 1 - index);
+		if (ret <= 0) {
+			ff->accessory_name[index] = '\0';
+			return;
+		}
+		index += ret;
+	}
+	ff->accessory_name[index] = '\0';
+}
+
+/*
  * Discover HID++ feature indices for the "settings" surface: per-wheel
  * tuning exposed as wheel_* sysfs attributes, plus profile / mode /
  * calibrate. These features are shared between RS50 and G Pro (though
@@ -6896,6 +7032,11 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 	ff->idx_response_curve = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->idx_pedal_curve = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->pedal_dev_idx = HIDPP_DD_FEATURE_NOT_FOUND;
+	ff->shifter_dev_idx = HIDPP_DD_FEATURE_NOT_FOUND;
+	ff->idx_shifter_curve = HIDPP_DD_FEATURE_NOT_FOUND;
+	ff->idx_shifter_banded = HIDPP_DD_FEATURE_NOT_FOUND;
+	ff->idx_shifter_mode = HIDPP_DD_FEATURE_NOT_FOUND;
+	ff->accessory_name[0] = '\0';
 	/*
 	 * Re-discovery (e.g. after a replug) drops the wheel's uploaded curves
 	 * back to built-in, so the generator caches must reset to match: 50 =
@@ -6948,25 +7089,46 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 		       ff->idx_response_curve);
 
 	/*
-	 * The pedal unit is a separate MCU that exposes the same 0x80A4
-	 * feature at its own index, covering three axes (0=throttle,
-	 * 1=brake, 2=clutch). Hardware-verified 2026-07-16: the pedal MCU
-	 * applies an uploaded curve to its PC HID output, so these are real
-	 * shaping controls, not just onboard/console storage.
+	 * The pedal unit and the RS Shifter & Handbrake accessory are both
+	 * separate MCUs that expose the same 0x80A4 feature at their own
+	 * index: the pedal MCU covers three axes (0=throttle, 1=brake,
+	 * 2=clutch, hardware-verified 2026-07-16 that it applies an uploaded
+	 * curve to its PC HID output, so these are real shaping controls,
+	 * not just onboard/console storage); the accessory covers exactly
+	 * one axis (HID usage 0x32 = Z, hardware-verified 2026-07-28).
 	 *
-	 * Its device index moves depending on what else is attached to the
-	 * base (see hidpp_dd_pedal_dev_candidates), so probe the candidates
-	 * in order and confirm the match by axis count: the base and an
-	 * attached shifter/handbrake accessory both answer
-	 * ROOT.GetFeature(0x80A4) too, but report 7 and 1 axes respectively,
-	 * never HIDPP_DD_PEDAL_AXIS_COUNT. A candidate nothing answers on
-	 * costs one transport timeout; a candidate that answers but lacks
-	 * the feature (-ENOENT) or has the wrong axis count is cheap and
-	 * moves on immediately.
+	 * Neither device's index is fixed: it moves depending on what else
+	 * is attached to the base (see hidpp_dd_pedal_dev_candidates), and
+	 * the two are not assumed to keep any particular relative order. So
+	 * probe the shared candidate list ONCE and classify whatever answers
+	 * ROOT.GetFeature(0x80A4) by its fn0 axis count - 3 axes is the
+	 * pedal MCU, 1 axis is a shifter candidate. This keeps the probe
+	 * cost to one candidate-list pass total (each silent index costs one
+	 * transport timeout, paid once for both discoveries) rather than
+	 * running a second full loop just for the accessory. A candidate
+	 * that answers but lacks the feature (-ENOENT) or has neither axis
+	 * count is cheap and moves on immediately. The loop only stops early
+	 * once both the pedal and the accessory have been resolved; if
+	 * either is genuinely absent, every candidate is tried (worst case:
+	 * ARRAY_SIZE(hidpp_dd_pedal_dev_candidates) probes, same upper bound
+	 * as the pre-existing pedal-only loop had when the pedal was not
+	 * found at all).
+	 *
+	 * A 1-axis candidate is only a shifter CANDIDATE until confirmed:
+	 * 0x80B1 (BANDED_AXIS) is unique to the accessory across every
+	 * sub-device (hardware-verified 2026-07-28), so Root.getFeature on
+	 * it is the discriminator, and its index is idx_shifter_banded for
+	 * free. 0x1B30 (DEVICE_MODE) is resolved the same way once the
+	 * accessory is confirmed; it is not itself part of the confirmation
+	 * since its cross-device uniqueness has not been verified.
 	 */
 	for (i = 0; i < ARRAY_SIZE(hidpp_dd_pedal_dev_candidates); i++) {
 		u8 cand = hidpp_dd_pedal_dev_candidates[i];
 		u8 cand_idx, axes;
+
+		if (ff->pedal_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND &&
+		    ff->shifter_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND)
+			break;
 
 		ret = hidpp_root_get_feature_on_device(hidpp, cand,
 						       HIDPP_DD_PAGE_RESPONSE_CURVE,
@@ -6975,17 +7137,43 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 			continue;
 		if (hidpp_dd_pedal_axis_count(hidpp, cand, cand_idx, &axes))
 			continue;
-		if (axes != HIDPP_DD_PEDAL_AXIS_COUNT)
+
+		if (axes == HIDPP_DD_PEDAL_AXIS_COUNT &&
+		    ff->pedal_dev_idx == HIDPP_DD_FEATURE_NOT_FOUND) {
+			ff->pedal_dev_idx = cand;
+			ff->idx_pedal_curve = cand_idx;
 			continue;
-		ff->pedal_dev_idx = cand;
-		ff->idx_pedal_curve = cand_idx;
-		break;
+		}
+
+		if (axes == HIDPP_DD_SHIFTER_AXIS_COUNT &&
+		    ff->shifter_dev_idx == HIDPP_DD_FEATURE_NOT_FOUND) {
+			u8 banded_idx;
+
+			if (hidpp_root_get_feature_on_device(hidpp, cand,
+							     HIDPP_DD_PAGE_BANDED_AXIS,
+							     &banded_idx))
+				continue;
+			ff->shifter_dev_idx = cand;
+			ff->idx_shifter_curve = cand_idx;
+			ff->idx_shifter_banded = banded_idx;
+			ret = hidpp_root_get_feature_on_device(hidpp, cand,
+							       HIDPP_DD_PAGE_DEVICE_MODE,
+							       &ff->idx_shifter_mode);
+			if (ret == 0)
+				dd_dbg(hid, "Accessory mode feature at index 0x%02x\n",
+				       ff->idx_shifter_mode);
+			hidpp_dd_query_accessory_name(ff, cand);
+		}
 	}
 	if (ff->pedal_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND)
 		dd_dbg(hid, "Pedal response curve feature at index 0x%02x (dev 0x%02x)\n",
 		       ff->idx_pedal_curve, ff->pedal_dev_idx);
 	else
 		dd_dbg(hid, "Pedal response curve feature not found on any candidate sub-device\n");
+	if (ff->shifter_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND)
+		dd_info(hid, "RS Shifter & Handbrake at dev 0x%02x (curve idx 0x%02x, banded idx 0x%02x)\n",
+			ff->shifter_dev_idx, ff->idx_shifter_curve,
+			ff->idx_shifter_banded);
 
 	ret = hidpp_root_get_feature(hidpp, HIDPP_DD_PAGE_BRIGHTNESS, &ff->idx_brightness);
 	if (ret == 0)
@@ -11809,6 +11997,36 @@ static ssize_t wheel_firmware_show(struct device *dev,
 static DEVICE_ATTR(wheel_firmware, 0444, wheel_firmware_show, NULL);
 
 /*
+ * wheel_accessory: presence signal for the RS Shifter & Handbrake, an
+ * optional accessory attached to the base's USB-A port (Phase 1: discovery
+ * only, see hidpp_dd_discover_settings_features). Reports its 0x0005 name
+ * when found, or "none" - deliberately not -EOPNOTSUPP, so apps get a
+ * clean yes/no instead of having to infer presence from every dependent
+ * attribute's error code. The accessory's three G HUB settings (shift
+ * sensitivity, handbrake actuation, handbrake sensitivity) are not wired
+ * up yet: their wire protocol is uncaptured.
+ */
+static ssize_t wheel_accessory_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hidpp_device *hidpp = hid_get_drvdata(hid);
+	struct hidpp_dd_ff_data *ff;
+
+	if (!hidpp)
+		return -ENODEV;
+	ff = READ_ONCE(hidpp->private_data);
+	if (!ff)
+		return -ENODEV;
+	if (atomic_read_acquire(&ff->stopping))
+		return -ENODEV;
+	if (ff->shifter_dev_idx == HIDPP_DD_FEATURE_NOT_FOUND || !ff->accessory_name[0])
+		return sysfs_emit(buf, "none\n");
+	return sysfs_emit(buf, "%s\n", ff->accessory_name);
+}
+static DEVICE_ATTR(wheel_accessory, 0444, wheel_accessory_show, NULL);
+
+/*
  * wheel_profile_names: the onboard slots' user-assigned names, from
  * feature 0x8137 fn=3 (from the G Hub captures: `10ff173c 01` ->
  * `12ff173c 01 06 "AC EVO"` = [slot][length][ASCII name]; verified
@@ -11990,6 +12208,7 @@ static struct attribute *hidpp_dd_wheel_group_attrs[] = {
 	&dev_attr_wheel_texture_route.attr,
 	&dev_attr_wheel_serial.attr,
 	&dev_attr_wheel_firmware.attr,
+	&dev_attr_wheel_accessory.attr,
 	&dev_attr_wheel_profile_names.attr,
 	&dev_attr_wheel_range_restore.attr,
 	&dev_attr_wheel_response_curve.attr,

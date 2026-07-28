@@ -785,6 +785,29 @@ cat wheel_firmware
 Include this output in bug reports - firmware-dependent behaviour
 (feature index drift, settings quirks) is tracked against it.
 
+### wheel_accessory
+**Access**: Read-only
+**Values**: accessory device name, or `none`
+
+Presence signal for the **RS Shifter & Handbrake**, an optional accessory
+that plugs into the base's USB-A port. Reports the accessory's own HID++
+device name when one is discovered at probe time, or `none` when absent.
+Unlike the pedal/handbrake attributes below, this never returns an error:
+it exists precisely so apps can check for the accessory without inferring
+presence from another attribute's error code.
+
+```bash
+cat wheel_accessory
+# RS Shifter & Handbrake
+```
+
+The accessory's own three G HUB settings (Shift Sensitivity, Handbrake
+Actuation, Handbrake Sensitivity) are not yet exposed as sysfs attributes:
+their HID++ wire format has not been captured. `wheel_handbrake_curve` /
+`wheel_handbrake_sensitivity` below already shape the handbrake axis
+through the wheel base's own response-curve store and are unaffected by
+this gap.
+
 ### wheel_led_apply
 **Access**: Write-only
 **Values**: `1` (apply)
@@ -911,6 +934,11 @@ no driver change. By its mode switch:
 | Sequential shifter | shift down | `BTN_PINKIE` |
 | Digital handbrake | pull past point | `BTN_THUMB2` (face button) |
 | Analog handbrake | pull | `ABS_Z` axis |
+
+Use `wheel_accessory` (above) to check whether the accessory is attached.
+Its own settings surface (the three G HUB sliders that configure shift and
+handbrake actuation points) is discovered internally but not yet
+implemented as sysfs attributes; see that attribute's description for why.
 
 ---
 

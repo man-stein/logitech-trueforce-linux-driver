@@ -887,6 +887,68 @@ on every init:
   position -> `10050f3a` write centre; same pattern at index 0x0c on the
   G Pro contributor captures). The driver's `wheel_calibrate*` already
   targets this dev_idx.
+- **dev `0x04` - RS Shifter & Handbrake accessory** (hardware-verified
+  2026-07-28, RS50 only; not part of the 2026-07-02 census because the
+  accessory was not attached during it). An optional accessory in the
+  base's USB-A port, not a separate USB device: only a HID++ sub-device
+  plus fields already reserved in the base's interface-0 input report
+  (evdev `BTN_TOP2`/`BTN_PINKIE`/`BTN_THUMB2`/`ABS_Z`, section 5.1's
+  input mapping table). IFeatureSet at idx `0x01`, count 18 (HID++
+  4.2). Names: `0x0005` reports **"RS Shifter & Handbrake"**, device
+  type byte `0x1a` (not in any known registry); `0x0007`
+  DeviceFriendlyName reports **"RS Handbrake & Shifter"** (reversed word
+  order) and is accessory-only, absent on every other sub-device.
+  `0x0003` DeviceInformation: 3 entities, own serial-number capability
+  bit set, main firmware "MPO 13.00.B0013" on its own SecureDFU
+  (`0x00C3`). Full feature list: core `0x0001`, `0x0003`, `0x0005`,
+  `0x0007`, `0x00C3`; unknown/engineering `0x1602`, `0x1802`
+  (DeviceReset, do not call), `0x1807` (likely
+  ConfigurableProperties), `0x180B`, `0x18B1`, `0x1BC0` ReportHidUsages,
+  `0x1E00` EnableHiddenFeatures (disabled), `0x1E02`
+  ManageDeactivatableFeatures, `0x1EB0`, `0x9315`; and three public,
+  non-core, non-DFU features that are exactly the surface a "3 sliders +
+  mode" G HUB accessory page needs:
+  - **`0x80A4` AxisResponseCurve** - the accessory's own store, 1 axis
+    (HID usage `0x32` = Z, same usage as the base's handbrake axis 4),
+    0/64 points loaded (built-in linear response active). Same fn0/fn1
+    wire shape as every other `0x80A4` store (section 5.1); the driver
+    uses this axis count to identify the accessory during discovery
+    (`HIDPP_DD_SHIFTER_AXIS_COUNT`).
+  - **`0x80B1` BANDED_AXIS** - unique to this sub-device across the
+    whole wheel (verified absent on `0xff`/`0x01`/`0x03`/`0x05`), so the
+    driver uses `Root.getFeature(0x80B1)` as the accessory confirmation
+    test. Name is first-party (Solaar commit b9e0cf8, sourced from LGHUB
+    itself; listed in Solaar's "racing peripherals" group). Plausible
+    role: the actuation-point threshold behind the Shift Sensitivity and
+    Handbrake Actuation sliders. Function table undocumented; **no
+    capture exists**, so nothing beyond `Root.getFeature` has been
+    called.
+  - **`0x1B30` DEVICE_MODE** - also unique to this sub-device. Same
+    first-party naming source as `0x80B1`. Plausible role: reports the
+    physical mode switch's current position (sequential shifter /
+    digital handbrake / analog handbrake). Function table undocumented;
+    **no capture exists**.
+
+  The driver (Phase 1, see `hidpp_dd_discover_settings_features`)
+  discovers this sub-device and resolves `0x80A4`/`0x80B1`/`0x1B30`'s
+  indices, and exposes presence via `wheel_accessory` - but does not yet
+  read or write `0x80B1` or `0x1B30`, since their wire protocol is
+  uncaptured. See `docs/SYSFS_API.md`'s `wheel_accessory` entry.
+
+**Sub-device index instability**: no HID++ sub-device index on this
+wheel is fixed. The pedal MCU sat at `0x02` for years, then moved to
+`0x03` once the RS Shifter & Handbrake accessory was attached to the
+same base (hardware-verified 2026-07-28); the accessory itself has only
+been observed at `0x04`, and is not assumed to stay there either. The
+driver never hardcodes a sub-device index for either device: it probes
+a small candidate list (`0x02, 0x03, 0x01, 0x04, 0x05, 0x06`) and
+classifies whatever answers by feature content (axis count for
+`0x80A4`, then `0x80B1` confirmation for the accessory), in a single
+pass shared by both discoveries. A future firmware or attach order could
+place either device at any of these indices, or move the pedal MCU
+somewhere the current candidate list does not cover - if that ever
+happens, the fix is to extend the candidate list, not to special-case an
+index.
 
 Two driver-relevant quirks:
 
@@ -1820,3 +1882,4 @@ This returns the PAGE ID at each index. G Hub queries indices 0x00 through ~0x1F
 | 6.8 | 2026-07-19 | LIGHTSYNC slot-direction wire encoding decoded from `dev/captures/2026-07-19_lightsync_direction.pcapng`: byte 5 of the 0x807B RGB config is a 1-4 value (1=Inside-Out, 2=Outside-In, 3=Left->Right, 4=Right->Left), not the driver's 0-3 enum (9.4.1). Fixed the driver's `direction + 2` encoding, which both mislabelled the sweeps and sent an out-of-range 5 for Outside-In (firmware NAK -> -EIO). Documented the 5-mirrored-pair (palindrome) behaviour of the two symmetric directions (9.8). |
 | 6.9 | 2026-07-20 | Hardware-verified on the RS50: (a) all four 9.4.1 slot-direction wire values watched live via rev-fill sweeps - the driver-enum labels are correct as tabled; (b) the RS50 accepts the G PRO level-based rev-light command (0x807A fn2+fn6, byte 9 = 0-10) - the fill renders the active slot's colours and follows its direction, making a live RPM rev display possible without G HUB's own feed format; (c) fn3 SET_EFFECT only STAGES an effect - the strip repaints on a zero-parameter fn6 commit (driver now sends the pair). |
 | 7.0 | 2026-07-20 | LIGHTSYNC slot selection decoded (`2026-01-30_desktop_led_colors.pcapng` frames 219/339/715 + 279/525/775, hardware-confirmed live): 0x807A fn3 effect values 5-9 ARE the five custom slots (0x05 = CUSTOM 1 .. 0x09 = CUSTOM 5) - selecting a slot is selecting its effect number, staged by fn3 and repainted by the fn6 commit (zero-parameter standalone; the full-config forms bracket an RGB upload). No separate "activate slot" function exists: 0x807B fn3 is GET_NAME, a pure read (the driver's old "activate" step did nothing, and its hardcoded fn3 = 0x05 pinned the strip to CUSTOM 1 on every slot switch; both fixed). Section 9 effect tables and sequences corrected; rev-display note reconciled - the rev fill renders the SELECTED slot's config (the earlier "not the active slot" reading was an artifact of the broken switch; post-fix colour source expected, re-verify); the arm burst's effect stomp is healed by re-asserting the pre-arm effect value after the one-time burst. |
+| 7.1 | 2026-07-28 | RS Shifter & Handbrake accessory (dev `0x04`) catalogued (5.3): full 18-feature map, names via 0x0005/0x0007, own 0x80A4 store, and the two accessory-unique public features `0x80B1` BANDED_AXIS / `0x1B30` DEVICE_MODE (first-party names, no captured wire format). Driver now discovers the accessory alongside the pedal MCU in one candidate-list pass and exposes presence via `wheel_accessory`; its own three settings remain unimplemented pending a G HUB capture. Sub-device index instability documented explicitly: no index is fixed for either the pedal MCU or the accessory. |
