@@ -6,8 +6,7 @@ A Linux kernel driver and userspace tools for three Logitech racing wheels:
 the direct-drive **RS50** and **G PRO Racing Wheel**, and the belt-driven
 **G923**. It brings force feedback, TrueForce haptics, a live RPM rev-light
 display, LIGHTSYNC LED control, and G HUB-equivalent wheel settings to Linux,
-including in Proton/Wine sims - all managed from a desktop app
-(**logi-wheel-gui**) or a terminal one (**logi-wheel**).
+including in Proton/Wine sims.
 
 **This is the first TrueForce implementation on Linux.** TrueForce is
 Logitech's high-frequency haptic layer - engine note, road surface and tyre
@@ -29,6 +28,24 @@ before this. See [G923 support](#g923-support).
 
 > The older **G920** is already served by the in-tree `hid-logitech-hidpp`
 > driver and does not need this one.
+
+## Logi Wheel
+
+**Logi Wheel** is how you drive all of this. It is this project's answer to G
+HUB, and it is where you will spend your time: every setting the wheel
+supports, in one place, with the ones your hardware or current mode cannot
+accept greyed out and labelled with the reason rather than silently failing.
+It runs as a desktop app (`logi-wheel-gui`) or in a terminal (`logi-wheel`),
+and both are built from the same core, so they offer the same settings and
+the same validation.
+
+![Logi Wheel](docs/images/logi-wheel.png)
+
+Beyond the settings, it has a G HUB-style curve editor for the pedals, a
+LIGHTSYNC editor whose changes reach the wheel as you make them, a Setup page
+that finds your sims across Steam, Lutris and Heroic and turns the per-game
+TrueForce helpers on and off, and an Info / Testing page with live input and
+cancelable force tests.
 
 ## What works
 
@@ -61,7 +78,7 @@ see [G923 support](#g923-support)).
 
 ## What's included
 
-Six pieces, all built from this repository:
+Everything below is built from this repository:
 
 - **The kernel driver** (`hid-logitech-dd`) makes the wheel work: games get
   standard Linux force feedback, and every wheel setting appears under
@@ -69,20 +86,14 @@ Six pieces, all built from this repository:
   It drives the G923 too, through a separate force-feedback engine suited to
   that wheel (see [G923 support](#g923-support)).
 
-- **logi-wheel** lets you change wheel settings from a terminal: everything
-  G HUB configures on Windows, with validated edits and a G HUB-style curve
-  editor, so you never have to `echo` values into sysfs by hand.
-
-- **logi-wheel-gui** puts the same settings in a desktop app. Every wheel
-  setting, a
-  LIGHTSYNC editor with per-slot colors and animation direction (changes reach
-  the wheel immediately), and computer-side profile presets. Its Setup page
-  finds your sims across Steam (Proton and native), Lutris and Heroic (you can
-  add one it misses) and turns the per-game TrueForce helpers on and off. Its
-  Info / Testing page shows live input (rotating wheel diagram, button and
-  pedal readouts) and runs cancelable force tests.
-
-  ![logi-wheel-gui settings](docs/images/logi-wheel.png)
+- **Logi Wheel**, described [above](#logi-wheel), is the app you configure the
+  wheel with. `logi-wheel-gui` is the desktop version, with a LIGHTSYNC editor
+  whose per-slot colors and animation direction reach the wheel immediately,
+  computer-side profile presets, a Setup page for your sims, and an Info /
+  Testing page with a rotating wheel diagram, button and pedal readouts and
+  cancelable force tests. `logi-wheel` is the terminal version: the same
+  settings and the same G HUB-style curve editor, so you never have to `echo`
+  values into sysfs by hand.
 
 - **logi-ffb** restores force feedback in DirectInput sims under Wine/Proton
   (Le Mans Ultimate, for example). One launch option and it works: see
