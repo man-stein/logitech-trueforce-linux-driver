@@ -4,16 +4,28 @@
 
 A Linux kernel driver and userspace tools for three Logitech racing wheels:
 the direct-drive **RS50** and **G PRO Racing Wheel**, and the belt-driven
-**G923**. It brings force feedback, TrueForce haptics (native, and simulated
-from game telemetry for titles without it), a live RPM rev-light display,
-LIGHTSYNC LED control, and G HUB-equivalent wheel settings to Linux,
+**G923**. It brings force feedback, TrueForce haptics, a live RPM rev-light
+display, LIGHTSYNC LED control, and G HUB-equivalent wheel settings to Linux,
 including in Proton/Wine sims - all managed from a desktop app
 (**logi-wheel-gui**) or a terminal one (**logi-wheel**).
 
-The **G923** matters as much here as the direct-drive wheels. This is the
-first Linux driver to give it TrueForce at all, and the only one that gives
-the PlayStation edition force feedback at all - that edition had none on
-Linux before this. See [G923 support](#g923-support).
+**This is the first TrueForce implementation on Linux.** TrueForce is
+Logitech's high-frequency haptic layer - engine note, road surface and tyre
+texture felt through the rim, on top of ordinary force feedback - and until
+this project it did not exist here at all. It arrives two ways:
+
+- **Native**, in sims that support Logitech's SDK. The haptics are the
+  game's own TrueForce signal, carried to the wheel unchanged: what you feel
+  is what the developers authored, not an approximation of it.
+- **Simulated**, in everything else. Where a game has no TrueForce,
+  `logi-tf-sim` synthesises it from that game's live telemetry - engine RPM,
+  speed, surface - so wheels still get texture in titles that never shipped
+  support for it.
+
+The **G923** matters as much here as the direct-drive wheels. It is the only
+Linux driver that gives it TrueForce, and the only one that gives the
+PlayStation edition force feedback at all - that edition had none on Linux
+before this. See [G923 support](#g923-support).
 
 > The older **G920** is already served by the in-tree `hid-logitech-hidpp`
 > driver and does not need this one.
