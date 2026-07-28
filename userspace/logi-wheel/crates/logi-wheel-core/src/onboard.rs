@@ -164,6 +164,20 @@ impl OnboardEditor {
         if actual != slot {
             return Err(OnboardError::SlotChanged { expected: slot, actual });
         }
+        // On real hardware `wheel_mode` already reads "onboard" the instant
+        // `wheel_profile` is nonzero (the two attrs read the same
+        // underlying active-profile state; see PROTOCOL_SPECIFICATION.md's
+        // Profile/Mode Switch section). This best-effort write is defense
+        // in depth for the OnboardOnly attrs below (`wheel_brake_force`)
+        // rather than something the wire capture ever showed G Hub sending
+        // separately: if the wheel is already reporting onboard, it is a
+        // harmless no-op; if `wheel_mode` is absent on this wheel, or the
+        // write is rejected, editing continues anyway (errors here must
+        // never abort `begin`, since the slot switch itself already
+        // verified above is what actually matters).
+        if dev.available("wheel_mode") {
+            let _ = dev.write("wheel_mode", &Value::Enum(1));
+        }
         let snapshot = snapshot_slot(dev);
         Ok(OnboardEditor { slot, previous_slot, snapshot })
     }
@@ -360,6 +374,27 @@ mod tests {
         assert_eq!(editor.slot(), 3);
         assert_eq!(editor.previous_slot(), 1);
         assert_eq!(dev.read("wheel_profile").unwrap(), Value::Int(3));
+    }
+
+    #[test]
+    fn begin_ensures_wheel_mode_reports_onboard_even_if_it_had_not_caught_up_yet() {
+        // The flow only ever starts from the desktop Profiles page (see
+        // `logi-wheel-tui`/`logi-wheel-gui`'s entry gating), so `wheel_mode`
+        // legitimately starts at "desktop" here; on real hardware it would
+        // already read "onboard" the instant `wheel_profile` moves off 0
+        // (same underlying state), but this proves `begin` does not rely on
+        // that: an OnboardOnly attr (`wheel_brake_force`) must be writable
+        // immediately after `begin` returns, not only once some other read
+        // catches up.
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "0");
+        fs.set("wheel_brake_force", "50");
+        let dev = Device::with_io(fs);
+        let editor = OnboardEditor::begin(&dev, 2).unwrap();
+        assert_eq!(dev.read("wheel_mode").unwrap(), Value::Enum(1), "onboard");
+        editor.set(&dev, "wheel_brake_force", &Value::Percent(70)).unwrap();
+        assert_eq!(dev.read("wheel_brake_force").unwrap(), Value::Percent(70));
     }
 
     #[test]

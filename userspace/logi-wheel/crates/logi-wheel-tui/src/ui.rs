@@ -390,6 +390,30 @@ fn draw_settings<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
                         _ => String::new(),
                     };
                     (hint, Style::default().fg(Color::DarkGray))
+                } else if row.attr == crate::app::ONBOARD_NAME_ATTR {
+                    // The active onboard slot's own name field: a plain
+                    // text edit (not the registry's multi-slot SlotText
+                    // rotator), so it renders the same way any other
+                    // editable text row would, just with no registry spec
+                    // behind it.
+                    let text = match editing {
+                        Some(ed) => ed.display(),
+                        None => match &row.value {
+                            Ok(Value::Text(s)) => s.clone(),
+                            _ => String::new(),
+                        },
+                    };
+                    (text, value_style(editing.is_some(), false))
+                } else if row.attr.starts_with("onboard-") {
+                    // Every other "Edit onboard slot" flow row (the slot
+                    // picker, the copy picker, and the copy/revert/exit
+                    // action rows): the value column is the key hint, same
+                    // as a saved computer profile row above.
+                    let hint = match &row.value {
+                        Ok(Value::Text(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    (hint, Style::default().fg(Color::DarkGray))
                 } else if row.attr == "wheel_profile" {
                     // show the profile number with its onboard name
                     let n = match (editing.map(|e| &e.draft), &row.value) {
@@ -1818,5 +1842,55 @@ mod tests {
         assert!(text.contains("done"), "the finished row must still be shown:\n{text}");
         assert!(text.contains("skipped"), "the skipped row must still be shown:\n{text}");
         assert!(text.contains("pending"), "the untouched rows stay pending:\n{text}");
+    }
+
+    /// The "Edit onboard slot" flow's synthetic rows have no registry spec
+    /// behind them, so the generic renderer's `Device::spec` lookup would
+    /// otherwise fall through to the "?" placeholder used for a row this
+    /// view genuinely cannot make sense of; both the picker and the active
+    /// editor's own rows must show their real hint text instead.
+    #[test]
+    fn onboard_flow_rows_render_their_hints_not_a_placeholder() {
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "0");
+        fs.set("wheel_profile_names", "1: AC EVO\n2: GT7\n3: PROFILE 3\n4: PROFILE 4\n5: PROFILE 5");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_strength", "80");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        // An empty, unique temp dir: the real default profile store must
+        // never leak into this render (its content is host-specific, not
+        // something this test can predict).
+        a.profiles_dir = std::env::temp_dir().join(format!(
+            "logi-wheel-ui-test-onboard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+
+        // The picker.
+        a.row_idx = a.rows.iter().position(|r| r.attr == crate::app::ONBOARD_EDIT_ATTR).unwrap();
+        a.on_key(crossterm::event::KeyCode::Enter);
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(text.contains("Slot 1"), "the picker rows must render:\n{text}");
+        assert!(text.contains("AC EVO"), "slot 1's name must show in the picker, not a placeholder:\n{text}");
+        assert!(text.contains("PROFILE 4"), "an unnamed slot's default label must show:\n{text}");
+
+        // Pick slot 2 and check the active editor's rows.
+        a.row_idx = 1;
+        a.on_key(crossterm::event::KeyCode::Enter);
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(text.contains("Slot name"), "the name row must render:\n{text}");
+        assert!(text.contains("GT7"), "slot 2's current name must show, not a placeholder:\n{text}");
+        assert!(text.contains("Revert this slot"), "the revert action must render:\n{text}");
+        assert!(
+            text.contains("Copy from computer profile"),
+            "the copy action must render:\n{text}"
+        );
     }
 }

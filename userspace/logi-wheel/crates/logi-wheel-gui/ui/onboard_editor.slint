@@ -1,0 +1,158 @@
+import { Button, LineEdit, ComboBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { SettingRow, SettingsList } from "widgets.slint";
+
+// The "Edit onboard slot" flow's panel (see `logi_wheel_core::onboard`):
+// before a slot is picked, a 5-slot picker; after, the active slot's own
+// editable settings (reused `SettingsList`, so every row renders and edits
+// exactly like the rest of the app) plus rename/copy/revert/exit actions.
+// Every write here routes through `OnboardEditor` on the Rust side (see
+// `worker::Request::Onboard*`), which re-verifies `wheel_profile` before
+// each one - this panel only renders whatever comes back.
+export component OnboardSlotEditor inherits Rectangle {
+    in property <bool> active: false;
+    in property <int> slot: 0;
+    in property <string> slot-name: "";
+    // Bumped by the Rust side on every reply that carries the slot name
+    // (begin/rename/revert/copy/exit): `LineEdit.text` stops tracking this
+    // property the instant the user types in the field, so a forced
+    // resync is the only way a revert (or a slot switch) can visibly win
+    // back over whatever the user had typed.
+    in property <int> slot-name-revision: 0;
+    in property <[SettingRow]> rows: [];
+    in property <[string]> row-groups: [];
+    in property <string> status: "";
+    in property <bool> status-error: false;
+    // The same list `ComputerProfiles` renders; reused here for the "copy
+    // a saved profile into this slot" picker rather than plumbing a
+    // second copy of it from Rust.
+    in property <[string]> computer-profiles: [];
+
+    callback pick-slot(int);
+    callback edit-slider(string, int);
+    callback edit-switch(string, bool);
+    callback set-name(string);
+    callback copy-profile(string);
+    callback revert();
+    callback exit(bool);
+
+    background: Theme.panel-background;
+    border-radius: Theme.panel-radius;
+    border-width: 1px;
+    border-color: Theme.panel-border;
+
+    if !root.active: VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        // Pack at natural height instead of spreading the fixed number of
+        // rows across the panel's full (`vertical-stretch: 1`) height.
+        alignment: start;
+
+        Text {
+            text: "Edit an onboard slot";
+            font-size: 15px;
+            font-weight: 700;
+            color: Theme.text-color;
+        }
+        Text {
+            text: "Author one of the wheel's five onboard slots directly. Picking a slot activates it immediately: the motor starts running that slot's stored strength, damping and rotation range right away. Never do this while driving.";
+            font-size: 12px;
+            font-weight: 600;
+            color: Theme.error-color;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            for n in [1, 2, 3, 4, 5]: Button {
+                text: "Slot " + n;
+                clicked => { root.pick-slot(n); }
+            }
+        }
+        if root.status != "": Text {
+            text: root.status;
+            font-size: 12px;
+            color: root.status-error ? Theme.error-color : Theme.ok-color;
+            wrap: word-wrap;
+        }
+    }
+
+    if root.active: VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+
+        Text {
+            text: "Editing onboard slot " + root.slot;
+            font-size: 15px;
+            font-weight: 700;
+            color: Theme.text-color;
+        }
+        Text {
+            text: "Changes below apply to the wheel immediately - the motor is running this slot's values right now. Never edit while driving.";
+            font-size: 12px;
+            font-weight: 600;
+            color: Theme.error-color;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            name-edit := LineEdit {
+                horizontal-stretch: 1;
+                text: root.slot-name;
+                placeholder-text: "Slot name (up to 9 characters)";
+                property <int> rev: root.slot-name-revision;
+                changed rev => { self.text = root.slot-name; }
+            }
+            Button {
+                text: "Rename";
+                clicked => { root.set-name(name-edit.text); }
+            }
+        }
+
+        SettingsList {
+            vertical-stretch: 1;
+            rows: root.rows;
+            groups: root.row-groups;
+            edit-slider(attr, v) => { root.edit-slider(attr, v); }
+            edit-switch(attr, v) => { root.edit-switch(attr, v); }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            copy-choice := ComboBox {
+                horizontal-stretch: 1;
+                model: root.computer-profiles;
+            }
+            Button {
+                text: "Copy into this slot";
+                enabled: root.computer-profiles.length > 0;
+                clicked => { root.copy-profile(copy-choice.current-value); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "Revert this slot";
+                clicked => { root.revert(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Done, keep this slot active";
+                clicked => { root.exit(false); }
+            }
+            Button {
+                text: "Done, restore previous slot";
+                primary: true;
+                clicked => { root.exit(true); }
+            }
+        }
+
+        if root.status != "": Text {
+            text: root.status;
+            font-size: 12px;
+            color: root.status-error ? Theme.error-color : Theme.ok-color;
+            wrap: word-wrap;
+        }
+    }
+}

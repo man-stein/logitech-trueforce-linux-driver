@@ -3,6 +3,7 @@ use crate::curve_editor::CurveEditor;
 use crate::edit;
 use crate::wheel_test::{SimKind, TestView};
 use logi_wheel_core::games::{self, SetupAction};
+use logi_wheel_core::onboard::{self, OnboardEditor};
 use logi_wheel_core::profiles;
 use logi_wheel_core::setting::Access;
 use logi_wheel_core::shaping::{self, ShapingRole};
@@ -35,6 +36,54 @@ pub const PROFILE_ROW_PREFIX: &str = "profile:";
 /// dash (no colon) keeps it distinct from every saved-profile row, even
 /// one literally named "new".
 pub const PROFILE_NEW_ATTR: &str = "profile-new";
+
+/// The desktop Profiles page's "Edit onboard slot..." row: Enter opens the
+/// slot picker (see [`OnboardFlow`]).
+pub const ONBOARD_EDIT_ATTR: &str = "onboard-edit";
+/// A slot picker row's attr prefix; the slot number (1-5) follows.
+pub const ONBOARD_SLOT_PREFIX: &str = "onboard-slot:";
+/// The active editor's "Slot name" row: a plain single-slot text edit,
+/// distinct from the registry's own `wheel_profile_names` (which rotates
+/// through all five slots) so this flow only ever touches the slot it is
+/// authoring.
+pub const ONBOARD_NAME_ATTR: &str = "onboard-slot-name";
+/// The active editor's "Copy from computer profile..." row: Enter opens
+/// the copy picker (one row per saved profile, prefixed
+/// [`ONBOARD_COPY_PREFIX`]).
+pub const ONBOARD_COPY_ATTR: &str = "onboard-copy";
+pub const ONBOARD_COPY_PREFIX: &str = "onboard-copy:";
+/// The active editor's "Revert this slot" row: replays the snapshot taken
+/// when the slot was selected.
+pub const ONBOARD_REVERT_ATTR: &str = "onboard-revert";
+/// Leave the flow, keeping the authored slot active.
+pub const ONBOARD_EXIT_ATTR: &str = "onboard-exit";
+/// Leave the flow and restore whatever slot was active before it started.
+pub const ONBOARD_EXIT_RESTORE_ATTR: &str = "onboard-exit-restore";
+
+/// The desktop Profiles page's "Edit onboard slot" flow: pick a slot (Some
+/// row per slot, `editor: None`), then edit its values (`editor: Some`),
+/// with an optional nested "Copy from computer profile" picker. Reuses the
+/// existing `Row`/`edit::EditState` machinery throughout - the flow only
+/// changes which rows are shown and which write path they commit through
+/// (see `App::onboard_rows`/`App::commit_edit`).
+pub struct OnboardFlow {
+    /// `None` while still choosing a slot; `Some` once one has been
+    /// activated and is being edited.
+    pub editor: Option<OnboardEditor>,
+    /// Whether the nested "pick a computer profile to copy in" list is
+    /// showing instead of the editor's own rows.
+    pub copy_picker: bool,
+}
+
+/// The onboard flow's current step, so `on_key` can match on a plain
+/// enum instead of re-deriving it (and re-borrowing `self.onboard`) at
+/// every branch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnboardStage {
+    Picker,
+    CopyPicker,
+    Active,
+}
 
 /// The LIGHTSYNC effect selector's modal state: left/right cycles `index`
 /// through `labels` (the entries `lightsync::dropdown_labels` builds: the
@@ -294,6 +343,9 @@ pub struct App<S: SysfsIo> {
     /// A profile delete waiting for its y/n confirmation (the profile's
     /// name); armed by `d` on a saved-profile row.
     pub profile_delete_confirm: Option<String>,
+    /// The "Edit onboard slot" flow's state; `Some` from the moment the
+    /// slot picker opens until the flow is left. See [`OnboardFlow`].
+    pub onboard: Option<OnboardFlow>,
     /// A shim run queued by `on_key` for the main loop to execute:
     /// `(installer args, verb for the status line)`. The run blocks, so
     /// instead of running inside the key handler, where the "running..."
@@ -409,6 +461,7 @@ impl<S: SysfsIo> App<S> {
             profiles_dir: profiles::default_dir(),
             profile_name_edit: None,
             profile_delete_confirm: None,
+            onboard: None,
             pending_shim: None,
             no_wheel: false,
             retry_requested: false,
@@ -633,6 +686,7 @@ impl<S: SysfsIo> App<S> {
             || self.sdk_edit.is_some()
             || self.profile_name_edit.is_some()
             || self.profile_delete_confirm.is_some()
+            || self.onboard.is_some()
             || self.test.confirm.is_some()
             || self.tf_intensity_edit.is_some()
             || self.tf_pitch_edit.is_some()
@@ -689,6 +743,12 @@ impl<S: SysfsIo> App<S> {
     /// still has its own four settings to snapshot, just no onboard half to
     /// offer alongside them.
     fn profiles_rows(&self) -> Vec<Row> {
+        // The "Edit onboard slot" flow replaces the whole page (picker,
+        // then the active editor's own rows) until it is left; see
+        // `onboard_rows`.
+        if self.onboard.is_some() {
+            return self.onboard_rows();
+        }
         let all = self.registry_rows(Category::Profiles);
         let has_mode = all.iter().any(|r| r.attr == "wheel_mode");
         if has_mode && matches!(self.device.current_mode(), Ok(Mode::Onboard)) {
@@ -696,6 +756,16 @@ impl<S: SysfsIo> App<S> {
         }
         let mut rows: Vec<Row> =
             if has_mode { all.into_iter().filter(|r| r.attr == "wheel_mode").collect() } else { Vec::new() };
+        // A wheel with no onboard slots at all (a G923: no `wheel_mode`)
+        // never gets this row either - there is nothing to author.
+        if has_mode {
+            rows.push(Row {
+                attr: ONBOARD_EDIT_ATTR.to_string(),
+                label: "Edit onboard slot...".to_string(),
+                available: true,
+                value: Ok(Value::Text("Enter picks a slot to author directly on the wheel".into())),
+            });
+        }
         for name in profiles::list_in(&self.profiles_dir) {
             rows.push(Row {
                 attr: format!("{PROFILE_ROW_PREFIX}{name}"),
@@ -716,6 +786,230 @@ impl<S: SysfsIo> App<S> {
     /// The saved profile the selected row stands for, if any.
     fn selected_profile_name(&self) -> Option<String> {
         self.selected().and_then(|r| r.attr.strip_prefix(PROFILE_ROW_PREFIX)).map(str::to_string)
+    }
+
+    /// The onboard flow's current step; `None` outside the flow.
+    fn onboard_stage(&self) -> Option<OnboardStage> {
+        let flow = self.onboard.as_ref()?;
+        Some(if flow.copy_picker {
+            OnboardStage::CopyPicker
+        } else if flow.editor.is_none() {
+            OnboardStage::Picker
+        } else {
+            OnboardStage::Active
+        })
+    }
+
+    /// The onboard flow's rows for whichever step it is on: the 5-slot
+    /// picker, the nested computer-profile copy picker, or the active
+    /// editor's own settings plus its action rows. Empty outside the flow.
+    fn onboard_rows(&self) -> Vec<Row> {
+        let Some(flow) = &self.onboard else { return Vec::new() };
+        let Some(editor) = &flow.editor else {
+            // Slot picker: one row per slot, showing that slot's current
+            // name (read live off the whole-device wheel_profile_names,
+            // regardless of which slot happens to be active right now).
+            let names = self.profile_names();
+            return (1..=5u8)
+                .map(|slot| Row {
+                    attr: format!("{ONBOARD_SLOT_PREFIX}{slot}"),
+                    label: format!("Slot {slot}"),
+                    available: true,
+                    value: Ok(Value::Text(
+                        names.get(&slot).cloned().unwrap_or_else(|| format!("PROFILE {slot}")),
+                    )),
+                })
+                .collect();
+        };
+        if flow.copy_picker {
+            let saved = profiles::list_in(&self.profiles_dir);
+            if saved.is_empty() {
+                return vec![Row {
+                    attr: "onboard-copy-empty".to_string(),
+                    label: "(no saved computer profiles)".to_string(),
+                    available: false,
+                    value: Ok(Value::Text("Esc goes back".into())),
+                }];
+            }
+            return saved
+                .into_iter()
+                .map(|name| Row {
+                    attr: format!("{ONBOARD_COPY_PREFIX}{name}"),
+                    label: name,
+                    available: true,
+                    value: Ok(Value::Text("Enter copies these values into the slot".into())),
+                })
+                .collect();
+        }
+        let mut rows = vec![Row {
+            attr: ONBOARD_NAME_ATTR.to_string(),
+            label: "Slot name".to_string(),
+            available: true,
+            value: Ok(Value::Text(onboard::slot_name(&self.device, editor.slot()).unwrap_or_default())),
+        }];
+        for spec in onboard::editable_specs(&self.device) {
+            rows.push(Row {
+                attr: spec.attr.to_string(),
+                label: spec.label.to_string(),
+                available: self.device.available(spec.attr),
+                value: self.device.read(spec.attr),
+            });
+        }
+        rows.push(Row {
+            attr: ONBOARD_COPY_ATTR.to_string(),
+            label: "Copy from computer profile...".to_string(),
+            available: true,
+            value: Ok(Value::Text("Enter picks a saved profile to copy in".into())),
+        });
+        rows.push(Row {
+            attr: ONBOARD_REVERT_ATTR.to_string(),
+            label: "Revert this slot".to_string(),
+            available: true,
+            value: Ok(Value::Text("Enter restores its values from before this edit".into())),
+        });
+        rows.push(Row {
+            attr: ONBOARD_EXIT_ATTR.to_string(),
+            label: "Done, keep this slot active".to_string(),
+            available: true,
+            value: Ok(Value::Text("Enter leaves the flow".into())),
+        });
+        rows.push(Row {
+            attr: ONBOARD_EXIT_RESTORE_ATTR.to_string(),
+            label: format!("Done, restore slot {}", editor.previous_slot()),
+            available: editor.previous_slot() != editor.slot(),
+            value: Ok(Value::Text("Enter leaves the flow and switches back".into())),
+        });
+        rows
+    }
+
+    /// Begin editing the picked slot (the picker's Enter): the safety
+    /// warning is baked into the status line every time, since it is the
+    /// moment the motor starts running that slot's stored strength/damping/
+    /// range.
+    fn onboard_pick_slot(&mut self) {
+        let Some(slot) =
+            self.selected().and_then(|r| r.attr.strip_prefix(ONBOARD_SLOT_PREFIX)).and_then(|s| s.parse().ok())
+        else {
+            return;
+        };
+        match OnboardEditor::begin(&self.device, slot) {
+            Ok(editor) => {
+                self.onboard = Some(OnboardFlow { editor: Some(editor), copy_picker: false });
+                self.status = format!(
+                    "editing onboard slot {slot} - changes apply to the wheel immediately; \
+                     the motor now runs this slot's strength/damping/range. Never edit while driving."
+                );
+            }
+            Err(e) => self.status = format!("could not select slot {slot}: {e}"),
+        }
+        self.row_idx = 0;
+        self.reload();
+    }
+
+    /// Begin editing the selected onboard row's value (the active editor's
+    /// Enter on anything but its action rows): the slot-name row gets a
+    /// plain text editor bound to the synthetic `ONBOARD_NAME_ATTR`;
+    /// everything else is a normal registry attr, edited the same way the
+    /// rest of the app edits it.
+    fn onboard_begin_edit(&mut self) {
+        let Some(row) = self.selected() else { return };
+        let attr = row.attr.clone();
+        if attr == ONBOARD_NAME_ATTR {
+            let cur = row.value.clone().unwrap_or(Value::Text(String::new()));
+            self.edit = Some(edit::EditState::start(ONBOARD_NAME_ATTR, Kind::TextField { max_len: 9 }, &cur));
+            return;
+        }
+        let Some(spec) = Device::<S>::spec(&attr) else { return };
+        let cur = match &row.value {
+            Ok(v) => v.clone(),
+            Err(_) => {
+                self.status = "cannot edit (value unreadable)".into();
+                return;
+            }
+        };
+        self.edit = Some(edit::EditState::start(spec.attr, spec.kind, &cur));
+    }
+
+    /// The active editor's Enter, dispatched by the selected row's attr:
+    /// the action rows (copy/revert/exit) run directly; anything else opens
+    /// its value editor via `onboard_begin_edit`.
+    fn onboard_active_enter(&mut self) {
+        match self.selected().map(|r| r.attr.clone()) {
+            Some(a) if a == ONBOARD_COPY_ATTR => {
+                if let Some(flow) = self.onboard.as_mut() {
+                    flow.copy_picker = true;
+                }
+                self.row_idx = 0;
+                self.reload();
+            }
+            Some(a) if a == ONBOARD_REVERT_ATTR => self.onboard_revert(),
+            Some(a) if a == ONBOARD_EXIT_ATTR => self.exit_onboard_flow(false),
+            Some(a) if a == ONBOARD_EXIT_RESTORE_ATTR => self.exit_onboard_flow(true),
+            _ => self.onboard_begin_edit(),
+        }
+    }
+
+    /// Replay the active slot's pre-edit snapshot (the "Revert this slot"
+    /// row's Enter).
+    fn onboard_revert(&mut self) {
+        let Some(editor) = self.onboard.as_ref().and_then(|f| f.editor.as_ref()) else { return };
+        self.status = match editor.revert(&self.device) {
+            Ok(errors) if errors.is_empty() => "slot reverted to its values from before editing".to_string(),
+            Ok(errors) => {
+                let (attr, msg) = &errors[0];
+                format!("reverted with {} setting(s) failed, first: {attr}: {msg}", errors.len())
+            }
+            Err(e) => format!("revert: {e}"),
+        };
+        self.reload();
+    }
+
+    /// Copy the selected saved profile into the active slot (the copy
+    /// picker's Enter), then return to the active editor's own rows.
+    fn onboard_copy_selected(&mut self) {
+        let Some(name) =
+            self.selected().and_then(|r| r.attr.strip_prefix(ONBOARD_COPY_PREFIX)).map(str::to_string)
+        else {
+            return;
+        };
+        let Some(editor) = self.onboard.as_ref().and_then(|f| f.editor.as_ref()) else { return };
+        self.status = match editor.copy_from_computer_profile(&self.device, &self.profiles_dir, &name) {
+            Ok(errors) if errors.is_empty() => format!("copied '{name}' into this slot"),
+            Ok(errors) => {
+                let (attr, msg) = &errors[0];
+                format!("copied '{name}' with {} setting(s) failed, first: {attr}: {msg}", errors.len())
+            }
+            Err(e) => format!("copy '{name}': {e}"),
+        };
+        if let Some(flow) = self.onboard.as_mut() {
+            flow.copy_picker = false;
+        }
+        self.row_idx = 0;
+        self.reload();
+    }
+
+    /// Leave the flow: `restore` switches the wheel back to whatever slot
+    /// was active before the flow started (a no-op if the wheel was
+    /// already switched away from the authored slot at its own OLED - see
+    /// `OnboardEditor::finish`); either way this drops back to the normal
+    /// desktop Profiles page.
+    fn exit_onboard_flow(&mut self, restore: bool) {
+        if let Some(flow) = self.onboard.take() {
+            if let Some(editor) = flow.editor {
+                match editor.finish(&self.device, restore) {
+                    Ok(()) => {
+                        self.status = if restore {
+                            "left the onboard slot editor; previous slot restored".to_string()
+                        } else {
+                            "left the onboard slot editor".to_string()
+                        }
+                    }
+                    Err(e) => self.status = format!("onboard editor: {e}"),
+                }
+            }
+        }
+        self.row_idx = 0;
+        self.reload();
     }
 
     /// Snapshot the wheel's settings as computer profile `name` (the name
@@ -1666,6 +1960,30 @@ impl<S: SysfsIo> App<S> {
     pub fn commit_edit(&mut self) {
         let Some(e) = self.edit.take() else { return };
         let attr = e.attr;
+        // While the onboard slot editor is active, every edit routes
+        // through `OnboardEditor::set`/`set_name` instead of a raw device
+        // write: it re-checks `wheel_profile` first (the wheel can be
+        // switched at its own OLED mid-flow) so a stray edit can never
+        // land on the wrong slot.
+        if let Some(editor) = self.onboard.as_ref().and_then(|f| f.editor.as_ref()) {
+            let label = if attr == ONBOARD_NAME_ATTR { "Slot name" } else { Device::<S>::spec(attr).map(|s| s.label).unwrap_or(attr) };
+            let result = e.commit_value().map_err(onboard::OnboardError::from).and_then(|v| {
+                if attr == ONBOARD_NAME_ATTR {
+                    match v {
+                        Value::Text(name) => editor.set_name(&self.device, &name),
+                        _ => Err(onboard::OnboardError::from(Error::Invalid)),
+                    }
+                } else {
+                    editor.set(&self.device, attr, &v)
+                }
+            });
+            self.status = match result {
+                Ok(()) => format!("{label} set"),
+                Err(e) => format!("{label}: {e}"),
+            };
+            self.reload();
+            return;
+        }
         let label = Device::<S>::spec(attr).map(|s| s.label).unwrap_or(attr);
         match e
             .commit_value()
@@ -2155,6 +2473,42 @@ impl<S: SysfsIo> App<S> {
             }
             return;
         }
+        // The "Edit onboard slot" flow swallows every key while active
+        // (a value edit itself already returned above, via `self.edit`):
+        // Up/Down move the selection, Enter dispatches per-step, Esc backs
+        // out one level (the copy picker back to the active editor, the
+        // active editor to a plain exit-without-restore, the picker closes
+        // the whole flow).
+        if let Some(stage) = self.onboard_stage() {
+            match key {
+                Up => self.move_row(-1),
+                Down => self.move_row(1),
+                Enter => match stage {
+                    OnboardStage::Picker => self.onboard_pick_slot(),
+                    OnboardStage::CopyPicker => self.onboard_copy_selected(),
+                    OnboardStage::Active => self.onboard_active_enter(),
+                },
+                Esc => match stage {
+                    OnboardStage::Picker => {
+                        self.onboard = None;
+                        self.row_idx = 0;
+                        self.reload();
+                        self.status = "onboard slot editor closed".to_string();
+                    }
+                    OnboardStage::CopyPicker => {
+                        if let Some(flow) = self.onboard.as_mut() {
+                            flow.copy_picker = false;
+                        }
+                        self.row_idx = 0;
+                        self.reload();
+                    }
+                    OnboardStage::Active => self.exit_onboard_flow(false),
+                },
+                Char('?') => self.help = true,
+                _ => {}
+            }
+            return;
+        }
         // A pending profile delete swallows the next key: only 'y'
         // deletes, anything else cancels.
         if let Some(name) = self.profile_delete_confirm.take() {
@@ -2241,6 +2595,11 @@ impl<S: SysfsIo> App<S> {
                     self.apply_profile(&name);
                 } else if self.selected().is_some_and(|r| r.attr == PROFILE_NEW_ATTR) {
                     self.profile_name_edit = Some(String::new());
+                } else if self.selected().is_some_and(|r| r.attr == ONBOARD_EDIT_ATTR) {
+                    self.onboard = Some(OnboardFlow { editor: None, copy_picker: false });
+                    self.row_idx = 0;
+                    self.reload();
+                    self.status = "pick a slot to author (Esc cancels)".to_string();
                 } else {
                     self.begin_edit();
                 }
@@ -4130,7 +4489,11 @@ mod tests {
     fn desktop_profiles_page_shows_mode_plus_the_computer_store() {
         let a = profiles_app("desktop");
         let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
-        assert_eq!(attrs, vec!["wheel_mode", PROFILE_NEW_ATTR], "empty store: just Mode + Save");
+        assert_eq!(
+            attrs,
+            vec!["wheel_mode", ONBOARD_EDIT_ATTR, PROFILE_NEW_ATTR],
+            "empty store: Mode, the onboard-edit entry, and Save"
+        );
     }
 
     #[test]
@@ -4143,7 +4506,7 @@ mod tests {
         assert_eq!(attrs, vec!["wheel_mode", "wheel_profile", "wheel_profile_names"]);
         a.on_key(KeyCode::Char('d'));
         let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
-        assert_eq!(attrs, vec!["wheel_mode", PROFILE_NEW_ATTR]);
+        assert_eq!(attrs, vec!["wheel_mode", ONBOARD_EDIT_ATTR, PROFILE_NEW_ATTR]);
     }
 
     #[test]
@@ -4161,11 +4524,198 @@ mod tests {
         assert!(a.profile_name_edit.is_none());
         assert!(a.status.contains("saved"), "status: {}", a.status);
         let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
-        assert_eq!(attrs, vec!["wheel_mode", "profile:race", PROFILE_NEW_ATTR]);
+        assert_eq!(attrs, vec!["wheel_mode", ONBOARD_EDIT_ATTR, "profile:race", PROFILE_NEW_ATTR]);
         // The file really is a snapshot of the device.
         let text =
             std::fs::read_to_string(a.profiles_dir.join("race.profile")).unwrap();
         assert!(text.contains("wheel_strength=62"));
+    }
+
+    // --- "Edit onboard slot" flow ---
+
+    /// An app plus a second handle to its `FakeSysfs`, seeded with every
+    /// `ONBOARD_ATTRS` entry, so a test can both drive the flow through
+    /// `on_key` and simulate the wheel being switched behind its back (the
+    /// OLED-drift case).
+    fn onboard_app() -> (Rc<FakeSysfs>, App<Rc<FakeSysfs>>) {
+        let fs = Rc::new(FakeSysfs::new());
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "0");
+        fs.set("wheel_profile_names", "1: AC EVO\n2: GT7\n3: PROFILE 3\n4: PROFILE 4\n5: PROFILE 5");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_strength", "80");
+        fs.set("wheel_trueforce", "50");
+        fs.set("wheel_damping", "10");
+        fs.set("wheel_ffb_filter", "7");
+        fs.set("wheel_ffb_filter_auto", "0");
+        fs.set("wheel_brake_force", "60");
+        fs.set("wheel_led_effect", "1");
+        fs.set("wheel_led_brightness", "100");
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs.clone()));
+        a.focus = Focus::Content;
+        a.profiles_dir = profiles_tempdir();
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Profiles).unwrap();
+        a.reload();
+        (fs, a)
+    }
+
+    /// Enter the flow from the desktop Profiles page's "Edit onboard slot"
+    /// row, then pick `slot` (both via `on_key`, matching real input).
+    fn enter_onboard_slot(a: &mut App<Rc<FakeSysfs>>, slot: u8) {
+        use crossterm::event::KeyCode;
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_EDIT_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        a.row_idx = (slot - 1) as usize;
+        a.on_key(KeyCode::Enter);
+    }
+
+    #[test]
+    fn picker_shows_all_five_slots_with_their_names() {
+        let (_fs, mut a) = onboard_app();
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_EDIT_ATTR).unwrap();
+        a.on_key(crossterm::event::KeyCode::Enter);
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(
+            attrs,
+            vec![
+                "onboard-slot:1",
+                "onboard-slot:2",
+                "onboard-slot:3",
+                "onboard-slot:4",
+                "onboard-slot:5",
+            ]
+        );
+        assert_eq!(a.rows[0].value.as_ref().unwrap(), &Value::Text("AC EVO".to_string()));
+    }
+
+    #[test]
+    fn picking_a_slot_activates_it_and_shows_the_editor_rows() {
+        let (fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 3);
+        assert_eq!(fs.read("wheel_profile").unwrap().trim(), "3");
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs[0], ONBOARD_NAME_ATTR);
+        for a in onboard::ONBOARD_ATTRS {
+            assert!(attrs.contains(a), "{a}");
+        }
+        assert!(attrs.contains(&ONBOARD_COPY_ATTR));
+        assert!(attrs.contains(&ONBOARD_REVERT_ATTR));
+        assert!(attrs.contains(&ONBOARD_EXIT_ATTR));
+        assert!(attrs.contains(&ONBOARD_EXIT_RESTORE_ATTR));
+        assert!(a.status.contains("motor"), "the safety warning must be prominent: {}", a.status);
+    }
+
+    #[test]
+    fn editing_a_value_writes_through_the_editor() {
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 2);
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
+        a.on_key(KeyCode::Enter); // open the field editor
+        a.on_key(KeyCode::Left); // bump down by one step
+        a.on_key(KeyCode::Enter); // commit
+        assert!(a.status.contains("set"), "status: {}", a.status);
+        assert_eq!(fs.read("wheel_strength").unwrap().trim(), "79");
+    }
+
+    #[test]
+    fn editing_after_the_wheel_switched_slots_is_refused() {
+        // The OLED-drift guard: the wheel moved to a different slot behind
+        // the flow's back between opening the field editor and committing
+        // it. The write must not land on slot 5.
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 2);
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_strength").unwrap();
+        a.on_key(KeyCode::Enter);
+        fs.set("wheel_profile", "5"); // the wheel's own OLED, mid-edit
+        a.on_key(KeyCode::Left);
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("slot 5"), "status: {}", a.status);
+        assert_eq!(fs.read("wheel_strength").unwrap().trim(), "80", "nothing was written");
+    }
+
+    #[test]
+    fn revert_restores_the_snapshot_taken_when_the_slot_was_picked() {
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 1);
+        a.row_idx = a.rows.iter().position(|r| r.attr == "wheel_range").unwrap();
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Left);
+        a.on_key(KeyCode::Enter);
+        assert_eq!(fs.read("wheel_range").unwrap().trim(), "890");
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_REVERT_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        assert_eq!(
+            a.status, "slot reverted to its values from before editing",
+            "a clean revert (every ONBOARD_ATTRS entry writable, including wheel_brake_force)"
+        );
+        assert_eq!(fs.read("wheel_range").unwrap().trim(), "900");
+    }
+
+    #[test]
+    fn copy_from_computer_profile_maps_onboard_attrs_only() {
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        // A saved desktop profile carrying both onboard-editable and
+        // desktop-only attrs.
+        fs.set("wheel_sensitivity", "70");
+        let dev_for_save = logi_wheel_core::Device::with_io(fs.clone());
+        dev_for_save.write("wheel_range", &Value::Int(540)).unwrap();
+        profiles::save_in(&a.profiles_dir, "race", &dev_for_save).unwrap();
+        dev_for_save.write("wheel_range", &Value::Int(900)).unwrap(); // restore before authoring
+
+        enter_onboard_slot(&mut a, 1);
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_COPY_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        let attrs: Vec<&str> = a.rows.iter().map(|r| r.attr.as_str()).collect();
+        assert_eq!(attrs, vec![format!("{ONBOARD_COPY_PREFIX}race")]);
+        a.row_idx = 0;
+        a.on_key(KeyCode::Enter);
+        assert!(a.status.contains("copied"), "status: {}", a.status);
+        assert_eq!(fs.read("wheel_range").unwrap().trim(), "540");
+    }
+
+    #[test]
+    fn exit_without_restore_keeps_the_authored_slot_active() {
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 4);
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_EXIT_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.onboard.is_none());
+        assert_eq!(fs.read("wheel_profile").unwrap().trim(), "4");
+    }
+
+    #[test]
+    fn exit_with_restore_switches_back_to_the_slot_active_before_the_flow() {
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 4);
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_EXIT_RESTORE_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        assert!(a.onboard.is_none());
+        assert_eq!(fs.read("wheel_profile").unwrap().trim(), "0", "back to desktop, the pre-flow state");
+    }
+
+    #[test]
+    fn esc_at_the_picker_closes_the_flow_without_touching_the_wheel() {
+        use crossterm::event::KeyCode;
+        let (fs, mut a) = onboard_app();
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_EDIT_ATTR).unwrap();
+        a.on_key(KeyCode::Enter);
+        a.on_key(KeyCode::Esc);
+        assert!(a.onboard.is_none());
+        assert_eq!(fs.read("wheel_profile").unwrap().trim(), "0");
+    }
+
+    #[test]
+    fn drift_watching_is_paused_while_the_onboard_flow_is_open() {
+        let (_fs, mut a) = onboard_app();
+        a.row_idx = a.rows.iter().position(|r| r.attr == ONBOARD_EDIT_ATTR).unwrap();
+        a.on_key(crossterm::event::KeyCode::Enter);
+        assert!(!a.check_drift(), "a modal flow must never be yanked out from under the user");
     }
 
     #[test]

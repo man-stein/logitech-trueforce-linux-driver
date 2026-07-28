@@ -87,6 +87,25 @@ pub enum Request {
     ProfileApply(String),
     /// Delete computer profile `name`. Replied with `Response::Profiles`.
     ProfileDelete(String),
+    /// Begin the "Edit onboard slot" flow on `slot` (1-5): switch+verify,
+    /// snapshot. Replied with `Response::Onboard`.
+    OnboardBegin(u8),
+    /// Write one attr to the active onboard slot. Replied with
+    /// `Response::Onboard`.
+    OnboardEdit { attr: String, input: WidgetInput },
+    /// Rename the active onboard slot. Replied with `Response::Onboard`.
+    OnboardSetName(String),
+    /// Replay the active slot's pre-edit snapshot. Replied with
+    /// `Response::Onboard`.
+    OnboardRevert,
+    /// Copy saved computer profile `name` into the active slot. Replied
+    /// with `Response::Onboard`.
+    OnboardCopyProfile(String),
+    /// Leave the flow, optionally restoring whichever slot was active
+    /// before it started. Replied with `Response::Onboard`, then fresh
+    /// `Rows`+`Info` for the Profiles page like an apply would (leaving may
+    /// have changed the active profile).
+    OnboardExit { restore_previous: bool },
 }
 
 /// What the worker sends back.
@@ -120,6 +139,11 @@ pub enum Response {
     /// after every profile request and alongside every Profiles-category
     /// `Rows` reply.
     Profiles { names: Vec<String>, status: String, error: bool },
+    /// The "Edit onboard slot" flow's current state, sent after every
+    /// `Onboard*` request. `active`/`slot`/`slot_name`/`rows` are the flow's
+    /// live state (empty/0 outside it); `status` is the request that
+    /// triggered this reply's outcome, `""` for none.
+    Onboard { active: bool, slot: u8, slot_name: String, rows: Vec<Row>, status: String, error: bool },
 }
 
 /// Handle to the worker thread. Cheap to clone (it is just a channel
@@ -260,6 +284,12 @@ fn request_category(req: &Request) -> Option<Category> {
         Request::ProfileSave(_) | Request::ProfileApply(_) | Request::ProfileDelete(_) => {
             Some(Category::Profiles)
         }
+        Request::OnboardBegin(_)
+        | Request::OnboardEdit { .. }
+        | Request::OnboardSetName(_)
+        | Request::OnboardRevert
+        | Request::OnboardCopyProfile(_)
+        | Request::OnboardExit { .. } => Some(Category::Profiles),
         Request::SetMode(_) | Request::Discover => None,
     }
 }
@@ -397,6 +427,28 @@ fn profiles_state<S: SysfsIo>(vm: &ViewModel<S>) -> Response {
     Response::Profiles { names: vm.profile_list(), status: String::new(), error: false }
 }
 
+/// The `Response::Onboard` snapshot every onboard-flow request answers
+/// with: the flow's live state plus `status`/`error` for whatever request
+/// triggered this reply.
+fn onboard_state<S: SysfsIo>(vm: &ViewModel<S>, status: String, error: bool) -> Response {
+    Response::Onboard {
+        active: vm.onboard_active(),
+        slot: vm.onboard_slot(),
+        slot_name: vm.onboard_slot_name(),
+        rows: vm.onboard_rows(),
+        status,
+        error,
+    }
+}
+
+/// Format a `Vec<(attr, message)>` per-attr failure list the same way
+/// every other multi-write action here does: the count plus the first
+/// failure's detail.
+fn summarize_failures(verb: &str, errors: &[(String, String)]) -> String {
+    let (attr, msg) = &errors[0];
+    format!("{verb} with {} setting(s) failed, first: {attr}: {msg}", errors.len())
+}
+
 fn handle<S: SysfsIo>(vm: &ViewModel<S>, req: Request, on_response: &dyn Fn(Response)) {
     match req {
         Request::LoadCategory(category) => {
@@ -519,6 +571,66 @@ fn handle<S: SysfsIo>(vm: &ViewModel<S>, req: Request, on_response: &dyn Fn(Resp
                 category: Category::Profiles,
                 rows: vm.rows_for(Category::Profiles),
             });
+            if let Ok(mut info) = vm.info() {
+                fill_classic_firmware(vm, &mut info);
+                on_response(Response::Info(info));
+            }
+        }
+        Request::OnboardBegin(slot) => {
+            let (status, error) = match vm.onboard_begin(slot) {
+                Ok(()) => (
+                    format!(
+                        "Editing onboard slot {slot}. Changes apply to the wheel immediately - \
+                         the motor now runs this slot's strength/damping/range. Never edit while driving."
+                    ),
+                    false,
+                ),
+                Err(e) => (format!("Could not select slot {slot}: {e}"), true),
+            };
+            on_response(onboard_state(vm, status, error));
+        }
+        Request::OnboardEdit { attr, input } => {
+            let (status, error) = match vm.onboard_set(&attr, input) {
+                Ok(()) => (String::new(), false),
+                Err(e) => (e.to_string(), true),
+            };
+            on_response(onboard_state(vm, status, error));
+        }
+        Request::OnboardSetName(name) => {
+            let (status, error) = match vm.onboard_set_name(&name) {
+                Ok(()) => (String::new(), false),
+                Err(e) => (e.to_string(), true),
+            };
+            on_response(onboard_state(vm, status, error));
+        }
+        Request::OnboardRevert => {
+            let (status, error) = match vm.onboard_revert() {
+                Ok(errors) if errors.is_empty() => {
+                    ("Slot reverted to its values from before editing.".to_string(), false)
+                }
+                Ok(errors) => (summarize_failures("Reverted", &errors), true),
+                Err(e) => (format!("Revert failed: {e}"), true),
+            };
+            on_response(onboard_state(vm, status, error));
+        }
+        Request::OnboardCopyProfile(name) => {
+            let (status, error) = match vm.onboard_copy_from_profile(&name) {
+                Ok(errors) if errors.is_empty() => (format!("Copied '{name}' into this slot."), false),
+                Ok(errors) => (summarize_failures(&format!("Copied '{name}'"), &errors), true),
+                Err(e) => (format!("Copy failed: {e}"), true),
+            };
+            on_response(onboard_state(vm, status, error));
+        }
+        Request::OnboardExit { restore_previous } => {
+            let (status, error) = match vm.onboard_exit(restore_previous) {
+                Ok(()) => (String::new(), false),
+                Err(e) => (format!("Exit failed: {e}"), true),
+            };
+            on_response(onboard_state(vm, status, error));
+            // Leaving the flow (or a restore) may have moved the active
+            // profile/mode; refresh the Profiles page + header like an
+            // apply does, so nothing on screen is left stale.
+            on_response(Response::Rows { category: Category::Profiles, rows: vm.rows_for(Category::Profiles) });
             if let Ok(mut info) = vm.info() {
                 fill_classic_firmware(vm, &mut info);
                 on_response(Response::Info(info));
@@ -1345,7 +1457,138 @@ mod tests {
             Some(Category::Steering)
         );
         assert_eq!(request_category(&Request::ProfileSave("x".into())), Some(Category::Profiles));
+        assert_eq!(
+            request_category(&Request::OnboardBegin(1)),
+            Some(Category::Profiles),
+            "the whole onboard flow tracks as the Profiles page"
+        );
         assert_eq!(request_category(&Request::SetMode(Mode::Desktop)), None);
         assert_eq!(request_category(&Request::Discover), None);
+    }
+
+    // --- "Edit onboard slot" flow ---
+
+    fn onboard_vm() -> ViewModel<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "0");
+        fs.set("wheel_profile_names", "1: AC EVO\n2: GT7\n3: PROFILE 3\n4: PROFILE 4\n5: PROFILE 5");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_strength", "80");
+        fs.set("wheel_brake_force", "60"); // OnboardOnly: exercises begin()'s wheel_mode fixup
+        ViewModel::with_io(fs)
+    }
+
+    #[test]
+    fn onboard_begin_replies_with_the_active_slot_and_its_rows() {
+        let vm = onboard_vm();
+        let replies = responses(|on_response| handle(&vm, Request::OnboardBegin(3), on_response));
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            Response::Onboard { active, slot, rows, status, error, .. } => {
+                assert!(*active);
+                assert_eq!(*slot, 3);
+                assert!(!error, "status: {status}");
+                assert!(status.contains("motor"), "the safety warning must be prominent: {status}");
+                assert!(rows.iter().any(|r| r.attr == "wheel_range"));
+            }
+            _ => panic!("expected Onboard"),
+        }
+    }
+
+    #[test]
+    fn onboard_edit_writes_through_and_reports_the_fresh_rows() {
+        let vm = onboard_vm();
+        responses(|on_response| handle(&vm, Request::OnboardBegin(1), on_response));
+        let req = Request::OnboardEdit { attr: "wheel_strength".to_string(), input: WidgetInput::Slider(42) };
+        let replies = responses(|on_response| handle(&vm, req, on_response));
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            Response::Onboard { error, rows, .. } => {
+                assert!(!error);
+                let row = rows.iter().find(|r| r.attr == "wheel_strength").unwrap();
+                assert_eq!(row.value, Some(Value::Percent(42)));
+            }
+            _ => panic!("expected Onboard"),
+        }
+    }
+
+    #[test]
+    fn onboard_edit_reports_the_slot_changed_guard() {
+        let vm = onboard_vm();
+        responses(|on_response| handle(&vm, Request::OnboardBegin(2), on_response));
+        vm.device_read("wheel_profile").unwrap(); // sanity: readable before the drift
+        vm.edit("wheel_profile", WidgetInput::Slider(5)).unwrap(); // the wheel's own OLED, mid-flow
+        let req = Request::OnboardEdit { attr: "wheel_strength".to_string(), input: WidgetInput::Slider(42) };
+        let replies = responses(|on_response| handle(&vm, req, on_response));
+        match &replies[0] {
+            Response::Onboard { error, status, .. } => {
+                assert!(*error);
+                assert!(status.contains("slot 5"), "status: {status}");
+            }
+            _ => panic!("expected Onboard"),
+        }
+        assert_ne!(vm.device_read("wheel_strength").unwrap(), Value::Percent(42), "nothing was written");
+    }
+
+    #[test]
+    fn onboard_revert_restores_the_snapshot() {
+        let vm = onboard_vm();
+        responses(|on_response| handle(&vm, Request::OnboardBegin(1), on_response));
+        let edit = Request::OnboardEdit { attr: "wheel_range".to_string(), input: WidgetInput::Slider(360) };
+        responses(|on_response| handle(&vm, edit, on_response));
+        assert_eq!(vm.device_read("wheel_range").unwrap(), Value::Int(360));
+        let replies = responses(|on_response| handle(&vm, Request::OnboardRevert, on_response));
+        match &replies[0] {
+            Response::Onboard { error, status, .. } => {
+                assert!(!error);
+                assert!(status.contains("reverted"), "status: {status}");
+            }
+            _ => panic!("expected Onboard"),
+        }
+        assert_eq!(vm.device_read("wheel_range").unwrap(), Value::Int(900));
+    }
+
+    #[test]
+    fn onboard_copy_profile_maps_only_onboard_attrs_and_reports_failures() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-wheel-gui-worker-onboard-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("race.profile"),
+            "wheel_range=540\nwheel_sensitivity=70\nwheel_bogus=1\n",
+        )
+        .unwrap();
+
+        let mut vm = onboard_vm();
+        vm.set_profiles_dir(dir.clone());
+        responses(|on_response| handle(&vm, Request::OnboardBegin(1), on_response));
+        let replies =
+            responses(|on_response| handle(&vm, Request::OnboardCopyProfile("race".to_string()), on_response));
+        match &replies[0] {
+            Response::Onboard { error, status, .. } => {
+                assert!(!error, "status: {status}");
+                assert!(status.contains("Copied"), "status: {status}");
+            }
+            _ => panic!("expected Onboard"),
+        }
+        assert_eq!(vm.device_read("wheel_range").unwrap(), Value::Int(540));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn onboard_exit_closes_the_flow_and_refreshes_the_profiles_page() {
+        let vm = onboard_vm();
+        responses(|on_response| handle(&vm, Request::OnboardBegin(4), on_response));
+        let replies =
+            responses(|on_response| handle(&vm, Request::OnboardExit { restore_previous: true }, on_response));
+        assert!(matches!(&replies[0], Response::Onboard { active: false, .. }));
+        assert!(matches!(&replies[1], Response::Rows { category: Category::Profiles, .. }));
+        assert!(matches!(&replies[2], Response::Info(_)));
+        assert_eq!(vm.device_read("wheel_profile").unwrap(), Value::Int(0), "restored to desktop");
     }
 }

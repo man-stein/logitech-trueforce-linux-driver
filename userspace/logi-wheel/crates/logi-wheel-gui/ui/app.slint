@@ -7,6 +7,7 @@ import { SlotTextEditor, SlotNameRow } from "slot_text.slint";
 import { Setup, SetupGame, AddableGame } from "setup.slint";
 import { InfoPage, TestButton, TestAxis, TestCallout, TestPlanRow } from "info_page.slint";
 import { ComputerProfiles } from "computer_profiles.slint";
+import { OnboardSlotEditor } from "onboard_editor.slint";
 import { LedPreview } from "led_preview.slint";
 export { SettingRow } from "widgets.slint";
 export { SetupGame, AddableGame } from "setup.slint";
@@ -206,7 +207,40 @@ export component App inherits Window {
     // works against its own settings. A DD wheel only gets it in desktop
     // mode (onboard mode shows its own slot picker + rename rows instead,
     // via `compose-profiles` on the Rust side).
-    property <bool> show-computer-profiles: selected-category == profiles-index && (classic-wheel || !mode-onboard);
+    property <bool> show-computer-profiles: selected-category == profiles-index && (classic-wheel || !mode-onboard) && !root.onboard-flow-open;
+
+    // "Edit onboard slot" flow (see `logi_wheel_core::onboard`): authors one
+    // of the wheel's five onboard slots directly, distinct from the
+    // computer-side store above. `onboard-flow-open` is pure UI state (set
+    // true by the "Edit onboard slot..." button, no device touched yet) and
+    // takes priority over both the computer-profiles panel and the plain
+    // onboard-mode settings list, since picking a slot inside the flow
+    // switches the wheel to onboard mode too - without this override the
+    // page would otherwise flip to the wheel's own slot-picker rows out
+    // from under the flow. `onboard-active`/`onboard-slot`/`onboard-rows`
+    // etc. are the flow's live state once a slot has actually been picked
+    // (`Response::Onboard`); false/0/empty before that and after `onboard-
+    // exit` closes it.
+    in-out property <bool> onboard-flow-open: false;
+    in property <bool> onboard-active: false;
+    in property <int> onboard-slot: 0;
+    in property <string> onboard-slot-name: "";
+    // Bumped on every `Response::Onboard`; forces the slot-name field to
+    // re-sync even after the user has typed in it (see `OnboardSlotEditor`
+    // and its `LineEdit`'s own `rev` comment for why a plain `text:`
+    // binding is not enough).
+    in property <int> onboard-slot-name-revision: 0;
+    in property <[SettingRow]> onboard-rows: [];
+    in property <[string]> onboard-row-groups: [];
+    in property <string> onboard-status: "";
+    in property <bool> onboard-status-error: false;
+    callback onboard-pick-slot(int);
+    callback onboard-edit-slider(string, int);
+    callback onboard-edit-switch(string, bool);
+    callback onboard-set-name(string);
+    callback onboard-copy-profile(string);
+    callback onboard-revert();
+    callback onboard-exit(bool);
 
     // LIGHTSYNC page extras: the sidebar index of the Leds category (set
     // once from Rust; -1 until then, same guard as `setup-index`) and the
@@ -579,6 +613,16 @@ export component App inherits Window {
                         switch-mode() => { root.toggle-mode(); }
                     }
 
+                    // Opens the "Edit onboard slot" flow: a G923 has no
+                    // onboard slots at all, so this never shows for one.
+                    if !root.classic-wheel: HorizontalLayout {
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Edit onboard slot...";
+                            clicked => { root.onboard-flow-open = true; }
+                        }
+                    }
+
                     ComputerProfiles {
                         vertical-stretch: 1;
                         profiles: root.computer-profiles;
@@ -626,7 +670,32 @@ export component App inherits Window {
                     }
                 }
 
-                if root.selected-category != root.setup-index && root.selected-category != root.info-index && root.selected-category != root.leds-index && !root.no-wheel && !root.show-computer-profiles: SettingsList {
+                // The "Edit onboard slot" flow's own panel: takes over the
+                // Profiles page for as long as `onboard-flow-open` is set,
+                // regardless of desktop/onboard mode (picking a slot flips
+                // the wheel to onboard mode mid-flow, which must not bounce
+                // the page onto the plain slot-picker rows below).
+                if root.selected-category == root.profiles-index && !root.no-wheel && root.onboard-flow-open: OnboardSlotEditor {
+                    vertical-stretch: 1;
+                    active: root.onboard-active;
+                    slot: root.onboard-slot;
+                    slot-name: root.onboard-slot-name;
+                    slot-name-revision: root.onboard-slot-name-revision;
+                    rows: root.onboard-rows;
+                    row-groups: root.onboard-row-groups;
+                    status: root.onboard-status;
+                    status-error: root.onboard-status-error;
+                    computer-profiles: root.computer-profiles;
+                    pick-slot(n) => { root.onboard-pick-slot(n); }
+                    edit-slider(attr, v) => { root.onboard-edit-slider(attr, v); }
+                    edit-switch(attr, v) => { root.onboard-edit-switch(attr, v); }
+                    set-name(name) => { root.onboard-set-name(name); }
+                    copy-profile(name) => { root.onboard-copy-profile(name); }
+                    revert() => { root.onboard-revert(); }
+                    exit(restore) => { root.onboard-exit(restore); }
+                }
+
+                if root.selected-category != root.setup-index && root.selected-category != root.info-index && root.selected-category != root.leds-index && !root.no-wheel && !root.show-computer-profiles && !root.onboard-flow-open: SettingsList {
                     // Claim all the vertical space left under the category
                     // title so the list (and its background/scrollbar) reaches
                     // the bottom of the window. Without this the ListView only

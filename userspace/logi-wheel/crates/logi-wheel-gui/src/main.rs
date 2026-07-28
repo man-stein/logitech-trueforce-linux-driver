@@ -1110,6 +1110,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // `curve_editor` and `rgb_editor` (see `SlotTextEditorState`'s own doc
     // comment).
     let slot_text_editor: Arc<Mutex<Option<SlotTextEditorState>>> = Arc::new(Mutex::new(None));
+    // A monotonic counter bumped on every `Response::Onboard`, the same
+    // "sever on user edit" workaround `SettingRow.revision` uses (see its
+    // doc comment in `ui/widgets.slint`): the onboard slot name field is a
+    // plain `LineEdit`, which stops tracking its `text:` binding the moment
+    // the user types in it, so a revert/rename/slot-switch reply needs an
+    // explicit nudge to push the device's authoritative name back in.
+    let onboard_name_rev: Arc<Mutex<i32>> = Arc::new(Mutex::new(0));
 
     let worker = {
         let app_weak = app.as_weak();
@@ -1121,6 +1128,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let shaping_toggles = shaping_toggles.clone();
         let last_rows = last_rows.clone();
         let visible_categories = visible_categories.clone();
+        let onboard_name_rev = onboard_name_rev.clone();
         Worker::spawn(move |response| {
             let app_weak = app_weak.clone();
             let current_category = current_category.clone();
@@ -1131,6 +1139,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let shaping_toggles = shaping_toggles.clone();
             let last_rows = last_rows.clone();
             let visible_categories = visible_categories.clone();
+            let onboard_name_rev = onboard_name_rev.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(app) = app_weak.upgrade() else { return };
                 match response {
@@ -1363,6 +1372,28 @@ fn main() -> Result<(), slint::PlatformError> {
                         app.set_computer_profiles(slint::ModelRc::new(slint::VecModel::from(items)));
                         app.set_profiles_status(status.into());
                         app.set_profiles_status_error(error);
+                    }
+                    Response::Onboard { active, slot, slot_name, rows, status, error } => {
+                        let items: Vec<SettingRow> = rows.iter().map(bridge::to_setting_row).collect();
+                        app.set_onboard_active(active);
+                        app.set_onboard_slot(i32::from(slot));
+                        app.set_onboard_slot_name(slot_name.into());
+                        // Unconditional bump (not just "when the name
+                        // changed"): a revert can restore the exact text
+                        // the user had already typed over, which needs the
+                        // same forced resync as any other value.
+                        let rev = {
+                            let mut r = onboard_name_rev.lock().unwrap();
+                            *r = r.wrapping_add(1);
+                            *r
+                        };
+                        app.set_onboard_slot_name_revision(rev);
+                        app.set_onboard_row_groups(slint::ModelRc::new(slint::VecModel::from(
+                            bridge::row_groups(&items),
+                        )));
+                        app.set_onboard_rows(slint::ModelRc::new(slint::VecModel::from(items)));
+                        app.set_onboard_status(status.into());
+                        app.set_onboard_status_error(error);
                     }
                 }
             });
@@ -2029,6 +2060,68 @@ fn main() -> Result<(), slint::PlatformError> {
         let worker = worker.clone();
         app.on_profile_delete(move |name| {
             worker.request(Request::ProfileDelete(name.to_string()));
+        });
+    }
+
+    // The "Edit onboard slot" flow: every write routes through
+    // `ViewModel::onboard_*` (see `worker::Request::Onboard*`), which
+    // re-verifies `wheel_profile` before each one, and replies with a
+    // fresh `Response::Onboard` snapshot the panel renders from - there is
+    // no local row cache to keep in sync here, unlike the main settings
+    // list.
+    {
+        let worker = worker.clone();
+        app.on_onboard_pick_slot(move |slot| {
+            worker.request(Request::OnboardBegin(slot.clamp(1, 5) as u8));
+        });
+    }
+    {
+        let worker = worker.clone();
+        app.on_onboard_edit_slider(move |attr, value| {
+            worker.request(Request::OnboardEdit {
+                attr: attr.to_string(),
+                input: WidgetInput::Slider(i64::from(value)),
+            });
+        });
+    }
+    {
+        let worker = worker.clone();
+        app.on_onboard_edit_switch(move |attr, value| {
+            worker.request(Request::OnboardEdit { attr: attr.to_string(), input: WidgetInput::Switch(value) });
+        });
+    }
+    {
+        let worker = worker.clone();
+        app.on_onboard_set_name(move |name| {
+            worker.request(Request::OnboardSetName(name.to_string()));
+        });
+    }
+    {
+        let worker = worker.clone();
+        app.on_onboard_copy_profile(move |name| {
+            if !name.is_empty() {
+                worker.request(Request::OnboardCopyProfile(name.to_string()));
+            }
+        });
+    }
+    {
+        let worker = worker.clone();
+        app.on_onboard_revert(move || {
+            worker.request(Request::OnboardRevert);
+        });
+    }
+    {
+        let worker = worker.clone();
+        let app_weak = app.as_weak();
+        app.on_onboard_exit(move |restore_previous| {
+            worker.request(Request::OnboardExit { restore_previous });
+            // Close the panel immediately rather than waiting on the
+            // round trip: the flow is over from the user's perspective the
+            // moment they chose how to leave it, and the exit request
+            // itself cannot fail in a way that should reopen it.
+            if let Some(app) = app_weak.upgrade() {
+                app.set_onboard_flow_open(false);
+            }
         });
     }
 

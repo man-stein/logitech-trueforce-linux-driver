@@ -13,9 +13,11 @@
 //! whole module.
 
 use logi_wheel_core::curve::Curve;
+use logi_wheel_core::onboard::{self, OnboardEditor, OnboardError};
 use logi_wheel_core::profiles;
 use logi_wheel_core::sysfs::SysfsIo;
 use logi_wheel_core::{Category, Color, Device, DeviceInfo, Error, Kind, Mode, ModeReq, Value};
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 /// Raw input from a widget, converted to a `Value` per the target setting's
@@ -70,6 +72,10 @@ pub struct ViewModel<S: SysfsIo> {
     /// Where the computer-side profile store lives; resolved once from the
     /// environment (`profiles::default_dir`), overridable for tests.
     profiles_dir: PathBuf,
+    /// The in-progress "edit onboard slot" flow, `None` outside it. Interior
+    /// mutability because the worker's `handle` only ever borrows a
+    /// `ViewModel` shared (see `worker::handle`'s `vm: &ViewModel<S>`).
+    onboard: RefCell<Option<OnboardEditor>>,
 }
 
 impl<S: SysfsIo> ViewModel<S> {
@@ -82,7 +88,7 @@ impl<S: SysfsIo> ViewModel<S> {
     }
 
     pub fn new(device: Device<S>) -> ViewModel<S> {
-        ViewModel { device, profiles_dir: profiles::default_dir() }
+        ViewModel { device, profiles_dir: profiles::default_dir(), onboard: RefCell::new(None) }
     }
 
     /// Point the computer-side profile store somewhere else (tests only;
@@ -237,6 +243,123 @@ impl<S: SysfsIo> ViewModel<S> {
     /// restore) and by tests.
     pub fn device_read(&self, attr: &str) -> Result<Value, Error> {
         self.device.read(attr)
+    }
+
+    // --- "Edit onboard slot" flow: see `logi_wheel_core::onboard` ---
+
+    /// Whether the flow is active (a slot has been picked and is being
+    /// edited). The Profiles page swaps to `onboard_rows` while this is
+    /// true.
+    pub fn onboard_active(&self) -> bool {
+        self.onboard.borrow().is_some()
+    }
+
+    /// The slot being authored (1-5), or 0 outside the flow.
+    pub fn onboard_slot(&self) -> u8 {
+        self.onboard.borrow().as_ref().map_or(0, OnboardEditor::slot)
+    }
+
+    /// The 5 onboard slots' names (index 0 = slot 1); a blank entry where
+    /// the wheel has none or the read failed. Not wired to a picker label
+    /// yet (the GUI's slot picker shows plain "Slot N" buttons, matching
+    /// `onboard_begin`'s own numbering); kept for a future enhancement and
+    /// exercised directly by tests in the meantime.
+    #[allow(dead_code)]
+    pub fn onboard_slot_names(&self) -> Vec<String> {
+        match self.device.read("wheel_profile_names") {
+            Ok(Value::SlotNames(names)) => names,
+            _ => vec![String::new(); 5],
+        }
+    }
+
+    /// The active slot's own name, or "" outside the flow.
+    pub fn onboard_slot_name(&self) -> String {
+        let slot = self.onboard_slot();
+        if slot == 0 {
+            return String::new();
+        }
+        onboard::slot_name(&self.device, slot).unwrap_or_default()
+    }
+
+    /// Begin authoring `slot`: switch+verify, snapshot. See
+    /// `OnboardEditor::begin`. Replaces any flow already in progress.
+    pub fn onboard_begin(&self, slot: u8) -> Result<(), OnboardError> {
+        let editor = OnboardEditor::begin(&self.device, slot)?;
+        *self.onboard.borrow_mut() = Some(editor);
+        Ok(())
+    }
+
+    /// Rows for the active slot: every `onboard::ONBOARD_ATTRS` entry this
+    /// wheel exposes, read live (fresh after `onboard_begin`'s switch).
+    /// Empty outside the flow.
+    pub fn onboard_rows(&self) -> Vec<Row> {
+        if self.onboard.borrow().is_none() {
+            return Vec::new();
+        }
+        self.device
+            .settings()
+            .iter()
+            .filter(|spec| onboard::ONBOARD_ATTRS.contains(&spec.attr))
+            .map(|spec| {
+                let (available, value) = match self.device.read_supported(spec.attr) {
+                    Ok(Some(v)) => (true, Some(v)),
+                    Ok(None) => (false, None),
+                    Err(_) => (true, None),
+                };
+                Row {
+                    attr: spec.attr,
+                    label: spec.label,
+                    help: spec.help,
+                    kind: &spec.kind,
+                    value,
+                    available,
+                    // The flow only ever runs with the wheel in onboard
+                    // mode on the slot it just switched to; every editable
+                    // attr here is `ModeReq::Any` or `OnboardOnly`
+                    // (`wheel_brake_force`), both satisfied by construction.
+                    mode_ok: true,
+                    mode_req: spec.mode_req,
+                }
+            })
+            .collect()
+    }
+
+    /// Write one attr to the active slot; see `OnboardEditor::set`.
+    pub fn onboard_set(&self, attr: &str, input: WidgetInput) -> Result<(), OnboardError> {
+        let guard = self.onboard.borrow();
+        let editor = guard.as_ref().ok_or(Error::Invalid)?;
+        let spec = Device::<S>::spec(attr).ok_or(Error::Invalid)?;
+        let value = to_value(spec.kind, input)?;
+        editor.set(&self.device, attr, &value)
+    }
+
+    /// Rename the active slot; see `OnboardEditor::set_name`.
+    pub fn onboard_set_name(&self, name: &str) -> Result<(), OnboardError> {
+        let guard = self.onboard.borrow();
+        let editor = guard.as_ref().ok_or(Error::Invalid)?;
+        editor.set_name(&self.device, name)
+    }
+
+    /// Replay the snapshot taken at `onboard_begin`; see
+    /// `OnboardEditor::revert`.
+    pub fn onboard_revert(&self) -> Result<Vec<(String, String)>, OnboardError> {
+        let guard = self.onboard.borrow();
+        let editor = guard.as_ref().ok_or(Error::Invalid)?;
+        editor.revert(&self.device)
+    }
+
+    /// Copy saved computer profile `name` into the active slot; see
+    /// `OnboardEditor::copy_from_computer_profile`.
+    pub fn onboard_copy_from_profile(&self, name: &str) -> Result<Vec<(String, String)>, OnboardError> {
+        let guard = self.onboard.borrow();
+        let editor = guard.as_ref().ok_or(Error::Invalid)?;
+        editor.copy_from_computer_profile(&self.device, &self.profiles_dir, name)
+    }
+
+    /// Leave the flow; see `OnboardEditor::finish`.
+    pub fn onboard_exit(&self, restore_previous: bool) -> Result<(), OnboardError> {
+        let Some(editor) = self.onboard.borrow_mut().take() else { return Ok(()) };
+        editor.finish(&self.device, restore_previous)
     }
 }
 
@@ -537,5 +660,136 @@ mod tests {
         let vm = ViewModel::with_io(fs);
         let result = vm.edit("wheel_texture_route", WidgetInput::Slider(1));
         assert!(result.is_err(), "expected Err for mismatched widget type");
+    }
+
+    // --- "Edit onboard slot" flow ---
+
+    fn onboard_vm() -> ViewModel<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "0");
+        fs.set("wheel_profile_names", "1: AC EVO\n2: GT7\n3: PROFILE 3\n4: PROFILE 4\n5: PROFILE 5");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_strength", "80");
+        fs.set("wheel_led_effect", "1");
+        fs.set("wheel_brake_force", "60"); // OnboardOnly: exercises begin()'s wheel_mode fixup
+        ViewModel::with_io(fs)
+    }
+
+    #[test]
+    fn onboard_begin_activates_the_slot_and_populates_rows() {
+        let vm = onboard_vm();
+        assert!(!vm.onboard_active());
+        vm.onboard_begin(3).unwrap();
+        assert!(vm.onboard_active());
+        assert_eq!(vm.onboard_slot(), 3);
+        assert_eq!(vm.device_read("wheel_profile").unwrap(), Value::Int(3));
+        let rows = vm.onboard_rows();
+        assert!(rows.iter().any(|r| r.attr == "wheel_range"));
+        assert!(rows.iter().any(|r| r.attr == "wheel_strength"));
+        // Never a full-registry row that is not part of an onboard slot.
+        assert!(!rows.iter().any(|r| r.attr == "wheel_sensitivity"));
+    }
+
+    #[test]
+    fn onboard_rows_are_empty_outside_the_flow() {
+        assert!(onboard_vm().onboard_rows().is_empty());
+    }
+
+    #[test]
+    fn onboard_set_writes_the_attr() {
+        let vm = onboard_vm();
+        vm.onboard_begin(2).unwrap();
+        vm.onboard_set("wheel_strength", WidgetInput::Slider(42)).unwrap();
+        assert_eq!(vm.device_read("wheel_strength").unwrap(), Value::Percent(42));
+    }
+
+    #[test]
+    fn onboard_set_refuses_once_the_slot_changed_underneath_it() {
+        // `Rc<FakeSysfs>` so the test keeps its own handle to mutate the
+        // fake wheel behind the `ViewModel`'s back (what the wheel's own
+        // OLED profile switch looks like from here).
+        let fs = std::rc::Rc::new(FakeSysfs::new());
+        fs.set("wheel_mode", "desktop");
+        fs.set("wheel_profile", "0");
+        fs.set("wheel_range", "900");
+        fs.set("wheel_strength", "80");
+        let vm = ViewModel::with_io(fs.clone());
+        vm.onboard_begin(2).unwrap();
+        fs.set("wheel_profile", "5"); // simulate an OLED switch mid-flow
+        let err = vm.onboard_set("wheel_strength", WidgetInput::Slider(42)).unwrap_err();
+        assert!(matches!(err, OnboardError::SlotChanged { expected: 2, actual: 5 }));
+        assert_ne!(fs.read("wheel_strength").unwrap().trim(), "42", "nothing was written");
+    }
+
+    #[test]
+    fn onboard_set_name_renames_the_active_slot() {
+        let vm = onboard_vm();
+        vm.onboard_begin(3).unwrap();
+        vm.onboard_set_name("Race nite").unwrap();
+        assert_eq!(vm.onboard_slot_name(), "Race nite");
+    }
+
+    #[test]
+    fn onboard_revert_replays_the_snapshot() {
+        let vm = onboard_vm();
+        vm.onboard_begin(1).unwrap();
+        vm.onboard_set("wheel_range", WidgetInput::Slider(360)).unwrap();
+        let errors = vm.onboard_revert().unwrap();
+        assert_eq!(errors, Vec::new(), "{errors:?}");
+        assert_eq!(vm.device_read("wheel_range").unwrap(), Value::Int(900));
+    }
+
+    #[test]
+    fn onboard_copy_from_profile_maps_only_onboard_attrs() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-wheel-gui-onboard-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("race.profile"),
+            "# logi-wheel profile\nwheel_range=540\nwheel_sensitivity=70\nwheel_led_effect=3\n",
+        )
+        .unwrap();
+
+        let mut vm = onboard_vm();
+        vm.set_profiles_dir(dir.clone());
+        vm.onboard_begin(1).unwrap();
+        let errors = vm.onboard_copy_from_profile("race").unwrap();
+        assert_eq!(errors, Vec::new(), "{errors:?}");
+        assert_eq!(vm.device_read("wheel_range").unwrap(), Value::Int(540));
+        assert_eq!(vm.device_read("wheel_led_effect").unwrap(), Value::Int(3));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn onboard_exit_without_restore_keeps_the_slot_active_and_closes_the_flow() {
+        let vm = onboard_vm();
+        vm.onboard_begin(4).unwrap();
+        vm.onboard_exit(false).unwrap();
+        assert!(!vm.onboard_active());
+        assert_eq!(vm.device_read("wheel_profile").unwrap(), Value::Int(4));
+    }
+
+    #[test]
+    fn onboard_exit_with_restore_switches_back() {
+        let vm = onboard_vm();
+        vm.onboard_begin(4).unwrap();
+        vm.onboard_exit(true).unwrap();
+        assert!(!vm.onboard_active());
+        assert_eq!(vm.device_read("wheel_profile").unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn onboard_actions_outside_the_flow_error_instead_of_panicking() {
+        let vm = onboard_vm();
+        assert!(vm.onboard_set("wheel_strength", WidgetInput::Slider(1)).is_err());
+        assert!(vm.onboard_set_name("x").is_err());
+        assert!(vm.onboard_revert().is_err());
+        assert!(vm.onboard_copy_from_profile("nope").is_err());
+        vm.onboard_exit(true).unwrap(); // a no-op, not an error
     }
 }
