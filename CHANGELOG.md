@@ -5,6 +5,61 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.21.0 - 2026-07-28
+
+### Fixed
+
+- **Pedal curves, sensitivity and deadzones never did anything.** They were
+  written to the pedal unit, which accepts a curve and reports it back as
+  loaded but never applies it to the axis it sends to the PC. They now go to
+  the wheel base, where they work. If you set a pedal curve before this
+  release and felt no difference, this is why. Proven on an RS50 with a step
+  curve, which an applied curve makes impossible to sweep through: on the
+  pedal unit the axis swept straight through it, on the base it snapped to
+  the step exactly.
+- **A G923 could be left undetectable, with `lsusb` hanging.** The rule that
+  hands the wheel to this driver could hand it back to the in-tree driver
+  mid-handover, which then probed a device already in use and wedged it.
+  Reported on a G923 Xbox edition (issue #27).
+- **The Fedora/COPR package would not install** - it required a package
+  called `wayland`, which is the name of the source package, not anything
+  installable. It now requires the libraries that actually exist.
+- **Module load order was backwards.** The config asked for the in-tree
+  Logitech drivers to load first, which is precisely what makes them claim
+  the wheel before this driver can.
+- **Settings for hardware you do not have were offered as if you did.** The
+  handbrake controls appeared on wheels with no accessory attached, and
+  after the pedal fix the pedal controls appeared on wheels with no pedals.
+- **Unplugging or plugging in the RS Shifter and Handbrake is now noticed.**
+  Presence was decided once at start-up, so the accessory's settings stayed
+  hidden until you reloaded the driver.
+- **The onboard slot editor offered to "restore slot 0"**, which is not a
+  slot - it is what the wheel reports in desktop mode, where the flow is
+  entered from. It now says it will go back to desktop mode.
+
+### Added
+
+- **The RS Shifter and Handbrake's last two settings**, `wheel_shift_actuation`
+  and `wheel_handbrake_actuation` (1-100), matching G HUB's Shift Sensitivity
+  and Handbrake Actuation sliders. Both appear in the desktop and terminal
+  apps. Note that G HUB's own handbrake value overflows above about 69% and
+  wraps to a point shorter than 50%; this driver writes the correct value, so
+  above that point the two will not agree.
+
+### Changed
+
+- Pedal shaping now targets the wheel base's axes rather than the pedal
+  unit's. No attribute names changed, and nothing needs reconfiguring.
+
+### Documentation
+
+- The protocol specification and sysfs reference corrected: pedal curves
+  apply on the base, a HID++ sub-device index belongs to a physical port
+  rather than a device type, and feature `0x80B1` is documented.
+- The README now explains that `PROTON_ENABLE_HIDRAW=1` makes some games
+  read the pedals inverted (rest reads as fully pressed), and that the
+  game's own invert-axis option is the fix.
+
 ## 0.20.1 - 2026-07-28
 
 - **Pedal settings worked only when no accessory was attached.** The driver

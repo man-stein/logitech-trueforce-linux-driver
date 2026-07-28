@@ -189,6 +189,12 @@ curve editor.
 
 ![logi-wheel-gui curve editor](docs/images/logi-wheel-curve-editor.png)
 
+The **RS Shifter & Handbrake** is supported too: plug it into the wheel base
+and its settings appear on their own, including the shift and handbrake
+trigger points. Unplug it and they go away again.
+
+![logi-wheel-gui RS Shifter and Handbrake settings](docs/images/logi-wheel-accessory.png)
+
 The Info / Testing page doubles as a live input tester (does this button
 reach the computer?), and the Setup page manages the game helpers:
 
