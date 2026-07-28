@@ -4442,6 +4442,14 @@ static const u8 hidpp_dd_pedal_dev_candidates[] = {
 #define HIDPP_DD_PROBE_TIMEOUT msecs_to_jiffies(300)
 
 /*
+ * Minimum gap between accessory presence re-checks (see
+ * hidpp_dd_rescan_accessory). Long enough that a frontend polling
+ * wheel_accessory cannot flood the wheel with probe traffic, short enough
+ * that plugging the accessory in shows up while the user is still looking.
+ */
+#define HIDPP_DD_ACCESSORY_RESCAN_INTERVAL (2 * HZ)
+
+/*
  * RS50 HID descriptor declares buttons 1-92 but only ~20 are physically present.
  * Buttons >= 81 (0x51) overflow past valid Linux input codes (max 767), causing
  * "Invalid code" kernel messages. We ignore these phantom buttons during input
@@ -4712,6 +4720,9 @@ struct hidpp_dd_ff_data {
 	u8 idx_shifter_curve;		/* Feature index for 0x80A4 on the accessory (dev shifter_dev_idx, axis 0 = handbrake) */
 	u8 idx_shifter_banded;		/* Feature index for 0x80B1 BANDED_AXIS on the accessory */
 	u8 idx_shifter_mode;		/* Feature index for 0x1B30 DEVICE_MODE on the accessory */
+	struct work_struct accessory_rescan_work; /* re-checks accessory presence off the sysfs read path */
+	unsigned long accessory_rescan_next;	/* jiffies before which no further rescan is queued */
+	u8 accessory_scan_cursor;	/* next candidate index a presence rescan will try */
 	u8 idx_brightness;		/* Feature index for LED brightness */
 	u8 idx_lightsync;		/* Feature index for LIGHTSYNC effects */
 	u8 idx_rgb_config;		/* Feature index for RGB Zone Config */
@@ -7104,6 +7115,14 @@ static void hidpp_dd_discover_settings_features(struct hidpp_dd_ff_data *ff)
 	ff->idx_shifter_banded = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->idx_shifter_mode = HIDPP_DD_FEATURE_NOT_FOUND;
 	ff->accessory_name[0] = '\0';
+	/*
+	 * Explicitly now, not the kzalloc'd 0: jiffies starts at INITIAL_JIFFIES
+	 * (a large value that reads as negative in the signed comparison
+	 * time_after_eq does), so a zero deadline would suppress every rescan
+	 * for the first few minutes of uptime.
+	 */
+	ff->accessory_rescan_next = jiffies;
+	ff->accessory_scan_cursor = 0;
 	/*
 	 * Re-discovery (e.g. after a replug) drops the wheel's uploaded curves
 	 * back to built-in, so the generator caches must reset to match: 50 =
@@ -12089,6 +12108,121 @@ static DEVICE_ATTR(wheel_firmware, 0444, wheel_firmware_show, NULL);
  * sensitivity, handbrake actuation, handbrake sensitivity) are not wired
  * up yet: their wire protocol is uncaptured.
  */
+/*
+ * Re-check whether the RS Shifter & Handbrake is attached.
+ *
+ * Discovery runs once at probe, but the accessory plugs into the base's own
+ * USB-A port, so it can arrive or leave while the driver is loaded and the
+ * wheel never re-enumerates. Without this, a wheel that came up bare reports
+ * "none" for as long as the module stays loaded, and everything keyed on
+ * wheel_accessory stays wrong with it (hardware-verified 2026-07-28: plugging
+ * the accessory in changed nothing until a module reload).
+ *
+ * Runs on ff->wq, never in a reader's syscall: confirming an absence costs
+ * HIDPP_DD_PROBE_TIMEOUT per silent candidate, and turning that into a
+ * multi-second stall inside a sysfs read would be far worse than the beat of
+ * lag this costs instead. wheel_accessory_show reports the cached answer and
+ * queues this, so the value converges on the next read.
+ *
+ * Whether the firmware announces an arrival by itself is still unknown; that
+ * is what the hot-plug leg of the Windows G Hub capture is for. Until it is
+ * decoded, checking on demand is the only mechanism available.
+ */
+static void hidpp_dd_rescan_accessory(struct hidpp_dd_ff_data *ff)
+{
+	struct hidpp_device *hidpp = ff->hidpp;
+	struct hid_device *hid = hidpp->hid_dev;
+	unsigned int i;
+	u8 idx;
+
+	if (ff->shifter_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND) {
+		/*
+		 * Believed present, so one GetFeature on the index we already
+		 * know is enough to notice it has been unplugged: a sub-device
+		 * that is really there answers in about 2.5 ms.
+		 */
+		if (hidpp_root_get_feature_on_device_timeout(hidpp,
+					ff->shifter_dev_idx,
+					HIDPP_DD_PAGE_BANDED_AXIS, &idx,
+					HIDPP_DD_PROBE_TIMEOUT) == 0)
+			return;
+		/*
+		 * Retire the index first: wheel_accessory_show gates on it, so
+		 * clearing it before the name means a concurrent reader sees
+		 * "none" rather than a half-erased name.
+		 */
+		WRITE_ONCE(ff->shifter_dev_idx, HIDPP_DD_FEATURE_NOT_FOUND);
+		ff->idx_shifter_curve = HIDPP_DD_FEATURE_NOT_FOUND;
+		ff->idx_shifter_banded = HIDPP_DD_FEATURE_NOT_FOUND;
+		ff->idx_shifter_mode = HIDPP_DD_FEATURE_NOT_FOUND;
+		ff->accessory_name[0] = '\0';
+		dd_info(hid, "RS Shifter & Handbrake removed\n");
+		return;
+	}
+
+	/*
+	 * Believed absent: spend each pass on ONE candidate, round-robin,
+	 * classified exactly as discovery does.
+	 *
+	 * Sweeping the whole list every pass would be the obvious thing and the
+	 * wrong one: a silent candidate costs HIDPP_DD_PROBE_TIMEOUT, so a bare
+	 * wheel would sit under near-continuous probe traffic for as long as a
+	 * frontend keeps reading the attribute, and every other setting would
+	 * go sluggish behind it. One candidate per pass caps the cost at a
+	 * single timeout per interval; the full list still comes round within
+	 * seconds, which is quick enough to notice someone plugging the
+	 * accessory in.
+	 */
+	for (i = 0; i < ARRAY_SIZE(hidpp_dd_pedal_dev_candidates); i++) {
+		u8 cand = hidpp_dd_pedal_dev_candidates[ff->accessory_scan_cursor];
+		u8 cand_idx, axes, banded_idx;
+
+		ff->accessory_scan_cursor = (ff->accessory_scan_cursor + 1) %
+				ARRAY_SIZE(hidpp_dd_pedal_dev_candidates);
+		/* The pedal MCU is not a candidate; skipping costs nothing. */
+		if (cand == ff->pedal_dev_idx)
+			continue;
+		if (hidpp_root_get_feature_on_device_timeout(hidpp, cand,
+					HIDPP_DD_PAGE_RESPONSE_CURVE, &cand_idx,
+					HIDPP_DD_PROBE_TIMEOUT))
+			return;
+		if (hidpp_dd_pedal_axis_count(hidpp, cand, cand_idx, &axes))
+			return;
+		if (axes != HIDPP_DD_SHIFTER_AXIS_COUNT)
+			return;
+		if (hidpp_root_get_feature_on_device(hidpp, cand,
+						     HIDPP_DD_PAGE_BANDED_AXIS,
+						     &banded_idx))
+			return;
+		ff->idx_shifter_curve = cand_idx;
+		ff->idx_shifter_banded = banded_idx;
+		if (hidpp_root_get_feature_on_device(hidpp, cand,
+						     HIDPP_DD_PAGE_DEVICE_MODE,
+						     &ff->idx_shifter_mode))
+			ff->idx_shifter_mode = HIDPP_DD_FEATURE_NOT_FOUND;
+		hidpp_dd_query_accessory_name(ff, cand);
+		/*
+		 * Publish the index last, for the same reason removal clears it
+		 * first: it is what the reader gates on, so everything it will
+		 * then go on to read is already in place.
+		 */
+		WRITE_ONCE(ff->shifter_dev_idx, cand);
+		dd_info(hid, "RS Shifter & Handbrake at dev 0x%02x (curve idx 0x%02x, banded idx 0x%02x)\n",
+			cand, ff->idx_shifter_curve, ff->idx_shifter_banded);
+		return;
+	}
+}
+
+static void hidpp_dd_accessory_rescan_work(struct work_struct *work)
+{
+	struct hidpp_dd_ff_data *ff = container_of(work, struct hidpp_dd_ff_data,
+						   accessory_rescan_work);
+
+	if (atomic_read_acquire(&ff->stopping) || !atomic_read(&ff->initialized))
+		return;
+	hidpp_dd_rescan_accessory(ff);
+}
+
 static ssize_t wheel_accessory_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -12103,7 +12237,18 @@ static ssize_t wheel_accessory_show(struct device *dev,
 		return -ENODEV;
 	if (atomic_read_acquire(&ff->stopping))
 		return -ENODEV;
-	if (ff->shifter_dev_idx == HIDPP_DD_FEATURE_NOT_FOUND || !ff->accessory_name[0])
+	/*
+	 * Kick off a presence re-check for the NEXT reader, rate-limited so a
+	 * frontend redrawing its settings list cannot keep the wheel busy with
+	 * probe traffic. Queueing while one is already pending is a no-op.
+	 */
+	if (time_after_eq(jiffies, READ_ONCE(ff->accessory_rescan_next))) {
+		WRITE_ONCE(ff->accessory_rescan_next,
+			   jiffies + HIDPP_DD_ACCESSORY_RESCAN_INTERVAL);
+		queue_work(ff->wq, &ff->accessory_rescan_work);
+	}
+	if (READ_ONCE(ff->shifter_dev_idx) == HIDPP_DD_FEATURE_NOT_FOUND ||
+	    !ff->accessory_name[0])
 		return sysfs_emit(buf, "none\n");
 	return sysfs_emit(buf, "%s\n", ff->accessory_name);
 }
@@ -12592,6 +12737,7 @@ static int hidpp_dd_ff_init(struct hidpp_device *hidpp)
 	INIT_DELAYED_WORK(&ff->range_poll_work, hidpp_dd_ff_range_poll_work);
 	INIT_DELAYED_WORK(&ff->rev_work, hidpp_dd_rev_work_handler);
 	INIT_WORK(&ff->settings_refresh_work, hidpp_dd_ff_settings_refresh_work);
+	INIT_WORK(&ff->accessory_rescan_work, hidpp_dd_accessory_rescan_work);
 	INIT_WORK(&ff->tf_init_work, hidpp_dd_tf_init_work_handler);
 
 	/* Store for cleanup in hidpp_remove() */
@@ -12736,6 +12882,7 @@ static void hidpp_dd_ff_destroy(struct hidpp_device *hidpp)
 	 */
 	cancel_delayed_work_sync(&ff->rev_work);
 	cancel_work_sync(&ff->settings_refresh_work);
+	cancel_work_sync(&ff->accessory_rescan_work);
 	cancel_work_sync(&ff->tf_init_work);
 
 	dd_dbg(hid, "Cancelling effect timer\n");
