@@ -1002,10 +1002,11 @@ no driver change. By its mode switch:
 | Digital handbrake | pull past point | `BTN_THUMB2` (face button) |
 | Analog handbrake | pull | `ABS_Z` axis |
 
-Use `wheel_accessory` (above) to check whether the accessory is attached.
-Its own settings surface (the three G HUB sliders that configure shift and
-handbrake actuation points) is discovered internally but not yet
-implemented as sysfs attributes; see that attribute's description for why.
+Use `wheel_accessory` (above) to check whether the accessory is attached, and
+`wheel_accessory_mode` for which of its three jobs it is currently doing. All
+three of its G HUB settings are implemented: `wheel_shift_actuation`,
+`wheel_handbrake_actuation` and `wheel_handbrake_sensitivity` (with
+`wheel_handbrake_curve`).
 
 ---
 
