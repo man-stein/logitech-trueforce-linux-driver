@@ -875,7 +875,14 @@ impl<S: SysfsIo> App<S> {
         });
         rows.push(Row {
             attr: ONBOARD_EXIT_RESTORE_ATTR.to_string(),
-            label: format!("Done, restore slot {}", editor.previous_slot()),
+            // Slot 0 is not a slot: it is what wheel_profile reads in desktop
+            // mode, which is where this flow is entered from, so "restore slot
+            // 0" is what the row said for the common case. Name the state the
+            // user is actually going back to.
+            label: match editor.previous_slot() {
+                0 => "Done, go back to desktop mode".to_string(),
+                n => format!("Done, go back to slot {n}"),
+            },
             available: editor.previous_slot() != editor.slot(),
             value: Ok(Value::Text("Enter leaves the flow and switches back".into())),
         });
@@ -4675,6 +4682,29 @@ mod tests {
         assert!(attrs.contains(&ONBOARD_EXIT_ATTR));
         assert!(attrs.contains(&ONBOARD_EXIT_RESTORE_ATTR));
         assert!(a.status.contains("motor"), "the safety warning must be prominent: {}", a.status);
+    }
+
+    #[test]
+    fn the_exit_row_names_desktop_mode_rather_than_slot_zero() {
+        // The flow is entered from the desktop Profiles page, where
+        // wheel_profile reads 0. 0 is not a slot, so the row must not offer to
+        // "restore slot 0" (which is what it said on hardware).
+        let (_fs, mut a) = onboard_app();
+        enter_onboard_slot(&mut a, 4);
+        let row = a.rows.iter().find(|r| r.attr == ONBOARD_EXIT_RESTORE_ATTR).unwrap();
+        assert!(!row.label.contains("slot 0"), "{}", row.label);
+        assert_eq!(row.label, "Done, go back to desktop mode");
+    }
+
+    #[test]
+    fn the_exit_row_names_the_slot_it_will_go_back_to() {
+        // Entered while a slot was already active, the row names that slot.
+        let (fs, mut a) = onboard_app();
+        fs.set("wheel_profile", "2");
+        a.reload();
+        enter_onboard_slot(&mut a, 4);
+        let row = a.rows.iter().find(|r| r.attr == ONBOARD_EXIT_RESTORE_ATTR).unwrap();
+        assert_eq!(row.label, "Done, go back to slot 2");
     }
 
     #[test]
