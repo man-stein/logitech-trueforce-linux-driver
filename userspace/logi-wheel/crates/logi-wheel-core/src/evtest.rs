@@ -158,7 +158,7 @@ pub fn g923_button_label(code: u16) -> Option<&'static str> {
 }
 
 /// One tintable control on the wheel artwork
-/// (`ui/assets/rs50-wheel.svg`, a 420x300 viewBox): the control's centre and
+/// (`ui/assets/rs50-wheel.svg`, a 400x400 viewBox): the control's centre and
 /// size as fractions of the image, and the evdev button codes that light it
 /// up. A front-end scales these to whatever size it draws the artwork at.
 ///
@@ -187,58 +187,58 @@ pub struct CalloutBox {
     pub codes: &'static [u16],
 }
 
-/// Callout sizes, as fractions of the artwork's 420x300 viewBox.
+/// Callout sizes, as fractions of the artwork's 400x400 viewBox.
 ///
 /// These sit on the controls themselves. The overlay was originally built
 /// against an annotated vendor diagram and pointed at its numbered label
 /// boxes; the artwork is now our own drawing, which has no such labels, so
 /// tinting the control that was pressed is both the only option and the
 /// clearer one.
-const BOX_W: f32 = 0.0714;   // 30px: a face button
-const BOX_H: f32 = 0.1000;   // 30px
-const KNOB_W: f32 = 0.1476;  // 62px: a barrel encoder
-const KNOB_H: f32 = 0.1400;  // 42px
-const PAD_W: f32 = 0.1000;   // 42px: a shift-paddle tab
-const PAD_H: f32 = 0.1300;   // 39px
+const BOX_W: f32 = 0.0700;   // 28px: a face button
+const BOX_H: f32 = 0.0700;   // 28px
+const KNOB_W: f32 = 0.1200;  // 48px: a knurled encoder
+const KNOB_H: f32 = 0.0850;  // 34px
+const PAD_W: f32 = 0.0800;   // 32px: a shift paddle
+const PAD_H: f32 = 0.1400;   // 56px
 
 /// Every control the overlay can tint; see [`CalloutBox`].
 pub const CALLOUT_BOXES: &[CalloutBox] = &[
     // X.
-    CalloutBox { cx: 0.2476, cy: 0.2467, w: BOX_W, h: BOX_H, codes: &[0x121] },
+    CalloutBox { cx: 0.2500, cy: 0.3000, w: BOX_W, h: BOX_H, codes: &[0x121] },
     // Y.
-    CalloutBox { cx: 0.3310, cy: 0.2000, w: BOX_W, h: BOX_H, codes: &[0x123] },
+    CalloutBox { cx: 0.3200, cy: 0.3000, w: BOX_W, h: BOX_H, codes: &[0x123] },
     // A.
-    CalloutBox { cx: 0.6690, cy: 0.2000, w: BOX_W, h: BOX_H, codes: &[0x120] },
+    CalloutBox { cx: 0.6800, cy: 0.3000, w: BOX_W, h: BOX_H, codes: &[0x120] },
     // B.
-    CalloutBox { cx: 0.7524, cy: 0.2467, w: BOX_W, h: BOX_H, codes: &[0x122] },
+    CalloutBox { cx: 0.7500, cy: 0.3000, w: BOX_W, h: BOX_H, codes: &[0x122] },
     // RT.
-    CalloutBox { cx: 0.7333, cy: 0.3933, w: BOX_W, h: BOX_H, codes: &[0x126] },
+    CalloutBox { cx: 0.7525, cy: 0.4275, w: BOX_W, h: BOX_H, codes: &[0x126] },
     // RSB.
-    CalloutBox { cx: 0.7190, cy: 0.5000, w: BOX_W, h: BOX_H, codes: &[0x12a] },
+    CalloutBox { cx: 0.7525, cy: 0.4925, w: BOX_W, h: BOX_H, codes: &[0x12a] },
     // GR.
-    CalloutBox { cx: 0.6524, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cd] },
+    CalloutBox { cx: 0.6900, cy: 0.5900, w: BOX_W, h: BOX_H, codes: &[0x2cd] },
     // right encoder.
-    CalloutBox { cx: 0.7857, cy: 0.7467, w: KNOB_W, h: KNOB_H, codes: &[0x2c5, 0x2c6, 0x2c7] },
+    CalloutBox { cx: 0.7600, cy: 0.6675, w: KNOB_W, h: KNOB_H, codes: &[0x2c5, 0x2c6, 0x2c7] },
     // Menu.
-    CalloutBox { cx: 0.5905, cy: 0.7933, w: BOX_W, h: BOX_H, codes: &[0x129] },
+    CalloutBox { cx: 0.6425, cy: 0.6700, w: BOX_W, h: BOX_H, codes: &[0x129] },
     // G1.
-    CalloutBox { cx: 0.5000, cy: 0.7800, w: BOX_W, h: BOX_H, codes: &[0x2cb] },
+    CalloutBox { cx: 0.5000, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cb] },
     // Camera / View.
-    CalloutBox { cx: 0.4095, cy: 0.7933, w: BOX_W, h: BOX_H, codes: &[0x128] },
+    CalloutBox { cx: 0.3575, cy: 0.6700, w: BOX_W, h: BOX_H, codes: &[0x128] },
     // left encoder.
-    CalloutBox { cx: 0.2143, cy: 0.7467, w: KNOB_W, h: KNOB_H, codes: &[0x2c8, 0x2c9, 0x2ca] },
+    CalloutBox { cx: 0.2400, cy: 0.6675, w: KNOB_W, h: KNOB_H, codes: &[0x2c8, 0x2c9, 0x2ca] },
     // GL.
-    CalloutBox { cx: 0.3476, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cc] },
+    CalloutBox { cx: 0.3100, cy: 0.5900, w: BOX_W, h: BOX_H, codes: &[0x2cc] },
     // LSB.
-    CalloutBox { cx: 0.2810, cy: 0.5000, w: BOX_W, h: BOX_H, codes: &[0x12b] },
+    CalloutBox { cx: 0.2475, cy: 0.4925, w: BOX_W, h: BOX_H, codes: &[0x12b] },
     // LT.
-    CalloutBox { cx: 0.2667, cy: 0.3933, w: BOX_W, h: BOX_H, codes: &[0x127] },
+    CalloutBox { cx: 0.2475, cy: 0.4275, w: BOX_W, h: BOX_H, codes: &[0x127] },
     // left paddle.
-    CalloutBox { cx: 0.1548, cy: 0.2667, w: PAD_W, h: PAD_H, codes: &[0x125] },
+    CalloutBox { cx: 0.1700, cy: 0.3675, w: PAD_W, h: PAD_H, codes: &[0x125] },
     // right paddle.
-    CalloutBox { cx: 0.8452, cy: 0.2667, w: PAD_W, h: PAD_H, codes: &[0x124] },
+    CalloutBox { cx: 0.8300, cy: 0.3675, w: PAD_W, h: PAD_H, codes: &[0x124] },
     // D-pad hat.
-    CalloutBox { cx: 0.3571, cy: 0.4400, w: BOX_W, h: BOX_H, codes: &[] },
+    CalloutBox { cx: 0.3275, cy: 0.4625, w: BOX_W, h: BOX_H, codes: &[] },
 ];
 
 /// Whether `b` should be tinted: any of its button codes held, or (for
