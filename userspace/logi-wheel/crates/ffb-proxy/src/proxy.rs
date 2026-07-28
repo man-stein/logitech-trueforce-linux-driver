@@ -49,9 +49,18 @@ pub struct WheelPaths {
 /// its sibling input nodes (the same physical device exposes separate
 /// evdev nodes for consumer-control keys, and some setups have unrelated
 /// keyboard/mouse nodes with overlapping substrings).
+///
+/// A real G PRO does not report "G PRO" anywhere: its product string is
+/// "PRO Racing Wheel", so the evdev node comes through as "Logitech  PRO
+/// Racing Wheel" with two spaces (issue #51). Both spellings are matched.
+///
+/// logi-wheel-core has a near-identical `is_wheel_name`. The two overlap by
+/// intent but are not the same list: that one also accepts the G923, which
+/// this crate does not handle at all.
 pub fn is_wheel(name: &str) -> bool {
     let upper = name.to_uppercase();
-    let looks_like_wheel = upper.contains("RS50") || upper.contains("G PRO");
+    let looks_like_wheel =
+        upper.contains("RS50") || upper.contains("PRO RACING WHEEL") || upper.contains("G PRO");
     let excluded =
         upper.contains("CONSUMER CONTROL") || upper.contains("KEYBOARD") || upper.contains("MOUSE");
     looks_like_wheel && !excluded
@@ -554,7 +563,18 @@ mod tests {
     fn recognizes_dd_wheel_names() {
         assert!(is_wheel("Logitech RS50 Base for PlayStation/PC"));
         assert!(is_wheel("Logitech G PRO Racing Wheel"));
+        // The real G PRO: no "G" before PRO, and two spaces (issue #51).
+        assert!(is_wheel("Logitech  PRO Racing Wheel"));
+        assert!(is_wheel("PRO Racing Wheel"));
         assert!(!is_wheel("Logi Litra Glow Consumer Control"));
+    }
+
+    #[test]
+    fn rejects_the_g923_which_this_crate_does_not_handle() {
+        // Not an oversight: the proxy exists for the DD wheels' missing PID
+        // collection and knows no G923 PIDs. logi-wheel-core's own
+        // is_wheel_name does accept it, and that difference is deliberate.
+        assert!(!is_wheel("Logitech G923 Racing Wheel"));
     }
 
     #[test]

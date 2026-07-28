@@ -361,8 +361,16 @@ pub fn hat_label(x: i32, y: i32) -> &'static str {
 /// True if `name` looks like a Logitech direct-drive wheel and not one of
 /// its sibling input nodes (the same physical device exposes separate
 /// evdev nodes for consumer-control keys, and some setups have unrelated
-/// keyboard/mouse nodes with overlapping substrings). Same heuristic the
-/// ffb-proxy crate uses for its own discovery.
+/// keyboard/mouse nodes with overlapping substrings).
+///
+/// A real G PRO does not report "G PRO" anywhere: its product string is
+/// "PRO Racing Wheel", so the evdev node comes through as "Logitech  PRO
+/// Racing Wheel" with two spaces (issue #51). Both spellings are matched.
+///
+/// The ffb-proxy crate has a near-identical `is_wheel`. The two overlap by
+/// intent but are NOT the same list, and nothing keeps them in step: this
+/// one covers every wheel the Test view supports, while ffb-proxy's covers
+/// only the DD wheels it can proxy, so it excludes the G923 on purpose.
 pub fn is_wheel_name(name: &str) -> bool {
     let upper = name.to_uppercase();
     let looks_like_wheel = upper.contains("RS50")
@@ -652,8 +660,12 @@ mod tests {
         assert_eq!(hat_label(-1, 0), "left");
     }
 
+    // Named for what this actually checks. It used to be called
+    // `wheel_name_heuristic_matches_ffb_proxys`, which claimed parity with
+    // ffb-proxy's `is_wheel` that this test cannot see, let alone enforce,
+    // and the two lists had already diverged while it passed.
     #[test]
-    fn wheel_name_heuristic_matches_ffb_proxys() {
+    fn wheel_name_heuristic_accepts_wheels_and_rejects_siblings() {
         assert!(is_wheel_name("Logitech RS50 Base for PlayStation/PC"));
         assert!(is_wheel_name("Logitech G PRO Racing Wheel"));
         assert!(is_wheel_name("Logitech  PRO Racing Wheel"));
