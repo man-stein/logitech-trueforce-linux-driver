@@ -477,7 +477,17 @@ export component InfoPage inherits Rectangle {
                                 color: Theme.text-color;
                             }
                             grid := Rectangle {
-                                property <int> columns: self.width > 440px ? 3 : 2;
+                                // Column count follows the width the labels
+                                // actually need, not a fixed breakpoint. The
+                                // longest label ("R Encoder Push", 14 chars at
+                                // 12px) is about 95px, and each cell spends
+                                // 16px on padding, so a cell narrower than
+                                // min-cell-w elides real text. Picking columns
+                                // from a hardcoded 440px threshold instead
+                                // meant a narrow window produced ~98px cells
+                                // and elided nearly every label.
+                                property <length> min-cell-w: 130px;
+                                property <int> columns: clamp(floor((self.width + 6px) / (self.min-cell-w + 6px)), 1, 3);
                                 property <int> rows: ceil(root.buttons.length / self.columns);
                                 property <length> cell-w: (self.width - (self.columns - 1) * 6px) / self.columns;
                                 height: self.rows * 26px;
