@@ -198,47 +198,47 @@ const BOX_W: f32 = 0.0714;   // 30px: a face button
 const BOX_H: f32 = 0.1000;   // 30px
 const KNOB_W: f32 = 0.1476;  // 62px: a barrel encoder
 const KNOB_H: f32 = 0.1400;  // 42px
-const PAD_W: f32 = 0.1190;   // 50px: a shift-paddle fin
-const PAD_H: f32 = 0.3600;   // 108px
+const PAD_W: f32 = 0.1000;   // 42px: a shift-paddle tab
+const PAD_H: f32 = 0.1300;   // 39px
 
 /// Every control the overlay can tint; see [`CalloutBox`].
 pub const CALLOUT_BOXES: &[CalloutBox] = &[
     // X.
-    CalloutBox { cx: 0.2667, cy: 0.2733, w: BOX_W, h: BOX_H, codes: &[0x121] },
+    CalloutBox { cx: 0.2476, cy: 0.2467, w: BOX_W, h: BOX_H, codes: &[0x121] },
     // Y.
-    CalloutBox { cx: 0.3524, cy: 0.2267, w: BOX_W, h: BOX_H, codes: &[0x123] },
+    CalloutBox { cx: 0.3310, cy: 0.2000, w: BOX_W, h: BOX_H, codes: &[0x123] },
     // A.
-    CalloutBox { cx: 0.6476, cy: 0.2267, w: BOX_W, h: BOX_H, codes: &[0x120] },
+    CalloutBox { cx: 0.6690, cy: 0.2000, w: BOX_W, h: BOX_H, codes: &[0x120] },
     // B.
-    CalloutBox { cx: 0.7333, cy: 0.2733, w: BOX_W, h: BOX_H, codes: &[0x122] },
+    CalloutBox { cx: 0.7524, cy: 0.2467, w: BOX_W, h: BOX_H, codes: &[0x122] },
     // RT.
-    CalloutBox { cx: 0.7095, cy: 0.4133, w: BOX_W, h: BOX_H, codes: &[0x126] },
+    CalloutBox { cx: 0.7333, cy: 0.3933, w: BOX_W, h: BOX_H, codes: &[0x126] },
     // RSB.
-    CalloutBox { cx: 0.7048, cy: 0.5267, w: BOX_W, h: BOX_H, codes: &[0x12a] },
+    CalloutBox { cx: 0.7190, cy: 0.5000, w: BOX_W, h: BOX_H, codes: &[0x12a] },
     // GR.
-    CalloutBox { cx: 0.6429, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cd] },
+    CalloutBox { cx: 0.6524, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cd] },
     // right encoder.
-    CalloutBox { cx: 0.8071, cy: 0.7500, w: KNOB_W, h: KNOB_H, codes: &[0x2c5, 0x2c6, 0x2c7] },
+    CalloutBox { cx: 0.7857, cy: 0.7467, w: KNOB_W, h: KNOB_H, codes: &[0x2c5, 0x2c6, 0x2c7] },
     // Menu.
-    CalloutBox { cx: 0.5857, cy: 0.7867, w: BOX_W, h: BOX_H, codes: &[0x129] },
+    CalloutBox { cx: 0.5905, cy: 0.7933, w: BOX_W, h: BOX_H, codes: &[0x129] },
     // G1.
-    CalloutBox { cx: 0.5000, cy: 0.7933, w: BOX_W, h: BOX_H, codes: &[0x2cb] },
+    CalloutBox { cx: 0.5000, cy: 0.7800, w: BOX_W, h: BOX_H, codes: &[0x2cb] },
     // Camera / View.
-    CalloutBox { cx: 0.4143, cy: 0.7867, w: BOX_W, h: BOX_H, codes: &[0x128] },
+    CalloutBox { cx: 0.4095, cy: 0.7933, w: BOX_W, h: BOX_H, codes: &[0x128] },
     // left encoder.
-    CalloutBox { cx: 0.1929, cy: 0.7500, w: KNOB_W, h: KNOB_H, codes: &[0x2c8, 0x2c9, 0x2ca] },
+    CalloutBox { cx: 0.2143, cy: 0.7467, w: KNOB_W, h: KNOB_H, codes: &[0x2c8, 0x2c9, 0x2ca] },
     // GL.
-    CalloutBox { cx: 0.3571, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cc] },
+    CalloutBox { cx: 0.3476, cy: 0.6800, w: BOX_W, h: BOX_H, codes: &[0x2cc] },
     // LSB.
-    CalloutBox { cx: 0.2952, cy: 0.5267, w: BOX_W, h: BOX_H, codes: &[0x12b] },
+    CalloutBox { cx: 0.2810, cy: 0.5000, w: BOX_W, h: BOX_H, codes: &[0x12b] },
     // LT.
-    CalloutBox { cx: 0.2905, cy: 0.4133, w: BOX_W, h: BOX_H, codes: &[0x127] },
+    CalloutBox { cx: 0.2667, cy: 0.3933, w: BOX_W, h: BOX_H, codes: &[0x127] },
     // left paddle.
-    CalloutBox { cx: 0.1643, cy: 0.4800, w: PAD_W, h: PAD_H, codes: &[0x125] },
+    CalloutBox { cx: 0.1548, cy: 0.2667, w: PAD_W, h: PAD_H, codes: &[0x125] },
     // right paddle.
-    CalloutBox { cx: 0.8357, cy: 0.4800, w: PAD_W, h: PAD_H, codes: &[0x124] },
+    CalloutBox { cx: 0.8452, cy: 0.2667, w: PAD_W, h: PAD_H, codes: &[0x124] },
     // D-pad hat.
-    CalloutBox { cx: 0.3762, cy: 0.4667, w: BOX_W, h: BOX_H, codes: &[] },
+    CalloutBox { cx: 0.3571, cy: 0.4400, w: BOX_W, h: BOX_H, codes: &[] },
 ];
 
 /// Whether `b` should be tinted: any of its button codes held, or (for

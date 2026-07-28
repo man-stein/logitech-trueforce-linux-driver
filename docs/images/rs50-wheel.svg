@@ -1,16 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 300" role="img"
-     aria-label="RS50 wheel hub: a curved top bar with a lit strip, a ribbed faceplate tapering to a tail, wedge panels carrying GL and GR, and a knurled barrel encoder at each lower corner">
+     aria-label="RS50 racing wheel: a formula-style wheel with curved hand grips either side, a lit strip across the top bar, a ribbed shield faceplate and knurled encoders at the lower corners">
   <title>Logitech RS50</title>
   <desc>
-    Original drawing, not traced from any vendor photograph. Formula-style
-    hub: a curved top bar whose angled ends carry the face buttons, a ribbed
-    faceplate tapering to a narrow tail, wedge panels flaring down and out
-    for the GL/GR buttons, barrel encoders at the lower corners, and a
-    shift-paddle fin at each outer edge.
+    Original drawing, not traced from any vendor photograph. A formula-style
+    wheel: large curved hand grips sweeping out and down either side with a
+    shift paddle at the top of each, a top bar carrying the face buttons and
+    a lit strip, a ribbed shield faceplate tapering to a tail, and a knurled
+    barrel encoder outboard of each lower wedge panel.
   </desc>
 
   <defs>
-    <!-- Light from above: every horizontal surface gets a lighter top edge. -->
+    <linearGradient id="rs-grip" x1="0" y1="0" x2="1" y2="0.3">
+      <stop offset="0"    stop-color="#31373f"/>
+      <stop offset="0.45" stop-color="#22262c"/>
+      <stop offset="1"    stop-color="#131518"/>
+    </linearGradient>
+    <linearGradient id="rs-grip-r" x1="1" y1="0" x2="0" y2="0.3">
+      <stop offset="0"    stop-color="#31373f"/>
+      <stop offset="0.45" stop-color="#22262c"/>
+      <stop offset="1"    stop-color="#131518"/>
+    </linearGradient>
     <linearGradient id="rs-plate" x1="0.2" y1="0" x2="0.8" y2="1">
       <stop offset="0"    stop-color="#3d434c"/>
       <stop offset="0.45" stop-color="#2b3037"/>
@@ -25,13 +34,8 @@
       <stop offset="0" stop-color="#363c44"/>
       <stop offset="1" stop-color="#1b1f24"/>
     </linearGradient>
-    <linearGradient id="rs-fin" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0"   stop-color="#2a2f36"/>
-      <stop offset="0.7" stop-color="#1a1d22"/>
-      <stop offset="1"   stop-color="#101215"/>
-    </linearGradient>
     <linearGradient id="rs-knob" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0"    stop-color="#464d57"/>
+      <stop offset="0"    stop-color="#4a515b"/>
       <stop offset="0.35" stop-color="#2b3037"/>
       <stop offset="1"    stop-color="#15181c"/>
     </linearGradient>
@@ -43,142 +47,154 @@
       <stop offset="0.86" stop-color="#a03bf2"/>
       <stop offset="1"    stop-color="#2f6ee0"/>
     </linearGradient>
-    <!-- The faceplate's moulded ribs, the texture that identifies this hub
-         more than any single control does. -->
     <pattern id="rs-ribs" width="7" height="7" patternUnits="userSpaceOnUse">
-      <path d="M0 2 H7" stroke="#000"    stroke-width="2"   opacity="0.30"/>
+      <path d="M0 2 H7"   stroke="#000"    stroke-width="2"   opacity="0.32"/>
       <path d="M0 3.6 H7" stroke="#828b98" stroke-width="0.8" opacity="0.13"/>
+    </pattern>
+    <!-- Moulded grain on the grips: finer than the faceplate ribs so the
+         two surfaces stay distinguishable at thumbnail size. -->
+    <pattern id="rs-grain" width="5" height="5" patternUnits="userSpaceOnUse"
+             patternTransform="rotate(20)">
+      <path d="M0 1.4 H5" stroke="#000" stroke-width="1.1" opacity="0.28"/>
     </pattern>
   </defs>
 
-  <ellipse cx="210" cy="288" rx="120" ry="8" fill="#000" opacity="0.22"/>
+  <ellipse cx="210" cy="290" rx="126" ry="8" fill="#000" opacity="0.22"/>
 
-  <!-- Shift-paddle fins at the outer edges, seen almost edge-on. -->
-  <path d="M52 92 h34 q8 0 8 10 v84 q0 10 -8 10 h-34 q-8 0 -8-10 v-84 q0-10 8-10 z"
-        fill="url(#rs-fin)"/>
-  <path d="M368 92 h-34 q-8 0 -8 10 v84 q0 10 8 10 h34 q8 0 8-10 v-84 q0-10 -8-10 z"
-        fill="url(#rs-fin)"/>
-  <!-- Roots joining each fin to the hub body. -->
-  <path d="M84 92 h30 v128 h-30 z" fill="#23272e"/>
-  <path d="M336 92 h-30 v128 h30 z" fill="#23272e"/>
-  <g stroke="#7d8792" stroke-width="3" fill="none" stroke-linecap="round"
-     stroke-linejoin="round" opacity="0.65">
-    <path d="M76 122 l-10 10 l10 10 M66 122 l-10 10 l10 10"/>
-    <path d="M76 152 l-10 10 l10 10 M66 152 l-10 10 l10 10"/>
-    <path d="M344 122 l10 10 l-10 10 M354 122 l10 10 l-10 10"/>
-    <path d="M344 152 l10 10 l-10 10 M354 152 l10 10 l-10 10"/>
+  <!-- Hand grips: the wheel itself. Each sweeps from the top bar's outer end
+       out and down, thick along the outer edge and thinning where it meets
+       the faceplate. -->
+  <path d="M96 70 q-44 4 -58 34 q-14 30 -8 66 q4 26 22 34 l30 -8
+           q-16-30 -12-62 q4-32 30-44 z" fill="url(#rs-grip)"/>
+  <path d="M96 70 q-44 4 -58 34 q-14 30 -8 66 q4 26 22 34 l30 -8
+           q-16-30 -12-62 q4-32 30-44 z" fill="url(#rs-grain)"/>
+  <path d="M324 70 q44 4 58 34 q14 30 8 66 q-4 26 -22 34 l-30 -8
+           q16-30 12-62 q-4-32 -30-44 z" fill="url(#rs-grip-r)"/>
+  <path d="M324 70 q44 4 58 34 q14 30 8 66 q-4 26 -22 34 l-30 -8
+           q16-30 12-62 q-4-32 -30-44 z" fill="url(#rs-grain)"/>
+  <!-- Highlight along each grip's outer edge, one light source above. -->
+  <path d="M94 74 q-40 6 -53 32" stroke="#79828f" stroke-width="2.4"
+        fill="none" opacity="0.40"/>
+  <path d="M326 74 q40 6 53 32" stroke="#79828f" stroke-width="2.4"
+        fill="none" opacity="0.40"/>
+
+  <!-- Shift paddles: flat tabs at the top outer corner of each grip. -->
+  <path d="M48 62 h34 q6 0 5 7 l-4 22 q-1 6 -7 6 h-30 q-6 0 -5-7 l4-22
+           q1-6 7-6 z" fill="#20242a"/>
+  <path d="M372 62 h-34 q-6 0 -5 7 l4 22 q1 6 7 6 h30 q6 0 5-7 l-4-22
+           q-1-6 -7-6 z" fill="#20242a"/>
+  <g stroke="#8d96a2" stroke-width="2.6" fill="none" stroke-linecap="round"
+     stroke-linejoin="round" opacity="0.8">
+    <path d="M70 72 l-8 8 l8 8 M60 72 l-8 8 l8 8"/>
+    <path d="M350 72 l8 8 l-8 8 M360 72 l8 8 l-8 8"/>
   </g>
 
-  <!-- Faceplate: wide under the bar, tapering to the tail. -->
-  <path d="M96 84 h228 l-6 84 a10 10 0 0 1 -5 8 l-95 46 a16 16 0 0 1 -16 0
-           l-95-46 a10 10 0 0 1 -5-8 z"
+  <!-- Faceplate: a shield, wide under the bar, angling in to the tail. -->
+  <path d="M84 84 H336 L307 182 L269 212 L236 252 H184 L151 212 L113 182 Z"
         fill="url(#rs-plate)"/>
-  <path d="M96 84 h228 l-6 84 a10 10 0 0 1 -5 8 l-95 46 a16 16 0 0 1 -16 0
-           l-95-46 a10 10 0 0 1 -5-8 z"
+  <path d="M84 84 H336 L307 182 L269 212 L236 252 H184 L151 212 L113 182 Z"
         fill="url(#rs-ribs)"/>
 
-  <!-- Bolt holes in the faceplate. -->
+  <!-- Bolt holes. -->
   <g fill="#0f1114">
     <circle cx="210" cy="100" r="5"/>
-    <circle cx="152" cy="124" r="4.5"/><circle cx="268" cy="124" r="4.5"/>
-    <circle cx="152" cy="182" r="4.5"/><circle cx="268" cy="182" r="4.5"/>
-    <circle cx="210" cy="206" r="4.5"/>
+    <circle cx="146" cy="128" r="4.5"/><circle cx="274" cy="128" r="4.5"/>
+    <circle cx="160" cy="190" r="4.5"/><circle cx="260" cy="190" r="4.5"/>
+    <circle cx="210" cy="214" r="4.5"/>
   </g>
 
   <!-- Centre boss. No maker's mark is reproduced. -->
-  <circle cx="210" cy="152" r="34" fill="#20242a"/>
-  <circle cx="210" cy="152" r="34" fill="none" stroke="#000" stroke-width="1.6" opacity="0.45"/>
-  <circle cx="210" cy="152" r="21" fill="#2a2f36"/>
+  <circle cx="210" cy="150" r="34" fill="#20242a"/>
+  <circle cx="210" cy="150" r="34" fill="none" stroke="#000" stroke-width="1.6" opacity="0.45"/>
+  <circle cx="210" cy="150" r="21" fill="#2a2f36"/>
 
-  <!-- Curved top bar. Its ends drop and splay outward, which is the line
-       that makes this hub recognisable in silhouette. -->
-  <path d="M90 98 q6-44 48-48 h144 q42 4 48 48 z" fill="url(#rs-bar)"/>
-  <path d="M98 90 q10-34 42-36 h140 q32 2 42 36" stroke="#98a1ad"
+  <!-- Top bar, spanning the grips and carrying the face buttons. -->
+  <path d="M80 88 q6-42 48-46 h164 q42 4 48 46 z" fill="url(#rs-bar)"/>
+  <path d="M88 80 q10-32 44-34 h156 q34 2 44 34" stroke="#98a1ad"
         stroke-width="1.6" fill="none" opacity="0.30"/>
 
-  <!-- Lit strip, recessed into the centre of the bar and standing proud. -->
-  <rect x="164" y="34" width="92" height="24" rx="11" fill="#0b0d10"/>
-  <rect x="169" y="38" width="82" height="15" rx="7" fill="url(#rs-led)"/>
-  <rect x="169" y="38" width="82" height="5"  rx="2.5" fill="#fff" opacity="0.30"/>
+  <!-- Lit strip, recessed into the bar and standing proud of it. -->
+  <rect x="164" y="26" width="92" height="24" rx="11" fill="#0b0d10"/>
+  <rect x="169" y="30" width="82" height="15" rx="7" fill="url(#rs-led)"/>
+  <rect x="169" y="30" width="82" height="5"  rx="2.5" fill="#fff" opacity="0.30"/>
 
-  <!-- Face buttons on the bar's angled ends, staggered as on the hub. -->
+  <!-- Face buttons on the bar, staggered as on the wheel. -->
   <g font-family="sans-serif" font-size="13" font-weight="700" text-anchor="middle">
     <g fill="#1b1e23" stroke="#666f7b" stroke-width="1.6">
-      <circle cx="112" cy="82" r="15"/><circle cx="148" cy="68" r="15"/>
-      <circle cx="272" cy="68" r="15"/><circle cx="308" cy="82" r="15"/>
+      <circle cx="104" cy="74" r="15"/><circle cx="139" cy="60" r="15"/>
+      <circle cx="281" cy="60" r="15"/><circle cx="316" cy="74" r="15"/>
     </g>
     <g fill="#ccd3db">
-      <text x="112" y="87">X</text><text x="148" y="73">Y</text>
-      <text x="272" y="73">A</text><text x="308" y="87">B</text>
+      <text x="104" y="79">X</text><text x="139" y="65">Y</text>
+      <text x="281" y="65">A</text><text x="316" y="79">B</text>
     </g>
   </g>
 
-  <!-- Shoulder columns, stacked on raised pads either side of the plate. -->
+  <!-- Shoulder columns on the faceplate. -->
   <g font-family="sans-serif" font-size="9" text-anchor="middle">
     <g fill="#1b1e23" stroke="#666f7b" stroke-width="1.5">
-      <circle cx="122" cy="124" r="14"/><circle cx="124" cy="158" r="14"/>
-      <circle cx="298" cy="124" r="14"/><circle cx="296" cy="158" r="14"/>
+      <circle cx="112" cy="118" r="14"/><circle cx="118" cy="150" r="14"/>
+      <circle cx="308" cy="118" r="14"/><circle cx="302" cy="150" r="14"/>
     </g>
     <g fill="#a2abb6">
-      <text x="122" y="128">LT</text><text x="124" y="162">LSB</text>
-      <text x="298" y="128">RT</text><text x="296" y="162">RSB</text>
+      <text x="112" y="122">LT</text><text x="118" y="154">LSB</text>
+      <text x="308" y="122">RT</text><text x="302" y="154">RSB</text>
     </g>
   </g>
 
-  <!-- The small round D-pad nub, inboard of the LT/LSB column. -->
-  <circle cx="158" cy="140" r="12" fill="#14171b" stroke="#666f7b" stroke-width="1.5"/>
-  <circle cx="158" cy="140" r="5"  fill="#39404a"/>
+  <!-- D-pad nub, inboard of the LT column. -->
+  <circle cx="150" cy="132" r="12" fill="#14171b" stroke="#666f7b" stroke-width="1.5"/>
+  <circle cx="150" cy="132" r="5"  fill="#39404a"/>
 
-  <!-- Wedge panels flaring down and out, carrying GL / GR and the two
-       small function buttons. -->
-  <path d="M128 188 q40-6 62 10 l-6 44 q-2 10 -12 10 h-48 q-12 0 -14-12 l-4-40
-           q-1-10 12-12 z" fill="url(#rs-wedge)"/>
-  <path d="M292 188 q-40-6 -62 10 l6 44 q2 10 12 10 h48 q12 0 14-12 l4-40
-           q1-10 -12-12 z" fill="url(#rs-wedge)"/>
+  <!-- Wedge panels flaring down and out for GL / GR. -->
+  <path d="M124 190 q42-8 66 12 l-8 42 q-2 10 -12 10 h-46 q-12 0 -14-12 l-6-38
+           q-2-10 20-14 z" fill="url(#rs-wedge)"/>
+  <path d="M296 190 q-42-8 -66 12 l8 42 q2 10 12 10 h46 q12 0 14-12 l6-38
+           q2-10 -20-14 z" fill="url(#rs-wedge)"/>
   <g font-family="sans-serif" font-size="11" font-weight="600" text-anchor="middle">
     <g fill="#1b1e23" stroke="#666f7b" stroke-width="1.5">
-      <circle cx="150" cy="204" r="15"/><circle cx="270" cy="204" r="15"/>
+      <circle cx="146" cy="204" r="15"/><circle cx="274" cy="204" r="15"/>
     </g>
-    <g fill="#a2abb6"><text x="150" y="209">GL</text><text x="270" y="209">GR</text></g>
+    <g fill="#a2abb6"><text x="146" y="209">GL</text><text x="274" y="209">GR</text></g>
   </g>
   <!-- Camera/view on the left wedge, menu on the right. -->
-  <circle cx="174" cy="236" r="13" fill="#1b1e23" stroke="#666f7b" stroke-width="1.4"/>
+  <circle cx="172" cy="238" r="13" fill="#1b1e23" stroke="#666f7b" stroke-width="1.4"/>
   <g stroke="#a2abb6" stroke-width="1.7" fill="none" stroke-linejoin="round">
-    <rect x="167" y="231" width="11" height="9" rx="2"/>
-    <path d="M178 234 l4-3 v9 l-4-3 z" fill="#a2abb6" stroke="none"/>
+    <rect x="165" y="233" width="11" height="9" rx="2"/>
+    <path d="M176 236 l4-3 v9 l-4-3 z" fill="#a2abb6" stroke="none"/>
   </g>
-  <circle cx="246" cy="236" r="13" fill="#1b1e23" stroke="#666f7b" stroke-width="1.4"/>
+  <circle cx="248" cy="238" r="13" fill="#1b1e23" stroke="#666f7b" stroke-width="1.4"/>
   <g stroke="#a2abb6" stroke-width="2" stroke-linecap="round">
-    <path d="M240 232 h12 M240 236 h12 M240 240 h12"/>
+    <path d="M242 234 h12 M242 238 h12 M242 242 h12"/>
   </g>
 
-  <!-- Barrel encoders at the lower corners, knurled, with the blue band. -->
+  <!-- Barrel encoders, outboard of the wedges. -->
   <g>
-    <rect x="52" y="206" width="58" height="38" rx="12" fill="url(#rs-knob)"/>
+    <rect x="62" y="206" width="56" height="36" rx="12" fill="url(#rs-knob)"/>
     <g stroke="#000" stroke-width="2" opacity="0.45">
-      <path d="M62 210 v30 M72 210 v30 M82 210 v30 M92 210 v30 M102 210 v30"/>
+      <path d="M72 210 v28 M82 210 v28 M92 210 v28 M102 210 v28"/>
     </g>
-    <g stroke="#8f98a4" stroke-width="0.9" opacity="0.35">
-      <path d="M66 210 v30 M76 210 v30 M86 210 v30 M96 210 v30"/>
+    <g stroke="#8f98a4" stroke-width="0.9" opacity="0.32">
+      <path d="M76 210 v28 M86 210 v28 M96 210 v28 M106 210 v28"/>
     </g>
-    <rect x="104" y="206" width="8" height="38" rx="4" fill="#1f9fd8"/>
+    <rect x="112" y="206" width="8" height="36" rx="4" fill="#1f9fd8"/>
   </g>
   <g>
-    <rect x="310" y="206" width="58" height="38" rx="12" fill="url(#rs-knob)"/>
+    <rect x="302" y="206" width="56" height="36" rx="12" fill="url(#rs-knob)"/>
     <g stroke="#000" stroke-width="2" opacity="0.45">
-      <path d="M320 210 v30 M330 210 v30 M340 210 v30 M350 210 v30 M360 210 v30"/>
+      <path d="M312 210 v28 M322 210 v28 M332 210 v28 M342 210 v28"/>
     </g>
-    <g stroke="#8f98a4" stroke-width="0.9" opacity="0.35">
-      <path d="M324 210 v30 M334 210 v30 M344 210 v30 M354 210 v30"/>
+    <g stroke="#8f98a4" stroke-width="0.9" opacity="0.32">
+      <path d="M316 210 v28 M326 210 v28 M336 210 v28 M346 210 v28"/>
     </g>
-    <rect x="308" y="206" width="8" height="38" rx="4" fill="#1f9fd8"/>
+    <rect x="300" y="206" width="8" height="36" rx="4" fill="#1f9fd8"/>
   </g>
 
-  <!-- Tail: narrows below the plate, carrying G1 and the power indicator. -->
-  <path d="M188 218 h44 l-7 52 a8 8 0 0 1 -8 7 h-14 a8 8 0 0 1 -8-7 z"
+  <!-- Tail below the faceplate, carrying G1 and the power indicator. -->
+  <path d="M190 250 h40 l-6 30 a8 8 0 0 1 -8 6 h-12 a8 8 0 0 1 -8-6 z"
         fill="url(#rs-wedge)"/>
-  <circle cx="210" cy="238" r="16" fill="#1b1e23" stroke="#666f7b" stroke-width="1.6"/>
-  <text x="210" y="243" font-family="sans-serif" font-size="11" font-weight="600"
+  <circle cx="210" cy="234" r="16" fill="#1b1e23" stroke="#666f7b" stroke-width="1.6"/>
+  <text x="210" y="239" font-family="sans-serif" font-size="11" font-weight="600"
         text-anchor="middle" fill="#a2abb6">G1</text>
   <circle cx="210" cy="266" r="4" fill="#25e07c"/>
 </svg>
