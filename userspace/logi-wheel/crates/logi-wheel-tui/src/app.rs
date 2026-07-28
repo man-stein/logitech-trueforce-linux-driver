@@ -1052,11 +1052,21 @@ impl<S: SysfsIo> App<S> {
         if !rows.iter().any(|r| shaping::role(&r.attr) != ShapingRole::Neutral) {
             return rows;
         }
+        // An axis with no available generator row has nothing for its toggle to
+        // switch between (the handbrake pair on a wheel with no accessory
+        // attached), so it gets no toggle at all rather than one that offers a
+        // choice which cannot change anything. Keyed on availability, not on
+        // the handbrake specifically, so any future axis behaves the same way.
+        let live: Vec<shaping::Axis> = shaping::Axis::ALL
+            .iter()
+            .copied()
+            .filter(|ax| rows.iter().any(|r| shaping::axis(&r.attr) == Some(*ax) && r.available))
+            .collect();
         let mut out = Vec::with_capacity(rows.len() + shaping::Axis::ALL.len());
         let mut headed: Vec<shaping::Axis> = Vec::new();
         for row in rows {
             if let Some(ax) = shaping::axis(&row.attr) {
-                if !headed.contains(&ax) {
+                if !headed.contains(&ax) && live.contains(&ax) {
                     headed.push(ax);
                     out.push(Row {
                         attr: shaping::toggle_attr(ax).to_string(),
@@ -4105,11 +4115,73 @@ mod tests {
         fs.set("wheel_range", "900");
         fs.set("wheel_sensitivity", "50");
         fs.set("wheel_response_curve", "reset");
+        // Give every shapeable axis one available generator, so this stands for
+        // a wheel that actually has these axes: `shaping_rows` heads an axis
+        // block only when the axis has something available to toggle between,
+        // and an axis with no attributes at all is an axis the wheel lacks.
+        for attr in [
+            "wheel_throttle_sensitivity",
+            "wheel_brake_sensitivity",
+            "wheel_clutch_sensitivity",
+            "wheel_handbrake_sensitivity",
+        ] {
+            fs.set(attr, "50");
+        }
+        // The handbrake axis is real only with the accessory attached.
+        fs.set("wheel_accessory", "RS Shifter & Handbrake");
         let mut a = App::new(logi_wheel_core::Device::with_io(fs));
         a.focus = Focus::Content;
         a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Steering).unwrap();
         a.reload();
         a
+    }
+
+    /// The Pedals page of a wheel reporting `wheel_accessory` as `accessory`.
+    fn pedals_app(accessory: &str) -> App<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_mode", "desktop");
+        for attr in [
+            "wheel_throttle_sensitivity",
+            "wheel_brake_sensitivity",
+            "wheel_clutch_sensitivity",
+            "wheel_handbrake_sensitivity",
+            "wheel_handbrake_curve",
+        ] {
+            fs.set(attr, "50");
+        }
+        fs.set("wheel_accessory", accessory);
+        let mut a = App::new(logi_wheel_core::Device::with_io(fs));
+        a.focus = Focus::Content;
+        a.cat_idx = Category::ALL.iter().position(|c| *c == Category::Pedals).unwrap();
+        a.reload();
+        a
+    }
+
+    #[test]
+    fn no_accessory_makes_the_handbrake_rows_unavailable_and_drops_its_toggle() {
+        // The wheel answers these attrs happily either way (handbrake shaping
+        // lands on the base's own axis), so only `wheel_accessory` tells us the
+        // hardware is absent. The rows stay listed but unavailable, and the
+        // shaping toggle goes entirely: there is nothing to switch between.
+        let a = pedals_app("none");
+        let hb = a.rows.iter().find(|r| r.attr == "wheel_handbrake_sensitivity").expect("row listed");
+        assert!(!hb.available, "handbrake sensitivity must read unavailable");
+        assert!(
+            !a.rows.iter().any(|r| r.attr == shaping::toggle_attr(shaping::Axis::Handbrake)),
+            "no handbrake shaping toggle without the accessory"
+        );
+        // The pedals themselves are untouched by the accessory's absence.
+        let th = a.rows.iter().find(|r| r.attr == "wheel_throttle_sensitivity").expect("row listed");
+        assert!(th.available);
+        assert!(a.rows.iter().any(|r| r.attr == shaping::toggle_attr(shaping::Axis::Throttle)));
+    }
+
+    #[test]
+    fn an_attached_accessory_restores_the_handbrake_rows_and_its_toggle() {
+        let a = pedals_app("RS Shifter & Handbrake");
+        let hb = a.rows.iter().find(|r| r.attr == "wheel_handbrake_sensitivity").expect("row listed");
+        assert!(hb.available);
+        assert!(a.rows.iter().any(|r| r.attr == shaping::toggle_attr(shaping::Axis::Handbrake)));
     }
 
     #[test]

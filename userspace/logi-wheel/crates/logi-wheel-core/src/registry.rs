@@ -56,9 +56,13 @@ pub const REGISTRY: &[SettingSpec] = &[
     SettingSpec { attr: "wheel_clutch_sensitivity", label: "Clutch sensitivity", help: "Reshapes how pedal travel maps to the clutch. Below 50 eases in for smoother bite-point control, above 50 engages faster; 50 is straight linear.", category: Pedals, kind: PCT, access: ReadWrite, mode_req: Any },
     SettingSpec { attr: "wheel_clutch_curve", label: "Clutch curve", help: "Shapes the whole clutch response by hand so you can dial in the bite point for clean launches. Use 'reset' for the straight built-in response.", category: Pedals, kind: Kind::Curve, access: ReadWrite, mode_req: Any },
     SettingSpec { attr: "wheel_clutch_deadzone", label: "Clutch deadzone", help: "Ignores a slice of travel at the top and bottom of the clutch so a resting foot and full engagement register cleanly. Enter lower and upper percent (they must sum to 99 or less).", category: Pedals, kind: Kind::Pair { max: 99 }, access: ReadWrite, mode_req: Any },
-    // RS Shifter & Handbrake accessory (analog handbrake axis shaping). Only
-    // present when the handbrake is connected; the row reads unavailable
-    // otherwise. Same 0x80A4 curve type as the pedals, on the wheel base.
+    // RS Shifter & Handbrake accessory (analog handbrake axis shaping). Same
+    // 0x80A4 curve type as the pedals, but applied on the wheel base, not on
+    // the accessory: with nothing attached these still read and still write
+    // successfully (verified on an RS50, 2026-07-28), so nothing the wheel
+    // says marks them inapplicable. `Device::requires_accessory` gates them on
+    // `wheel_accessory` instead, which is what makes the rows read unavailable
+    // when no handbrake is connected.
     SettingSpec { attr: "wheel_handbrake_sensitivity", label: "Handbrake sensitivity", help: "Reshapes how the analog handbrake's pull maps in game. Below 50 eases in for gentler slides, above 50 grabs sooner; 50 is straight linear. Needs the handbrake accessory connected.", category: Pedals, kind: PCT, access: ReadWrite, mode_req: Any },
     SettingSpec { attr: "wheel_handbrake_curve", label: "Handbrake curve", help: "Shapes the whole handbrake response by hand for precise slide control across its travel. Use 'reset' for the straight built-in response. Needs the handbrake accessory connected.", category: Pedals, kind: Kind::Curve, access: ReadWrite, mode_req: Any },
     // --- LIGHTSYNC (RS50 RGB strip) ---

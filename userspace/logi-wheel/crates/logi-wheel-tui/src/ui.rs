@@ -359,7 +359,15 @@ fn draw_settings<S: SysfsIo>(buf: &mut Buffer, app: &App<S>, area: Rect) {
                 let editing = app.edit.as_ref().filter(|_| i == app.row_idx);
 
                 let (mut val, mut val_style) = if !row.available {
-                    ("(not on this wheel)".to_string(), Style::default().fg(Color::DarkGray))
+                    // An accessory setting is not missing from the wheel, it is
+                    // waiting on hardware the user can plug in, so say so rather
+                    // than claiming the wheel does not have it.
+                    let why = if logi_wheel_core::device::requires_accessory(&row.attr) {
+                        "(needs handbrake accessory)"
+                    } else {
+                        "(not on this wheel)"
+                    };
+                    (why.to_string(), Style::default().fg(Color::DarkGray))
                 } else if shaping::toggle_axis(&row.attr).is_some() {
                     // A synthetic per-axis view toggle (no registry spec):
                     // show which shaping control the axis currently offers.

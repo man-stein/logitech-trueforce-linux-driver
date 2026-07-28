@@ -520,11 +520,22 @@ pub fn compose_shaping(items: Vec<SettingRow>, toggles: shaping::AxisToggles) ->
     if !items.iter().any(|r| shaping::role(r.attr.as_str()) != ShapingRole::Neutral) {
         return items;
     }
+    // An axis with no available generator row has nothing for its toggle to
+    // switch between (the handbrake pair on a wheel with no accessory
+    // attached), so it gets no toggle at all rather than one that offers a
+    // choice which cannot change anything. Keyed on availability, not on the
+    // handbrake specifically, so any future axis behaves the same way. Mirrors
+    // the TUI's `shaping_rows`.
+    let live: Vec<shaping::Axis> = shaping::Axis::ALL
+        .iter()
+        .copied()
+        .filter(|ax| items.iter().any(|r| shaping::axis(r.attr.as_str()) == Some(*ax) && r.available))
+        .collect();
     let mut out = Vec::with_capacity(items.len() + shaping::Axis::ALL.len());
     let mut headed: Vec<shaping::Axis> = Vec::new();
     for item in items {
         if let Some(ax) = shaping::axis(item.attr.as_str()) {
-            if !headed.contains(&ax) {
+            if !headed.contains(&ax) && live.contains(&ax) {
                 headed.push(ax);
                 out.push(shaping_toggle_row(ax, toggles.get(ax)));
             }
@@ -2022,6 +2033,21 @@ mod tests {
     fn category_setting_rows(cat: Category) -> Vec<SettingRow> {
         let fs = FakeSysfs::new();
         fs.set("wheel_mode", "desktop");
+        // Give every shapeable axis one available generator, so this stands for
+        // a wheel that actually has these axes. `compose_shaping` heads an axis
+        // block only when the axis has something available to toggle between,
+        // and a fixture with no attributes at all is a wheel with no axes.
+        for attr in [
+            "wheel_sensitivity",
+            "wheel_throttle_sensitivity",
+            "wheel_brake_sensitivity",
+            "wheel_clutch_sensitivity",
+            "wheel_handbrake_sensitivity",
+        ] {
+            fs.set(attr, "50");
+        }
+        // The handbrake axis is real only with the accessory attached.
+        fs.set("wheel_accessory", "RS Shifter & Handbrake");
         let vm = crate::viewmodel::ViewModel::with_io(fs);
         setting_rows(&vm.rows_for(cat))
     }

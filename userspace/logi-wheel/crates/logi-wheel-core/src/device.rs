@@ -74,6 +74,22 @@ pub struct DeviceInfo {
     pub model: WheelModel,
 }
 
+/// Settings that only mean anything with the RS Shifter & Handbrake attached.
+///
+/// These need an explicit presence check rather than the EOPNOTSUPP path every
+/// other unsupported setting takes, because the wheel cannot tell us they are
+/// inapplicable: handbrake shaping targets the *base's* own 0x80A4 axis 4, not
+/// the accessory, so with nothing attached a read still returns a value and a
+/// write still succeeds, configuring an axis no hardware drives (verified on an
+/// RS50, 2026-07-28). The shifter's own settings join this list once their wire
+/// format is captured.
+const ACCESSORY_ATTRS: &[&str] = &["wheel_handbrake_sensitivity", "wheel_handbrake_curve"];
+
+/// Whether `attr` is one of [`ACCESSORY_ATTRS`].
+pub fn requires_accessory(attr: &str) -> bool {
+    ACCESSORY_ATTRS.contains(&attr)
+}
+
 pub struct Device<S: SysfsIo> {
     io: S,
     model: WheelModel,
@@ -272,7 +288,10 @@ impl<S: SysfsIo> Device<S> {
     }
 
     pub fn available(&self, attr: &str) -> bool {
-        self.io.exists(attr)
+        if !self.io.exists(attr) {
+            return false;
+        }
+        !(requires_accessory(attr) && self.accessory_attached() == Some(false))
     }
 
     /// Whether `cat` has anything to show for this device: at least one row
@@ -378,11 +397,32 @@ impl<S: SysfsIo> Device<S> {
         if !self.io.exists(attr) {
             return Ok(None);
         }
+        if requires_accessory(attr) && self.accessory_attached() == Some(false) {
+            return Ok(None);
+        }
         match self.read(attr) {
             Ok(v) => Ok(Some(v)),
             Err(Error::Unsupported) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Whether the RS Shifter & Handbrake is attached, per the driver's
+    /// `wheel_accessory` attribute (`none` when the base probed and found
+    /// nothing). `None` means "cannot tell": the attribute is missing (a
+    /// driver older than accessory discovery) or unreadable. Callers must
+    /// treat `None` as "show the row" rather than hiding it, so an older
+    /// driver keeps working instead of silently losing settings.
+    pub fn accessory_attached(&self) -> Option<bool> {
+        if !self.io.exists("wheel_accessory") {
+            return None;
+        }
+        let raw = self.io.read("wheel_accessory").ok()?;
+        let t = raw.trim();
+        if t.is_empty() {
+            return None;
+        }
+        Some(t != "none")
     }
 
     pub fn write(&self, attr: &str, v: &Value) -> Result<(), Error> {
@@ -529,6 +569,67 @@ mod tests {
         let d = Device::with_io(fs);
         assert!(d.available("wheel_throttle_sensitivity"), "the file itself is there");
         assert_eq!(d.read_supported("wheel_throttle_sensitivity").unwrap(), None);
+    }
+
+    /// A wheel exposing the handbrake attrs, with `wheel_accessory` reporting
+    /// whatever `accessory` says. `None` omits the attribute entirely, which is
+    /// what a driver older than accessory discovery looks like.
+    fn dev_with_accessory(accessory: Option<&str>) -> Device<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        fs.set("wheel_handbrake_sensitivity", "50");
+        fs.set("wheel_handbrake_curve", "0/64 points loaded (0 = built-in curve)");
+        fs.set("wheel_range", "900");
+        if let Some(a) = accessory {
+            fs.set("wheel_accessory", a);
+        }
+        Device::with_io(fs)
+    }
+
+    #[test]
+    fn handbrake_settings_are_unavailable_with_no_accessory_attached() {
+        // The wheel cannot tell us these are inapplicable: handbrake shaping
+        // lands on the base's own axis, so the attr reads a real value and a
+        // write would succeed. Only `wheel_accessory` distinguishes the case.
+        let d = dev_with_accessory(Some("none"));
+        assert!(!d.available("wheel_handbrake_sensitivity"));
+        assert!(!d.available("wheel_handbrake_curve"));
+        assert_eq!(d.read_supported("wheel_handbrake_sensitivity").unwrap(), None);
+        assert_eq!(d.read_supported("wheel_handbrake_curve").unwrap(), None);
+    }
+
+    #[test]
+    fn handbrake_settings_are_available_with_the_accessory_attached() {
+        let d = dev_with_accessory(Some("RS Shifter & Handbrake"));
+        assert!(d.available("wheel_handbrake_sensitivity"));
+        assert_eq!(
+            d.read_supported("wheel_handbrake_sensitivity").unwrap(),
+            Some(Value::Percent(50))
+        );
+    }
+
+    #[test]
+    fn handbrake_settings_stay_available_when_accessory_state_is_unknown() {
+        // A driver predating accessory discovery has no `wheel_accessory` file.
+        // Hiding the rows there would silently drop settings that do work, so
+        // "cannot tell" must fall back to showing them.
+        let d = dev_with_accessory(None);
+        assert_eq!(d.accessory_attached(), None);
+        assert!(d.available("wheel_handbrake_sensitivity"));
+        assert_eq!(
+            d.read_supported("wheel_handbrake_sensitivity").unwrap(),
+            Some(Value::Percent(50))
+        );
+    }
+
+    #[test]
+    fn a_missing_accessory_does_not_gate_ordinary_settings() {
+        // The gate is scoped to `ACCESSORY_ATTRS`; nothing else may be caught
+        // by it just because no accessory is attached.
+        let d = dev_with_accessory(Some("none"));
+        assert!(d.available("wheel_range"));
+        assert_eq!(d.read_supported("wheel_range").unwrap(), Some(Value::Int(900)));
+        assert!(!requires_accessory("wheel_range"));
+        assert!(requires_accessory("wheel_handbrake_curve"));
     }
 
     #[test]
