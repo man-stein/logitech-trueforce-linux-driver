@@ -12179,15 +12179,30 @@ static void hidpp_dd_rescan_accessory(struct hidpp_dd_ff_data *ff)
 
 		ff->accessory_scan_cursor = (ff->accessory_scan_cursor + 1) %
 				ARRAY_SIZE(hidpp_dd_pedal_dev_candidates);
-		/* The pedal MCU is not a candidate; skipping costs nothing. */
-		if (cand == ff->pedal_dev_idx)
-			continue;
 		if (hidpp_root_get_feature_on_device_timeout(hidpp, cand,
 					HIDPP_DD_PAGE_RESPONSE_CURVE, &cand_idx,
 					HIDPP_DD_PROBE_TIMEOUT))
 			return;
 		if (hidpp_dd_pedal_axis_count(hidpp, cand, cand_idx, &axes))
 			return;
+		/*
+		 * A sub-device index belongs to the base's physical port, not to
+		 * whatever is plugged into it (hardware-verified 2026-07-28:
+		 * moving the accessory to the pedals' port made it report on the
+		 * pedals' index). So the pedal index is not a safe thing to skip
+		 * over here, and it is not a safe thing to keep believing either:
+		 * classify whatever actually answers, and correct the cached
+		 * pedal index when the wheel disagrees with it.
+		 */
+		if (axes == HIDPP_DD_PEDAL_AXIS_COUNT) {
+			if (ff->pedal_dev_idx != cand) {
+				ff->pedal_dev_idx = cand;
+				ff->idx_pedal_curve = cand_idx;
+				dd_info(hid, "Pedals now at dev 0x%02x (curve idx 0x%02x)\n",
+					cand, cand_idx);
+			}
+			return;
+		}
 		if (axes != HIDPP_DD_SHIFTER_AXIS_COUNT)
 			return;
 		if (hidpp_root_get_feature_on_device(hidpp, cand,
