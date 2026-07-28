@@ -156,7 +156,7 @@ wiki page, and the one-time TrueForce SDK setup is on
 | Debian, Ubuntu, Mint, Pop!_OS | download the `.deb`s from [Releases](https://github.com/mescon/logitech-trueforce-linux-driver/releases), then `sudo apt install ./logitech-trueforce-dkms_*.deb ./logi-wheel_*.deb ./logi-wheel-gui_*.deb` (skip the gui one on a headless box) |
 | Fedora, Nobara | COPR akmod: `sudo dnf copr enable mescon/logitech-trueforce && sudo dnf install akmod-logitech-trueforce logi-wheel-gui` (headless box: `logi-wheel` instead of `logi-wheel-gui`) |
 | openSUSE | OBS repo `home:mescon` (see the [Installation](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Installation) page) |
-| From source (any distro) | `git clone` this repo, then `sudo ./tools/setup.sh` (DKMS build, udev rule, everything). `./tools/setup.sh doctor` health-checks it. |
+| From source (any distro) | `git clone` this repo, then `sudo ./tools/setup.sh` (DKMS build, udev rule, everything). `./tools/setup.sh doctor` health-checks it. Building the GUI also needs `pkg-config` and the fontconfig headers: `libfontconfig-dev` on Debian/Ubuntu, `fontconfig-devel` on Fedora, `fontconfig` on Arch. |
 
 The AUR and Debian packages are DKMS-based and rebuild automatically on kernel
 upgrades. After installing, plug in the wheel and check `dmesg` for a line naming
