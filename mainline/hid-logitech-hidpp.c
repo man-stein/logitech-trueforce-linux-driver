@@ -11866,6 +11866,19 @@ static struct hidpp_dd_ff_data *hidpp_dd_pedal_ff(struct hidpp_device *hidpp,
 		*err = -EOPNOTSUPP;
 		return NULL;
 	}
+	/*
+	 * The curve lives on the base, which has these axes whether or not any
+	 * pedals are plugged into it, so the base feature alone would happily
+	 * offer pedal settings to a wheel with no pedals. Gate on the pedal
+	 * unit having actually answered discovery instead: shaping an axis
+	 * nothing drives is exactly as useless as the handbrake rows on a wheel
+	 * with no accessory, and frontends already render EOPNOTSUPP as
+	 * unavailable.
+	 */
+	if (ff->pedal_dev_idx == HIDPP_DD_FEATURE_NOT_FOUND) {
+		*err = -EOPNOTSUPP;
+		return NULL;
+	}
 	*err = 0;
 	return ff;
 }
