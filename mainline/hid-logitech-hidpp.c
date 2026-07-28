@@ -10090,16 +10090,22 @@ static ssize_t wheel_led_effect_store(struct device *dev, struct device_attribut
 static DEVICE_ATTR(wheel_led_effect, 0664, wheel_led_effect_show, wheel_led_effect_store);
 
 /*
- * wheel_rev_level: rev-light level for the REAL G PRO rim (0-10 = how
- * many LEDs lit). The G PRO's rim lights are level-based, not the
- * RS50's per-LED RGB LIGHTSYNC model: colours, direction and scaling
- * belong to the wheel's onboard profile, and the host only commands a
- * level. Protocol decoded by the TF4ALL project from a G HUB capture
- * (2026-05-16, see dev/docs/tf4all-analysis.md): a one-time arm burst
- * of SHORT sends on the 0x807A feature (fn0, fn1, fn2, fn3 param 0x02,
- * fn0, a few ms apart), then per update a SHORT fn2 + LONG fn6 pair
- * with the level in the LONG's byte 9. G HUB's sw-id nibble (0x0d) is
- * kept verbatim - this is the only known-working capture shape.
+ * wheel_rev_level: rev-light level (0-10 = how many LEDs lit) on the
+ * level-based 0x807A dialect. Originally documented from a real G PRO
+ * capture on the theory that only the G PRO rim speaks it and the
+ * RS50 only understands the per-LED RGB LIGHTSYNC model; a first-party
+ * RS50 capture under iRacing (issue #20, 2026-07-27,
+ * rs50_iracing_led_initialization) shows G HUB driving THIS SAME
+ * level protocol on a real RS50, so both wheels take it. Arm burst is
+ * a one-time run of SHORT sends on the 0x807A feature: fn0, fn1, fn2,
+ * fn0, a few ms apart (no fn3 - an earlier third-party G PRO capture
+ * from TF4ALL, 2026-05-16, had shown a trailing "fn3 param 0x02"
+ * SET_EFFECT that does not appear in this first-party trace and, on
+ * the RS50, force-switches LIGHTSYNC to effect 2; dropped). Per
+ * update it's a SHORT fn2 + LONG fn6 pair with the level in the
+ * LONG's byte 9. The RS50 capture's own sw-id nibble is 0x0c, one off
+ * our long-standing 0x0d; sw-id is only a response-matching tag the
+ * sender picks, so ours is kept as-is.
  *
  * Two cautions baked in, both from TF4ALL's testing on real hardware:
  * writes are fire-and-forget (no reply is read - the pair does not
@@ -10117,9 +10123,6 @@ static DEVICE_ATTR(wheel_led_effect, 0664, wheel_led_effect_show, wheel_led_effe
  * therefore collapse to one send per slot with the newest level winning,
  * instead of blocking each write ~160 ms and draining stale
  * intermediates onto the wire.
- *
- * UNTESTED on real hardware (we develop on an RS50); gated to real
- * G PROs by dd_is_real_gpro() and needs a G PRO owner to validate.
  */
 #define HIDPP_DD_REV_SWID		0x0d	/* G HUB's sw-id, kept verbatim */
 #define HIDPP_DD_REV_MAX_LEVEL		10
@@ -10182,87 +10185,6 @@ static int hidpp_dd_rev_send_level(struct hidpp_device *hidpp, u8 idx, u8 level)
 }
 
 /*
- * Undo the arm burst's LIGHTSYNC side effect. The burst's "fn3 param
- * 0x02" is a real SET_EFFECT: it force-switches the wheel to effect 2
- * (Outside-In), stomping whatever effect the user had active, and the
- * wheel falls back to rendering its default custom slot once the effect
- * moves away from Custom (both hardware-verified on the RS50,
- * 2026-07-20: post-arm rev fills always animated edges-in, and the
- * next return to effect 5 came up on the wrong slot's image).
- *
- * Re-assert the pre-arm state exactly like wheel_led_effect_store does:
- * fn3 stages the effect; Custom (5) repaints via the active slot's RGB
- * upload (which also re-activates the user's slot), animated modes via
- * the zero-parameter fn6 commit. Rev fills render with whatever effect
- * is CURRENTLY active, so restoring the user's effect here is what
- * makes the first post-arm fill animate with the user's direction.
- *
- * Runs once, straight after the one-time arm burst, in the rev worker's
- * process context with rev_lock held and send_mutex NOT held (the sync
- * command path takes it internally). Failures are logged, not
- * propagated: the level write that triggered arming must still go out,
- * and the user can recover with an explicit wheel_led_effect write.
- */
-static void hidpp_dd_rev_restore_lightsync(struct hidpp_device *hidpp,
-					   struct hidpp_dd_ff_data *ff,
-					   u8 effect, u8 slot)
-{
-	struct hid_device *hid = hidpp->hid_dev;
-	struct hidpp_report response;
-	u8 params[3] = { effect, 0x00, 0x00 };
-	int ret;
-
-	/*
-	 * A real G PRO's 0x807A speaks the level-based rev dialect only;
-	 * the RS50-shaped LIGHTSYNC traffic below would be exactly the
-	 * wrong-protocol writes the init-time enable/query gating avoids.
-	 */
-	if (dd_is_real_gpro(hid))
-		return;
-	if (ff->idx_lightsync == HIDPP_DD_FEATURE_NOT_FOUND)
-		return;
-	if (effect < 1 || effect > 9)
-		return;
-
-	ret = hidpp_send_fap_command_sync(hidpp, ff->idx_lightsync,
-					  HIDPP_DD_LIGHTSYNC_FN_SET_EFFECT,
-					  params, 3, &response);
-	if (ret) {
-		dd_warn(hid, "rev arm: LED effect %u restore failed: %d\n",
-			effect, ret);
-		return;
-	}
-
-	if (effect == 5) {
-		if (slot < HIDPP_DD_LIGHTSYNC_NUM_SLOTS) {
-			hidpp_dd_lightsync_ensure_slot_cached(hidpp, ff, slot);
-			ret = hidpp_dd_lightsync_apply_slot(hidpp, ff, slot,
-							    true);
-			if (ret) {
-				dd_warn(hid,
-					"rev arm: LED slot %u re-apply failed: %d\n",
-					slot, ret);
-				return;
-			}
-		}
-	} else {
-		u8 commit[3] = { 0x00, 0x00, 0x00 };
-
-		ret = hidpp_send_fap_command_sync(hidpp, ff->idx_lightsync,
-						  HIDPP_DD_LIGHTSYNC_FN_SET_CONFIG,
-						  commit, 3, &response);
-		if (ret) {
-			dd_warn(hid,
-				"rev arm: LED effect %u commit failed: %d\n",
-				effect, ret);
-			return;
-		}
-	}
-
-	dd_info(hid, "rev arm: restored LED effect %u\n", effect);
-}
-
-/*
  * Coalescing rev-light flush (process context, system_unbound_wq).
  *
  * Runs on system_unbound_wq, not ff->wq: it does synchronous-ish 0x807A
@@ -10281,8 +10203,7 @@ static void hidpp_dd_rev_work_handler(struct work_struct *work)
 	struct hidpp_dd_ff_data *ff = container_of(work, struct hidpp_dd_ff_data,
 						   rev_work.work);
 	struct hidpp_device *hidpp = ff->hidpp;
-	u8 target, pre_effect = 0, pre_slot = 0;
-	bool arming = false;
+	u8 target;
 	int ret = 0, i;
 
 	if (atomic_read_acquire(&ff->stopping) || !atomic_read(&ff->initialized))
@@ -10300,19 +10221,6 @@ static void hidpp_dd_rev_work_handler(struct work_struct *work)
 	target = READ_ONCE(ff->rev_target);
 
 	/*
-	 * Snapshot the user-visible LIGHTSYNC state BEFORE the arm burst:
-	 * the burst's fn3 param 0x02 force-switches the wheel to effect 2,
-	 * and the effect-change broadcast it triggers overwrites the
-	 * led_effect cache with 2 - reading it afterwards would "restore"
-	 * the stomp itself.
-	 */
-	arming = !ff->rev_armed;
-	if (arming) {
-		pre_effect = READ_ONCE(ff->led_effect);
-		pre_slot = READ_ONCE(ff->led_active_slot);
-	}
-
-	/*
 	 * Serialise the raw sends against the sync-transaction machinery:
 	 * holding send_mutex guarantees no sync question is pending on this
 	 * interface while our fire-and-forget 0x807A traffic can elicit
@@ -10323,33 +10231,16 @@ static void hidpp_dd_rev_work_handler(struct work_struct *work)
 	mutex_lock(&hidpp->send_mutex);
 
 	if (!ff->rev_armed) {
-		static const u8 arm_fns[]    = { 0, 1, 2, 3, 0 };
-		static const u8 arm_params[] = { 0, 0, 0, 2, 0 };
+		static const u8 arm_fns[] = { 0, 1, 2, 0 };
 
 		for (i = 0; i < ARRAY_SIZE(arm_fns); i++) {
 			ret = hidpp_dd_rev_send_short(hidpp, ff->idx_lightsync,
-						      arm_fns[i], arm_params[i]);
+						      arm_fns[i], 0);
 			if (ret < 0)
 				goto out_send;
 			msleep(HIDPP_DD_REV_ARM_GAP_MS);
 		}
 		ff->rev_armed = true;
-
-		/*
-		 * The burst completed, so the wheel is now on effect 2.
-		 * Restore the pre-arm state before the first level send so
-		 * that fill already renders with the user's effect and
-		 * direction. The restore uses the sync command path, which
-		 * takes send_mutex itself: drop it across the call and
-		 * re-take it for the level send. rev_lock stays held, so
-		 * the rev path remains serialised and arm+restore still
-		 * runs exactly once. (On a burst failure above, rev_armed
-		 * stays false and the next flush retries burst+restore.)
-		 */
-		mutex_unlock(&hidpp->send_mutex);
-		hidpp_dd_rev_restore_lightsync(hidpp, ff, pre_effect,
-					       pre_slot);
-		mutex_lock(&hidpp->send_mutex);
 	}
 
 	ret = hidpp_dd_rev_send_level(hidpp, ff->idx_lightsync, target);
