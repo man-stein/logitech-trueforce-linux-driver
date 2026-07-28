@@ -477,7 +477,7 @@ mod tests {
         let fs = FakeSysfs::new();
         fs.set("wheel_range", "900");
         fs.set("wheel_mode", "desktop");
-        fs.set("wheel_serial", "2538WDQ0M9X8");
+        fs.set("wheel_serial", "TESTSERIAL01");
         fs.set("wheel_sensitivity", "50");
         fs.set("wheel_texture_route", "tf");
         Device::with_io(fs)
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn info_reads_identity() {
         let i = dev().info().unwrap();
-        assert_eq!(i.serial, "2538WDQ0M9X8");
+        assert_eq!(i.serial, "TESTSERIAL01");
         assert_eq!(i.mode, Mode::Desktop);
     }
 
