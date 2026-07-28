@@ -4391,6 +4391,18 @@ static void hidpp_ff_retry_work(struct work_struct *work)
  */
 #define HIDPP_DD_SHIFTER_AXIS_COUNT		1
 #define HIDPP_DD_HANDBRAKE_AXIS		4	/* 0x80A4 axis on the base (dev 0xff) for the RS handbrake (HID usage 0x32 = Z) */
+
+/*
+ * Base 0x80A4 axis carrying a pedal's response curve. The pedal attrs are
+ * indexed 0=throttle, 1=brake, 2=clutch; on the base those are axes 1, 2 and 3
+ * (axis 0 is the steering, axis 4 the handbrake).
+ *
+ * Each mapping was proven individually by uploading a step curve to one base
+ * axis with the pedals untouched and watching exactly one evdev axis snap to
+ * the step's plateau: axis 1 -> ABS_RX (throttle), 2 -> ABS_RY (brake),
+ * 3 -> ABS_RZ (clutch). Hardware, 2026-07-28.
+ */
+#define HIDPP_DD_PEDAL_BASE_AXIS(pedal)		((pedal) + 1)
 #define HIDPP_DD_PAGE_CALIBRATE		0x812C	/* Centre calibration (G Pro sub-device 0x05) */
 #define HIDPP_DD_PAGE_SYNC			0x1BC0	/* Unknown sync/prepare feature */
 /*
@@ -11812,11 +11824,17 @@ static DEVICE_ATTR(wheel_handbrake_sensitivity, 0664,
 		   wheel_handbrake_sensitivity_store);
 
 /*
- * Pedal shaping: 0x80A4 response curves on the pedal sub-device
- * (ff->pedal_dev_idx, discovered at runtime - see
- * hidpp_dd_discover_settings_features), axes 0=throttle, 1=brake, 2=clutch.
- * Hardware-verified 2026-07-16 that the pedal MCU applies an uploaded curve
- * to its PC HID output (double-plateau test).
+ * Pedal shaping: 0x80A4 response curves on the BASE (dev 0xff,
+ * ff->idx_response_curve), one axis up from the pedal index - see
+ * HIDPP_DD_PEDAL_BASE_AXIS.
+ *
+ * NOT the pedal MCU, which is where this used to write. The MCU accepts an
+ * upload and reports it back as loaded, but never applies it to its HID
+ * output, so every one of these controls was silently doing nothing
+ * (hardware-proven 2026-07-28: with a step curve loaded on the MCU the axis
+ * swept straight through the band the step makes unreachable, while the same
+ * curve on the base pinned the axis to the step's plateau exactly). G Hub
+ * writes the throttle curve to base axis 1 as well.
  *
  * Each pedal exposes three sysfs generators that all write the ONE curve the
  * axis holds, so the last write wins:
@@ -11844,7 +11862,7 @@ static struct hidpp_dd_ff_data *hidpp_dd_pedal_ff(struct hidpp_device *hidpp,
 		*err = -ENODEV;
 		return NULL;
 	}
-	if (ff->idx_pedal_curve == HIDPP_DD_FEATURE_NOT_FOUND) {
+	if (ff->idx_response_curve == HIDPP_DD_FEATURE_NOT_FOUND) {
 		*err = -EOPNOTSUPP;
 		return NULL;
 	}
@@ -11858,7 +11876,7 @@ static ssize_t hidpp_dd_pedal_curve_show(struct hid_device *hid, u8 axis,
 	struct hidpp_device *hidpp = hid_get_drvdata(hid);
 	struct hidpp_report response;
 	struct hidpp_dd_ff_data *ff;
-	u8 params[1] = { axis };
+	u8 params[1] = { HIDPP_DD_PEDAL_BASE_AXIS(axis) };
 	u16 loaded, max;
 	int ret;
 
@@ -11867,8 +11885,7 @@ static ssize_t hidpp_dd_pedal_curve_show(struct hid_device *hid, u8 axis,
 		return ret;
 
 	memset(&response, 0, sizeof(response));
-	ret = hidpp_send_fap_to_device_sync(hidpp, ff->pedal_dev_idx,
-					    ff->idx_pedal_curve,
+	ret = hidpp_send_fap_command_sync(hidpp, ff->idx_response_curve,
 					    0x10 /* fn1 axis info */,
 					    params, 1, &response);
 	if (ret)
@@ -11891,12 +11908,14 @@ static ssize_t hidpp_dd_pedal_curve_store(struct hid_device *hid, u8 axis,
 		return ret;
 
 	if (sysfs_streq(buf, "reset")) {
-		ret = hidpp_dd_response_curve_revert(hidpp, ff->pedal_dev_idx,
-						     axis, ff->idx_pedal_curve);
+		ret = hidpp_dd_response_curve_revert(hidpp, 0xff,
+						     HIDPP_DD_PEDAL_BASE_AXIS(axis),
+						     ff->idx_response_curve);
 		return ret ? hidpp_errno(hid, ret, "reset pedal curve") : count;
 	}
-	ret = hidpp_dd_response_curve_upload(hidpp, ff, ff->pedal_dev_idx,
-					     axis, ff->idx_pedal_curve, buf, count);
+	ret = hidpp_dd_response_curve_upload(hidpp, ff, 0xff,
+					     HIDPP_DD_PEDAL_BASE_AXIS(axis),
+					     ff->idx_response_curve, buf, count);
 	return ret < 0 ? ret : count;
 }
 
@@ -11931,8 +11950,9 @@ static ssize_t hidpp_dd_pedal_sensitivity_store(struct hid_device *hid, u8 axis,
 	sensitivity = clamp(sensitivity, 0, 100);
 
 	if (sensitivity == 50) {
-		ret = hidpp_dd_response_curve_revert(hidpp, ff->pedal_dev_idx,
-						     axis, ff->idx_pedal_curve);
+		ret = hidpp_dd_response_curve_revert(hidpp, 0xff,
+						     HIDPP_DD_PEDAL_BASE_AXIS(axis),
+						     ff->idx_response_curve);
 		if (ret)
 			return hidpp_errno(hid, ret, "set pedal sensitivity");
 		ff->pedal_sens[axis] = 50;
@@ -11944,8 +11964,9 @@ static ssize_t hidpp_dd_pedal_sensitivity_store(struct hid_device *hid, u8 axis,
 		return -ENOMEM;
 	len = hidpp_dd_build_sensitivity_curve(sensitivity, curve,
 					       HIDPP_DD_SENS_CURVE_BUFSZ);
-	ret = hidpp_dd_response_curve_upload(hidpp, ff, ff->pedal_dev_idx,
-					     axis, ff->idx_pedal_curve, curve, len);
+	ret = hidpp_dd_response_curve_upload(hidpp, ff, 0xff,
+					     HIDPP_DD_PEDAL_BASE_AXIS(axis),
+					     ff->idx_response_curve, curve, len);
 	kfree(curve);
 	if (ret)
 		return ret;
@@ -11985,8 +12006,9 @@ static ssize_t hidpp_dd_pedal_deadzone_store(struct hid_device *hid, u8 axis,
 		return -EINVAL;
 
 	if (lower == 0 && upper == 0) {
-		ret = hidpp_dd_response_curve_revert(hidpp, ff->pedal_dev_idx,
-						     axis, ff->idx_pedal_curve);
+		ret = hidpp_dd_response_curve_revert(hidpp, 0xff,
+						     HIDPP_DD_PEDAL_BASE_AXIS(axis),
+						     ff->idx_response_curve);
 		if (ret)
 			return hidpp_errno(hid, ret, "reset pedal deadzone");
 		ff->pedal_deadzone[axis][0] = 0;
@@ -12009,8 +12031,9 @@ static ssize_t hidpp_dd_pedal_deadzone_store(struct hid_device *hid, u8 axis,
 		n += scnprintf(curve + n, sizeof(curve) - n, " %u:65535", hi_in);
 	n += scnprintf(curve + n, sizeof(curve) - n, " 65535:65535");
 
-	ret = hidpp_dd_response_curve_upload(hidpp, ff, ff->pedal_dev_idx,
-					     axis, ff->idx_pedal_curve, curve, n);
+	ret = hidpp_dd_response_curve_upload(hidpp, ff, 0xff,
+					     HIDPP_DD_PEDAL_BASE_AXIS(axis),
+					     ff->idx_response_curve, curve, n);
 	if (ret)
 		return ret;
 	ff->pedal_deadzone[axis][0] = lower;
