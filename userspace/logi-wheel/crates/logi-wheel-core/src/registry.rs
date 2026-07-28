@@ -63,6 +63,7 @@ pub const REGISTRY: &[SettingSpec] = &[
     // says marks them inapplicable. `Device::requires_accessory` gates them on
     // `wheel_accessory` instead, which is what makes the rows read unavailable
     // when no handbrake is connected.
+    SettingSpec { attr: "wheel_accessory_mode", label: "Accessory mode", help: "Which of its three jobs the RS Shifter & Handbrake is doing right now, set by the physical switch on its base: sequential shifter, digital handbrake, or analog handbrake. Settings that belong to a different mode are shown greyed out.", category: Pedals, kind: Kind::TextField { max_len: 24 }, access: ReadOnly, mode_req: Any },
     SettingSpec { attr: "wheel_handbrake_sensitivity", label: "Handbrake sensitivity", help: "Reshapes how the analog handbrake's pull maps in game. Below 50 eases in for gentler slides, above 50 grabs sooner; 50 is straight linear. Needs the handbrake accessory connected.", category: Pedals, kind: PCT, access: ReadWrite, mode_req: Any },
     SettingSpec { attr: "wheel_handbrake_curve", label: "Handbrake curve", help: "Shapes the whole handbrake response by hand for precise slide control across its travel. Use 'reset' for the straight built-in response. Needs the handbrake accessory connected.", category: Pedals, kind: Kind::Curve, access: ReadWrite, mode_req: Any },
     // The accessory's own actuation points (0x80B1), after the handbrake
@@ -239,6 +240,7 @@ mod tests {
                 "wheel_clutch_sensitivity",
                 "wheel_clutch_curve",
                 "wheel_clutch_deadzone",
+                "wheel_accessory_mode",
                 "wheel_handbrake_sensitivity",
                 "wheel_handbrake_curve",
                 "wheel_shift_actuation",

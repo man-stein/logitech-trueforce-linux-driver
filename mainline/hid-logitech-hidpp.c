@@ -12448,6 +12448,61 @@ static ssize_t wheel_shift_actuation_store(struct device *dev,
 		return hidpp_errno(hid, ret, "set shift actuation (down)");
 	return count;
 }
+/*
+ * wheel_accessory_mode: which of its three things the RS Shifter & Handbrake
+ * currently is, read from feature 0x1B30 (DEVICE_MODE) fn2 on the accessory.
+ *
+ * The unit has a physical three-position switch and only one mode is live at
+ * a time, so most of its settings apply to only one of them. Reporting the
+ * position lets a frontend say which controls are currently doing anything
+ * instead of offering all of them at once.
+ *
+ * The value ordering is NOT the switch's left-to-right order, which is
+ * exactly why it was measured rather than assumed (hardware, 2026-07-28,
+ * moving the switch through all three positions while watching fn2):
+ *
+ *   0 = sequential shifter   (switch LEFT)
+ *   2 = digital handbrake    (switch MIDDLE)
+ *   1 = analog handbrake     (switch RIGHT)
+ *
+ * fn0 returns a static `1a 03 01` on this firmware and is not the mode.
+ */
+static const char * const hidpp_dd_accessory_modes[] = {
+	[0] = "shifter",
+	[1] = "analog-handbrake",
+	[2] = "digital-handbrake",
+};
+
+static ssize_t wheel_accessory_mode_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hidpp_dd_ff_data *ff;
+	struct hidpp_report response;
+	u8 mode;
+	int ret;
+
+	ff = hidpp_dd_accessory_ff(hid_get_drvdata(hid), &ret);
+	if (!ff)
+		return ret;
+	if (ff->idx_shifter_mode == HIDPP_DD_FEATURE_NOT_FOUND)
+		return -EOPNOTSUPP;
+
+	memset(&response, 0, sizeof(response));
+	ret = hidpp_send_fap_to_device_sync(ff->hidpp, ff->shifter_dev_idx,
+					    ff->idx_shifter_mode,
+					    0x20 /* fn2 get mode */,
+					    NULL, 0, &response);
+	if (ret)
+		return hidpp_errno(hid, ret, "read accessory mode");
+	mode = response.fap.params[0];
+	if (mode >= ARRAY_SIZE(hidpp_dd_accessory_modes))
+		return sysfs_emit(buf, "unknown (%u)\n", mode);
+	return sysfs_emit(buf, "%s\n", hidpp_dd_accessory_modes[mode]);
+}
+static DEVICE_ATTR(wheel_accessory_mode, 0444, wheel_accessory_mode_show, NULL);
+
 static DEVICE_ATTR(wheel_shift_actuation, 0664,
 		   wheel_shift_actuation_show,
 		   wheel_shift_actuation_store);
@@ -12686,6 +12741,7 @@ static struct attribute *hidpp_dd_wheel_group_attrs[] = {
 	&dev_attr_wheel_serial.attr,
 	&dev_attr_wheel_firmware.attr,
 	&dev_attr_wheel_accessory.attr,
+	&dev_attr_wheel_accessory_mode.attr,
 	&dev_attr_wheel_shift_actuation.attr,
 	&dev_attr_wheel_handbrake_actuation.attr,
 	&dev_attr_wheel_profile_names.attr,

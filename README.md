@@ -189,9 +189,11 @@ curve editor.
 
 ![logi-wheel-gui curve editor](docs/images/logi-wheel-curve-editor.png)
 
-The **RS Shifter & Handbrake** is supported too: plug it into the wheel base
-and its settings appear on their own, including the shift and handbrake
-trigger points. Unplug it and they go away again.
+The **RS Shifter & Handbrake** is supported too. Plug it into the wheel base
+and its settings appear on their own; unplug it and they go away again. The
+app also reads the physical three-position switch on its base and greys out
+whatever does not apply: below it is in analog-handbrake mode, so the
+handbrake curve is live while the two trigger points are not.
 
 ![logi-wheel-gui RS Shifter and Handbrake settings](docs/images/logi-wheel-accessory.png)
 

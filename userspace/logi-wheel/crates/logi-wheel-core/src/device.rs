@@ -98,6 +98,27 @@ pub fn requires_accessory(attr: &str) -> bool {
     ACCESSORY_ATTRS.contains(&attr)
 }
 
+/// The accessory mode an attribute needs before it does anything.
+///
+/// The RS Shifter & Handbrake is one of three things at a time, chosen by a
+/// physical switch, and most of its settings belong to exactly one of them:
+/// a shift actuation point is meaningless while the unit is a handbrake. The
+/// driver reports the live position in `wheel_accessory_mode`, so a frontend
+/// can grey the settings that are not currently doing anything and say why.
+///
+/// Deliberately advisory rather than enforced: the values persist across a
+/// mode change, so writing one while the switch is elsewhere is a legitimate
+/// thing to do (set it up now, flip the switch later). sysfs stays
+/// permissive; only the presentation changes.
+pub fn required_mode(attr: &str) -> Option<&'static str> {
+    match attr {
+        "wheel_shift_actuation" => Some("shifter"),
+        "wheel_handbrake_actuation" => Some("digital-handbrake"),
+        "wheel_handbrake_sensitivity" | "wheel_handbrake_curve" => Some("analog-handbrake"),
+        _ => None,
+    }
+}
+
 pub struct Device<S: SysfsIo> {
     io: S,
     model: WheelModel,
@@ -299,7 +320,10 @@ impl<S: SysfsIo> Device<S> {
         if !self.io.exists(attr) {
             return false;
         }
-        !(requires_accessory(attr) && self.accessory_attached() == Some(false))
+        if requires_accessory(attr) && self.accessory_attached() == Some(false) {
+            return false;
+        }
+        !self.wrong_accessory_mode(attr)
     }
 
     /// Whether `cat` has anything to show for this device: at least one row
@@ -408,6 +432,9 @@ impl<S: SysfsIo> Device<S> {
         if requires_accessory(attr) && self.accessory_attached() == Some(false) {
             return Ok(None);
         }
+        if self.wrong_accessory_mode(attr) {
+            return Ok(None);
+        }
         match self.read(attr) {
             Ok(v) => Ok(Some(v)),
             Err(Error::Unsupported) => Ok(None),
@@ -421,6 +448,31 @@ impl<S: SysfsIo> Device<S> {
     /// driver older than accessory discovery) or unreadable. Callers must
     /// treat `None` as "show the row" rather than hiding it, so an older
     /// driver keeps working instead of silently losing settings.
+    /// The accessory's live mode from `wheel_accessory_mode`, or `None` when
+    /// it cannot be read (no accessory, a driver without the attribute, or
+    /// the firmware reporting a value this build does not know).
+    pub fn accessory_mode(&self) -> Option<String> {
+        if !self.io.exists("wheel_accessory_mode") {
+            return None;
+        }
+        let raw = self.io.read("wheel_accessory_mode").ok()?;
+        let t = raw.trim();
+        if t.is_empty() || t.starts_with("unknown") {
+            return None;
+        }
+        Some(t.to_string())
+    }
+
+    /// Whether `attr` is idle because the accessory is in a different mode.
+    /// `false` whenever the mode cannot be read, so an unknown mode never
+    /// hides a control.
+    pub fn wrong_accessory_mode(&self, attr: &str) -> bool {
+        match (required_mode(attr), self.accessory_mode()) {
+            (Some(want), Some(have)) => want != have,
+            _ => false,
+        }
+    }
+
     pub fn accessory_attached(&self) -> Option<bool> {
         if !self.io.exists("wheel_accessory") {
             return None;
@@ -627,6 +679,55 @@ mod tests {
             d.read_supported("wheel_handbrake_sensitivity").unwrap(),
             Some(Value::Percent(50))
         );
+    }
+
+    /// A wheel with the accessory attached and switched to `mode`.
+    fn dev_in_mode(mode: &str) -> Device<FakeSysfs> {
+        let fs = FakeSysfs::new();
+        for a in ["wheel_shift_actuation", "wheel_handbrake_actuation",
+                  "wheel_handbrake_sensitivity", "wheel_range"] {
+            fs.set(a, "50");
+        }
+        fs.set("wheel_accessory", "RS Shifter & Handbrake");
+        fs.set("wheel_accessory_mode", mode);
+        Device::with_io(fs)
+    }
+
+    #[test]
+    fn accessory_settings_are_gated_on_the_mode_the_switch_is_in() {
+        // The unit is one of three things at a time, and each setting belongs
+        // to exactly one of them.
+        let shifter = dev_in_mode("shifter");
+        assert!(shifter.available("wheel_shift_actuation"));
+        assert!(!shifter.available("wheel_handbrake_actuation"));
+        assert!(!shifter.available("wheel_handbrake_sensitivity"));
+
+        let digital = dev_in_mode("digital-handbrake");
+        assert!(!digital.available("wheel_shift_actuation"));
+        assert!(digital.available("wheel_handbrake_actuation"));
+        assert!(!digital.available("wheel_handbrake_sensitivity"));
+
+        let analog = dev_in_mode("analog-handbrake");
+        assert!(!analog.available("wheel_shift_actuation"));
+        assert!(!analog.available("wheel_handbrake_actuation"));
+        assert!(analog.available("wheel_handbrake_sensitivity"));
+
+        // Nothing else is touched by the mode.
+        assert!(analog.available("wheel_range"));
+    }
+
+    #[test]
+    fn an_unreadable_mode_never_hides_anything() {
+        // A driver without the attribute, or a firmware reporting a value this
+        // build does not know, must not make settings disappear.
+        let fs = FakeSysfs::new();
+        fs.set("wheel_shift_actuation", "50");
+        fs.set("wheel_handbrake_actuation", "50");
+        fs.set("wheel_accessory", "RS Shifter & Handbrake");
+        let d = Device::with_io(fs);
+        assert_eq!(d.accessory_mode(), None);
+        assert!(d.available("wheel_shift_actuation"));
+        assert!(d.available("wheel_handbrake_actuation"));
     }
 
     #[test]

@@ -144,6 +144,7 @@ pub fn attr_group(attr: &str) -> &'static str {
         "wheel_clutch_sensitivity" | "wheel_clutch_curve" | "wheel_clutch_deadzone" => "CLUTCH",
         "wheel_handbrake_sensitivity" | "wheel_handbrake_curve"
         | "wheel_handbrake_actuation" => "HANDBRAKE",
+        "wheel_accessory_mode" => "ACCESSORY",
         "wheel_shift_actuation" => "SHIFTER",
         "wheel_led_effect" | "wheel_led_brightness" => "STRIP",
         "wheel_led_slot" | "wheel_led_slot_name" | "wheel_led_colors" | "wheel_led_direction"
@@ -2048,8 +2049,10 @@ mod tests {
         ] {
             fs.set(attr, "50");
         }
-        // The handbrake axis is real only with the accessory attached.
+        // The handbrake axis is real only with the accessory attached, and
+        // only while the unit is switched to the analog handbrake.
         fs.set("wheel_accessory", "RS Shifter & Handbrake");
+        fs.set("wheel_accessory_mode", "analog-handbrake");
         let vm = crate::viewmodel::ViewModel::with_io(fs);
         setting_rows(&vm.rows_for(cat))
     }
@@ -2120,6 +2123,7 @@ mod tests {
                 shaping::toggle_attr(Axis::Clutch),
                 "wheel_clutch_sensitivity",
                 "wheel_clutch_deadzone",
+                "wheel_accessory_mode",
                 shaping::toggle_attr(Axis::Handbrake),
                 "wheel_handbrake_sensitivity",
                 "wheel_shift_actuation",
@@ -2146,6 +2150,7 @@ mod tests {
                 shaping::toggle_attr(Axis::Clutch),
                 "wheel_clutch_curve",
                 "wheel_clutch_deadzone",
+                "wheel_accessory_mode",
                 shaping::toggle_attr(Axis::Handbrake),
                 "wheel_handbrake_curve",
                 "wheel_shift_actuation",

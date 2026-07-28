@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 340" role="img"
+     aria-label="RS Shifter and Handbrake: upright lever on a tapered base with a three-position mode switch">
+  <title>RS Shifter &amp; Handbrake</title>
+  <desc>
+    Original line drawing of the accessory, not derived from any vendor
+    photograph: an upright knurled lever with a collar and coloured ring,
+    on a tapered base carrying three mode icons above a sliding switch.
+  </desc>
+
+  <defs>
+    <!-- One neutral body ramp, reused so the whole unit reads as a single
+         moulded piece rather than separately shaded parts. -->
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#2b2f36"/>
+      <stop offset="0.42" stop-color="#3c424b"/>
+      <stop offset="0.72" stop-color="#272b31"/>
+      <stop offset="1"    stop-color="#1b1e23"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#23262c"/>
+      <stop offset="0.38" stop-color="#3a4048"/>
+      <stop offset="0.78" stop-color="#22252a"/>
+      <stop offset="1"    stop-color="#171a1e"/>
+    </linearGradient>
+    <!-- Knurling: a hatch tile, so the texture is described once and the
+         lever and collar both reference it. -->
+    <pattern id="knurl" width="6" height="6" patternUnits="userSpaceOnUse"
+             patternTransform="rotate(35)">
+      <rect width="6" height="6" fill="none"/>
+      <path d="M0 0 L0 6" stroke="#0f1114" stroke-width="1.1" opacity="0.55"/>
+      <path d="M3 0 L3 6" stroke="#565e69" stroke-width="0.7" opacity="0.30"/>
+    </pattern>
+  </defs>
+
+  <!-- Contact shadow: grounds the unit so it does not float. -->
+  <ellipse cx="130" cy="317" rx="74" ry="9" fill="#000" opacity="0.30"/>
+
+  <!-- lever -->
+  <g>
+    <rect x="112" y="26" width="36" height="132" rx="18" fill="url(#grip)"/>
+    <rect x="112" y="26" width="36" height="132" rx="18" fill="url(#knurl)"/>
+    <!-- Highlight down the left face: one light source, top-left. -->
+    <rect x="117" y="34" width="7" height="116" rx="3.5" fill="#79828f" opacity="0.30"/>
+    <!-- Accent ring, the unit's one spot of colour. -->
+    <rect x="112" y="158" width="36" height="10" rx="4" fill="#1f9fd8"/>
+    <rect x="112" y="158" width="36" height="4"  rx="2" fill="#54c2ef" opacity="0.75"/>
+  </g>
+
+  <!-- locking collar -->
+  <g>
+    <path d="M110 170 h40 l-4 26 h-32 z" fill="url(#body)"/>
+    <path d="M110 170 h40 l-4 26 h-32 z" fill="url(#knurl)"/>
+    <path d="M110 170 h40" stroke="#666f7c" stroke-width="1.4" opacity="0.55"/>
+  </g>
+
+  <!-- shaft -->
+  <rect x="123" y="194" width="14" height="30" fill="#15181c"/>
+  <rect x="125" y="194" width="4"  height="30" fill="#4d545e" opacity="0.55"/>
+
+  <!-- base -->
+  <g>
+    <!-- Top deck, slightly proud of the body. -->
+    <path d="M74 224 h112 a10 10 0 0 1 10 10 v10 H64 v-10 a10 10 0 0 1 10 -10 z"
+          fill="#333941"/>
+    <!-- Tapered body: narrower at the top, flaring to the foot. -->
+    <path d="M64 244 h132 l14 66 a8 8 0 0 1 -8 10 H58 a8 8 0 0 1 -8 -10 z"
+          fill="url(#body)"/>
+    <!-- Edge highlight along the left flank. -->
+    <path d="M64 244 L50 310" stroke="#79828f" stroke-width="2" opacity="0.28" fill="none"/>
+    <!-- Foot seam. -->
+    <path d="M53 300 H207" stroke="#12151a" stroke-width="2" opacity="0.75"/>
+
+    <!-- Shaft aperture on the deck. -->
+    <ellipse cx="130" cy="234" rx="17" ry="6" fill="#0e1013"/>
+    <ellipse cx="130" cy="233" rx="17" ry="6" fill="#1b1f24"/>
+    <!-- The two lever sockets: middle hole for shifter, rear for handbrake. -->
+    <circle cx="101" cy="233" r="3.4" fill="#0e1013"/>
+    <circle cx="159" cy="233" r="3.4" fill="#0e1013"/>
+  </g>
+
+  <!-- mode icons + switch.
+       Three positions, left to right: sequential shifter, digital
+       handbrake, analog handbrake. Drawn as simple glyphs rather than
+       copies of the moulded pictograms. -->
+  <g stroke="#8b939f" stroke-width="1.6" fill="none" stroke-linecap="round"
+     stroke-linejoin="round" opacity="0.85">
+    <!-- shifter: a gate with a lever in it -->
+    <path d="M103 266 v10 M99 276 h8"/>
+    <circle cx="103" cy="263" r="2.4" fill="#8b939f" stroke="none"/>
+    <!-- digital handbrake: a lever with a detent block -->
+    <path d="M127 277 l6 -13"/>
+    <rect x="124" y="277" width="12" height="5" rx="1.5"/>
+    <!-- analog handbrake: the same lever, pulled further, with travel arc -->
+    <path d="M151 277 l9 -12"/>
+    <path d="M149 277 h13"/>
+    <path d="M156 268 a9 9 0 0 1 5 6" opacity="0.6"/>
+  </g>
+
+  <!-- Switch track and slider. The slider sits under the LEFT icon by
+       default; the GUI swaps this asset's variant to show the live mode. -->
+  <rect x="94" y="288" width="72" height="14" rx="7" fill="#14171b"/>
+  <rect x="96" y="290" width="68" height="10" rx="5" fill="#0d0f12"/>
+  <g id="slider">
+    <rect x="97" y="289" width="22" height="12" rx="6" fill="#5a626e"/>
+    <rect x="99" y="291" width="18" height="4"  rx="2" fill="#8b939f" opacity="0.7"/>
+  </g>
+</svg>
