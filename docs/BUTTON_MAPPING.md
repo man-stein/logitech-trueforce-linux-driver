@@ -10,36 +10,36 @@ This is the reference for binding controls in a game. The wire-level bitmask
 table below: it reports its own classic button layout straight from its HID
 descriptor, not the RS50/G PRO one.
 
-![RS50 button layout](images/rs50-wheel.svg)
+![RS50 button layout](images/rs-wheel-hub-button-layout.png)
 
 The **Index** column is the joystick button number games show when binding
-(sequential, matching Windows DirectInput). The drawing above labels each
-control directly, so there is no separate diagram numbering to cross-
-reference any more.
+(sequential, matching Windows DirectInput). The **Diagram #** column is the
+numbered callout box in the layout image above - the two numbering systems
+are unrelated, so a button's index and its diagram number usually differ.
 
-| Index | Button |
-|-------|--------|
-| 0 | A |
-| 1 | X |
-| 2 | B |
-| 3 | Y |
-| 4 | Right Paddle / Gear Right |
-| 5 | Left Paddle / Gear Left |
-| 6 | RT (Right Trigger) |
-| 7 | LT (Left Trigger) |
-| 8 | Camera / View |
-| 9 | Menu |
-| 10 | RSB (Right Stick) |
-| 11 | LSB (Left Stick) |
-| 21 | Right Encoder CW |
-| 22 | Right Encoder CCW |
-| 23 | Right Encoder Push |
-| 24 | Left Encoder CW |
-| 25 | Left Encoder CCW |
-| 26 | Left Encoder Push |
-| 27 | G1 (Logitech logo) |
-| 28 | GL |
-| 29 | GR |
+| Index | Button | Diagram # |
+|-------|--------|-----------|
+| 0 | A | 3 |
+| 1 | X | 1 |
+| 2 | B | 4 |
+| 3 | Y | 2 |
+| 4 | Right Paddle / Gear Right | 17 |
+| 5 | Left Paddle / Gear Left | 16 |
+| 6 | RT (Right Trigger) | 5 |
+| 7 | LT (Left Trigger) | 15 |
+| 8 | Camera / View | 11 |
+| 9 | Menu | 9 |
+| 10 | RSB (Right Stick) | 6 |
+| 11 | LSB (Left Stick) | 14 |
+| 21 | Right Encoder CW | 8 |
+| 22 | Right Encoder CCW | 8 |
+| 23 | Right Encoder Push | 8 |
+| 24 | Left Encoder CW | 12 |
+| 25 | Left Encoder CCW | 12 |
+| 26 | Left Encoder Push | 12 |
+| 27 | G1 (Logitech logo) | 10 |
+| 28 | GL | 13 |
+| 29 | GR | 7 |
 
 GL and GR are their own buttons, not aliases of the shifter paddles
 (hardware-verified 2026-07-20 by guided capture: evdev 0x2cc / 0x2cd,

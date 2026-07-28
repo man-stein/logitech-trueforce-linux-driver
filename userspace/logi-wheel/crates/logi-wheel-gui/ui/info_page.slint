@@ -415,17 +415,15 @@ export component InfoPage inherits Rectangle {
                                         // the callout overlay below is drawn
                                         // against.
                                         //
-                                        // All three are our own vector
-                                        // drawings. They replaced vendor
-                                        // product photography, which was not
-                                        // ours to redistribute; the shapes
-                                        // are drawn to be recognisable, not
-                                        // traced.
+                                        // The RS50 shot has its background
+                                        // removed, so it sits on the page's
+                                        // own colour rather than a white
+                                        // rectangle.
                                         source: root.wheel-kind == 2
-                                            ? @image-url("assets/g923-wheel.svg")
+                                            ? @image-url("assets/g923-wheel.png")
                                             : root.wheel-kind == 1
-                                                ? @image-url("assets/g-pro-wheel.svg")
-                                                : @image-url("assets/rs50-wheel.svg");
+                                                ? @image-url("assets/g-pro-wheel.png")
+                                                : @image-url("assets/rs50-wheel.png");
                                         image-fit: contain;
                                     }
                                     // Pressed-button tints over the RS50
