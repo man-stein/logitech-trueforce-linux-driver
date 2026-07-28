@@ -83,7 +83,15 @@ pub struct DeviceInfo {
 /// write still succeeds, configuring an axis no hardware drives (verified on an
 /// RS50, 2026-07-28). The shifter's own settings join this list once their wire
 /// format is captured.
-const ACCESSORY_ATTRS: &[&str] = &["wheel_handbrake_sensitivity", "wheel_handbrake_curve"];
+const ACCESSORY_ATTRS: &[&str] = &[
+    "wheel_handbrake_sensitivity",
+    "wheel_handbrake_curve",
+    // The accessory's own 0x80B1 actuation points. The driver already
+    // answers EOPNOTSUPP for these without the accessory, so this is
+    // belt and braces, and keeps `available` consistent with `read_supported`.
+    "wheel_shift_actuation",
+    "wheel_handbrake_actuation",
+];
 
 /// Whether `attr` is one of [`ACCESSORY_ATTRS`].
 pub fn requires_accessory(attr: &str) -> bool {

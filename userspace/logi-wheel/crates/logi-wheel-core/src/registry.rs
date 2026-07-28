@@ -65,6 +65,12 @@ pub const REGISTRY: &[SettingSpec] = &[
     // when no handbrake is connected.
     SettingSpec { attr: "wheel_handbrake_sensitivity", label: "Handbrake sensitivity", help: "Reshapes how the analog handbrake's pull maps in game. Below 50 eases in for gentler slides, above 50 grabs sooner; 50 is straight linear. Needs the handbrake accessory connected.", category: Pedals, kind: PCT, access: ReadWrite, mode_req: Any },
     SettingSpec { attr: "wheel_handbrake_curve", label: "Handbrake curve", help: "Shapes the whole handbrake response by hand for precise slide control across its travel. Use 'reset' for the straight built-in response. Needs the handbrake accessory connected.", category: Pedals, kind: Kind::Curve, access: ReadWrite, mode_req: Any },
+    // The accessory's own actuation points (0x80B1), after the handbrake
+    // shaping pair so that pair stays adjacent for the shaping toggle.
+    // These are trigger POINTS, not response shaping, so they are not
+    // part of any axis's sensitivity/curve block.
+    SettingSpec { attr: "wheel_shift_actuation", label: "Shift actuation", help: "How far the sequential shifter must be pushed before a shift registers. Lower triggers further from centre, higher triggers sooner. Needs the shifter accessory connected, in shifter mode.", category: Pedals, kind: Kind::IntRange { min: 1, max: 100, step: 1, unit: "%" }, access: ReadWrite, mode_req: Any },
+    SettingSpec { attr: "wheel_handbrake_actuation", label: "Handbrake actuation", help: "How far the handbrake must be pulled before the digital handbrake button fires. Only applies in digital-handbrake mode; the analog mode uses the handbrake curve instead. Needs the handbrake accessory connected.", category: Pedals, kind: Kind::IntRange { min: 1, max: 100, step: 1, unit: "%" }, access: ReadWrite, mode_req: Any },
     // --- LIGHTSYNC (RS50 RGB strip) ---
     // Effect first (it decides whether the slot fields even apply), then the
     // global brightness, then the active-slot group in the order you'd set
@@ -235,6 +241,8 @@ mod tests {
                 "wheel_clutch_deadzone",
                 "wheel_handbrake_sensitivity",
                 "wheel_handbrake_curve",
+                "wheel_shift_actuation",
+                "wheel_handbrake_actuation",
             ]
         );
         assert_eq!(

@@ -12306,6 +12306,204 @@ static ssize_t wheel_accessory_show(struct device *dev,
 static DEVICE_ATTR(wheel_accessory, 0444, wheel_accessory_show, NULL);
 
 /*
+ * RS Shifter & Handbrake actuation points: feature 0x80B1 (BANDED_AXIS) on
+ * the accessory itself, ff->idx_shifter_banded on dev ff->shifter_dev_idx.
+ *
+ * A band is addressed by [group][band] and carries a signed 32-bit position
+ * on the lever's travel. Group 0 is the sequential shifter and holds TWO
+ * bands, one per shift direction; group 1 is the digital handbrake and holds
+ * one. fn2 reads a band, fn3 writes it. Decoded from G Hub captures on
+ * 2026-07-28 by typing five known slider values and fitting the writes.
+ *
+ * G Hub's own scales, both linear in the 1-100 the UI accepts:
+ *
+ *   shift:     +/- pct * 0.008 of full scale, symmetric about centre, so the
+ *              slider spans 80% of the lever travel rather than all of it.
+ *   handbrake: pct * 944.64 in the same units, negative.
+ *
+ * The handbrake scale overflows 16 bits above about 69%, and G Hub truncates
+ * there: it writes 75% as 5312 rather than 70848, wrapping to a point far
+ * SHORTER than 50%. The wheel accepts the full 32-bit value happily (tested:
+ * -94464 stored and read back verbatim), so this driver writes the true
+ * value rather than reproducing that overflow. It means high actuation
+ * points will not match G Hub's behaviour above ~69%; ours is the one that
+ * follows the slider monotonically.
+ */
+#define HIDPP_DD_BAND_GROUP_SHIFT	0
+#define HIDPP_DD_BAND_GROUP_HANDBRAKE	1
+/* Units per percent, scaled by 100 to keep the arithmetic integer. */
+#define HIDPP_DD_BAND_SHIFT_SCALE	52428
+#define HIDPP_DD_BAND_HANDBRAKE_SCALE	94464
+
+static int hidpp_dd_band_write(struct hidpp_dd_ff_data *ff, u8 group, u8 band,
+			       s32 value)
+{
+	struct hidpp_report response;
+	u8 params[6];
+
+	params[0] = group;
+	params[1] = band;
+	put_unaligned_le32(value, &params[2]);
+	return hidpp_send_fap_to_device_sync(ff->hidpp, ff->shifter_dev_idx,
+					     ff->idx_shifter_banded,
+					     0x30 /* fn3 set band */,
+					     params, sizeof(params), &response);
+}
+
+static int hidpp_dd_band_read(struct hidpp_dd_ff_data *ff, u8 group, u8 band,
+			      s32 *value)
+{
+	struct hidpp_report response;
+	u8 params[2] = { group, band };
+	int ret;
+
+	memset(&response, 0, sizeof(response));
+	ret = hidpp_send_fap_to_device_sync(ff->hidpp, ff->shifter_dev_idx,
+					    ff->idx_shifter_banded,
+					    0x20 /* fn2 get band */,
+					    params, sizeof(params), &response);
+	if (ret)
+		return ret;
+	*value = get_unaligned_le32(&response.fap.params[2]);
+	return 0;
+}
+
+/* The accessory's own settings need the accessory. */
+static struct hidpp_dd_ff_data *hidpp_dd_accessory_ff(struct hidpp_device *hidpp,
+						      int *err)
+{
+	struct hidpp_dd_ff_data *ff;
+
+	if (!hidpp) {
+		*err = -ENODEV;
+		return NULL;
+	}
+	ff = READ_ONCE(hidpp->private_data);
+	if (!ff || atomic_read_acquire(&ff->stopping)) {
+		*err = -ENODEV;
+		return NULL;
+	}
+	if (READ_ONCE(ff->shifter_dev_idx) == HIDPP_DD_FEATURE_NOT_FOUND ||
+	    ff->idx_shifter_banded == HIDPP_DD_FEATURE_NOT_FOUND) {
+		*err = -EOPNOTSUPP;
+		return NULL;
+	}
+	*err = 0;
+	return ff;
+}
+
+/*
+ * wheel_shift_actuation: how far the sequential shifter must be pushed
+ * before a shift registers, 1-100 (G Hub's own range - it refuses 0).
+ *
+ * Named actuation, not sensitivity, even though G Hub calls it
+ * "Vaxlingskanslighet": it is a trigger POINT, not response shaping, and
+ * this project treats a *_sensitivity attr as one of an axis's shaping
+ * generators. Pairs with wheel_handbrake_actuation.
+ * Writes both of group 0's bands, one per direction, symmetric about centre.
+ */
+static ssize_t wheel_shift_actuation_show(struct device *dev,
+					    struct device_attribute *attr,
+					    char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hidpp_dd_ff_data *ff;
+	s32 value;
+	int ret;
+
+	ff = hidpp_dd_accessory_ff(hid_get_drvdata(hid), &ret);
+	if (!ff)
+		return ret;
+	ret = hidpp_dd_band_read(ff, HIDPP_DD_BAND_GROUP_SHIFT, 1, &value);
+	if (ret)
+		return hidpp_errno(hid, ret, "read shift actuation");
+	/* Band 1 holds the negative direction; report the magnitude as percent. */
+	return sysfs_emit(buf, "%d\n",
+			  DIV_ROUND_CLOSEST(abs(value) * 100,
+					    HIDPP_DD_BAND_SHIFT_SCALE));
+}
+
+static ssize_t wheel_shift_actuation_store(struct device *dev,
+					     struct device_attribute *attr,
+					     const char *buf, size_t count)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hidpp_dd_ff_data *ff;
+	unsigned int pct;
+	s32 magnitude;
+	int ret;
+
+	ff = hidpp_dd_accessory_ff(hid_get_drvdata(hid), &ret);
+	if (!ff)
+		return ret;
+	if (kstrtouint(buf, 10, &pct) || pct < 1 || pct > 100)
+		return -EINVAL;
+
+	magnitude = (s32)(((s64)pct * HIDPP_DD_BAND_SHIFT_SCALE) / 100);
+	ret = hidpp_dd_band_write(ff, HIDPP_DD_BAND_GROUP_SHIFT, 0, magnitude);
+	if (ret)
+		return hidpp_errno(hid, ret, "set shift actuation (up)");
+	ret = hidpp_dd_band_write(ff, HIDPP_DD_BAND_GROUP_SHIFT, 1, -magnitude);
+	if (ret)
+		return hidpp_errno(hid, ret, "set shift actuation (down)");
+	return count;
+}
+static DEVICE_ATTR(wheel_shift_actuation, 0664,
+		   wheel_shift_actuation_show,
+		   wheel_shift_actuation_store);
+
+/*
+ * wheel_handbrake_actuation: how far the handbrake must be pulled before the
+ * digital handbrake button fires, 1-100. Only meaningful with the unit in
+ * digital-handbrake mode; the analog mode uses the curve instead.
+ */
+static ssize_t wheel_handbrake_actuation_show(struct device *dev,
+					      struct device_attribute *attr,
+					      char *buf)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hidpp_dd_ff_data *ff;
+	s32 value;
+	int ret;
+
+	ff = hidpp_dd_accessory_ff(hid_get_drvdata(hid), &ret);
+	if (!ff)
+		return ret;
+	ret = hidpp_dd_band_read(ff, HIDPP_DD_BAND_GROUP_HANDBRAKE, 0, &value);
+	if (ret)
+		return hidpp_errno(hid, ret, "read handbrake actuation");
+	return sysfs_emit(buf, "%d\n",
+			  DIV_ROUND_CLOSEST(abs(value) * 100,
+					    HIDPP_DD_BAND_HANDBRAKE_SCALE));
+}
+
+static ssize_t wheel_handbrake_actuation_store(struct device *dev,
+					       struct device_attribute *attr,
+					       const char *buf, size_t count)
+{
+	struct hid_device *hid = to_hid_device(dev);
+	struct hidpp_dd_ff_data *ff;
+	unsigned int pct;
+	s32 value;
+	int ret;
+
+	ff = hidpp_dd_accessory_ff(hid_get_drvdata(hid), &ret);
+	if (!ff)
+		return ret;
+	if (kstrtouint(buf, 10, &pct) || pct < 1 || pct > 100)
+		return -EINVAL;
+
+	value = -(s32)(((s64)pct * HIDPP_DD_BAND_HANDBRAKE_SCALE) / 100);
+	ret = hidpp_dd_band_write(ff, HIDPP_DD_BAND_GROUP_HANDBRAKE, 0, value);
+	if (ret)
+		return hidpp_errno(hid, ret, "set handbrake actuation");
+	return count;
+}
+static DEVICE_ATTR(wheel_handbrake_actuation, 0664,
+		   wheel_handbrake_actuation_show,
+		   wheel_handbrake_actuation_store);
+
+/*
  * wheel_profile_names: the onboard slots' user-assigned names, from
  * feature 0x8137 fn=3 (from the G Hub captures: `10ff173c 01` ->
  * `12ff173c 01 06 "AC EVO"` = [slot][length][ASCII name]; verified
@@ -12488,6 +12686,8 @@ static struct attribute *hidpp_dd_wheel_group_attrs[] = {
 	&dev_attr_wheel_serial.attr,
 	&dev_attr_wheel_firmware.attr,
 	&dev_attr_wheel_accessory.attr,
+	&dev_attr_wheel_shift_actuation.attr,
+	&dev_attr_wheel_handbrake_actuation.attr,
 	&dev_attr_wheel_profile_names.attr,
 	&dev_attr_wheel_range_restore.attr,
 	&dev_attr_wheel_response_curve.attr,

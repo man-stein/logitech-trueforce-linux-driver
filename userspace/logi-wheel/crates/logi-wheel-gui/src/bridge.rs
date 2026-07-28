@@ -142,7 +142,9 @@ pub fn attr_group(attr: &str) -> &'static str {
         }
         "wheel_brake_sensitivity" | "wheel_brake_curve" | "wheel_brake_deadzone" => "BRAKE",
         "wheel_clutch_sensitivity" | "wheel_clutch_curve" | "wheel_clutch_deadzone" => "CLUTCH",
-        "wheel_handbrake_sensitivity" | "wheel_handbrake_curve" => "HANDBRAKE",
+        "wheel_handbrake_sensitivity" | "wheel_handbrake_curve"
+        | "wheel_handbrake_actuation" => "HANDBRAKE",
+        "wheel_shift_actuation" => "SHIFTER",
         "wheel_led_effect" | "wheel_led_brightness" => "STRIP",
         "wheel_led_slot" | "wheel_led_slot_name" | "wheel_led_colors" | "wheel_led_direction"
         | "wheel_led_slot_brightness" | "wheel_led_apply" => "SLOT",
@@ -2120,6 +2122,8 @@ mod tests {
                 "wheel_clutch_deadzone",
                 shaping::toggle_attr(Axis::Handbrake),
                 "wheel_handbrake_sensitivity",
+                "wheel_shift_actuation",
+                "wheel_handbrake_actuation",
             ]
         );
     }
@@ -2144,6 +2148,8 @@ mod tests {
                 "wheel_clutch_deadzone",
                 shaping::toggle_attr(Axis::Handbrake),
                 "wheel_handbrake_curve",
+                "wheel_shift_actuation",
+                "wheel_handbrake_actuation",
             ]
         );
     }
