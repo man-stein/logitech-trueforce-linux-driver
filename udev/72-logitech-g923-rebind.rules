@@ -20,7 +20,20 @@
 #   - a competing driver won the bind race: unbind it, bind ours. If our
 #     bind then fails (our probe rejects this interface, e.g. the PS
 #     G923's interface 2), rebind it back to the driver it came from
-#     instead of leaving it stranded with no driver at all.
+#     instead of leaving it stranded with no driver at all - but ONLY if
+#     the device really has no driver by then.
+#
+#     That last condition is not paranoia. udev runs a worker for the
+#     "add" event and another for the "bind" event our own bind emits, and
+#     the second worker can read the driver link before the first worker's
+#     unbind lands. It then sees the competing driver, tries to bind ours,
+#     and fails - not because our probe rejected the interface, but
+#     because the first worker already bound it. Without the re-check the
+#     fallback then hands a device we already own back to the in-tree
+#     driver, which probes it a second time: "Cannot allocate sysfs group"
+#     followed by "Not able to get a minor for this device", and a wedged
+#     USB device where even lsusb hangs. Reported on a G923 Xbox (c26e),
+#     issue #27.
 #   - the interface enumerated with no driver at all: bind ours. If that
 #     fails, leave it unbound (nothing to restore).
 #   - already ours: no-op (case falls through).
@@ -41,6 +54,6 @@ GOTO="g923_rebind_end"
 
 LABEL="g923_rebind_apply"
 
-RUN+="/bin/sh -c 'modprobe hid-logitech-dd 2>/dev/null; p=/sys/bus/hid/devices/%k/driver; d=; [ -L \"$$p\" ] && d=$$(basename $$(readlink -f \"$$p\")); case \"$$d\" in logitech-dd) ;; \"\") echo %k > /sys/bus/hid/drivers/logitech-dd/bind 2>/dev/null ;; *) echo %k > /sys/bus/hid/drivers/$$d/unbind 2>/dev/null; if ! echo %k > /sys/bus/hid/drivers/logitech-dd/bind 2>/dev/null; then echo %k > /sys/bus/hid/drivers/$$d/bind 2>/dev/null; fi ;; esac'"
+RUN+="/bin/sh -c 'modprobe hid-logitech-dd 2>/dev/null; p=/sys/bus/hid/devices/%k/driver; d=; [ -L \"$$p\" ] && d=$$(basename $$(readlink -f \"$$p\")); case \"$$d\" in logitech-dd) ;; \"\") echo %k > /sys/bus/hid/drivers/logitech-dd/bind 2>/dev/null ;; *) echo %k > /sys/bus/hid/drivers/$$d/unbind 2>/dev/null; if ! echo %k > /sys/bus/hid/drivers/logitech-dd/bind 2>/dev/null; then [ -L \"$$p\" ] || echo %k > /sys/bus/hid/drivers/$$d/bind 2>/dev/null; fi ;; esac'"
 
 LABEL="g923_rebind_end"
