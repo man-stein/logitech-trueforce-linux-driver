@@ -7,7 +7,7 @@ fn main() -> ExitCode {
     }
 
     let args: Vec<String> = std::env::args().collect();
-    match ffb_proxy::cli::dispatch(&args) {
+    match logi_ffb::cli::dispatch(&args) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("logi-ffb: {e}");

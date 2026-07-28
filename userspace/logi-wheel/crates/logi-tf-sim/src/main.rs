@@ -3,8 +3,8 @@
 
 use std::process::ExitCode;
 
-use tf_sim::config::Config;
-use tf_sim::{capture, daemon, sweep};
+use logi_tf_sim::config::Config;
+use logi_tf_sim::{capture, daemon, sweep};
 
 const USAGE: &str = "\
 logi-tf-sim: simulated TrueForce daemon

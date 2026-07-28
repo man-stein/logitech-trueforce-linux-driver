@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/logi-wheel-core", "crates/logi-wheel-tui", "crates/ffb-proxy", "crates/logi-wheel-gui", "crates/tf-sim"]
+members = ["crates/logi-wheel-core", "crates/logi-wheel-tui", "crates/logi-ffb", "crates/logi-wheel-gui", "crates/logi-tf-sim"]
 
 [workspace.package]
 edition = "2021"

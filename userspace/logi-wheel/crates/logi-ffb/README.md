@@ -1,4 +1,4 @@
-# ffb-proxy (`logi-ffb`)
+# logi-ffb
 
 A userspace DirectInput force-feedback proxy for the Logitech direct-drive
 wheels (RS50, G PRO). It presents a virtual force-feedback wheel that mirrors
@@ -52,7 +52,7 @@ on one path and missing on the other.
 
 ```bash
 cd userspace/logi-wheel
-cargo build --release -p ffb-proxy
+cargo build --release -p logi-ffb
 ```
 
 The binary lands at `userspace/logi-wheel/target/release/logi-ffb`. Copy it

@@ -18,10 +18,12 @@ pub const FFB_BIN: &str = "logi-ffb";
 /// The simulated-TrueForce daemon's binary name.
 pub const TF_SIM_BIN: &str = "logi-tf-sim";
 
-/// The shim installer's candidate names, preferred order: the packaged
-/// name first, the repo script's name second (some setups put `tools/` on
-/// `PATH`).
-pub const INSTALLER_BINS: [&str; 2] = ["logitech-trueforce-install-shim", "install-tf-shim.sh"];
+/// The shim installer's candidate names, in preferred order: the packaged
+/// name, then the name it was packaged under before v0.22.0 (an app from
+/// this release can still be sitting next to an older install), then the
+/// repo script's own name, since some setups put `tools/` on `PATH`.
+pub const INSTALLER_BINS: [&str; 3] =
+    ["logi-shim", "logitech-trueforce-install-shim", "install-tf-shim.sh"];
 
 /// The installer's path inside a repo checkout, relative to the checkout
 /// root.

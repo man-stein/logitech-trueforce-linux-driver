@@ -48,7 +48,7 @@ Description: Terminal tools for Logitech TrueForce direct-drive wheels
  The complete headless toolset for the logitech-trueforce driver: logi-wheel,
  a terminal settings UI, logi-ffb, a DirectInput force-feedback proxy,
  logi-tf-sim, a simulated-TrueForce daemon driven by game telemetry, and
- logitech-trueforce-install-shim, the TrueForce SDK shim installer for
+ logi-shim, the TrueForce SDK shim installer for
  Proton prefixes.
  .
  TrueForce in Proton sims additionally needs Logitech's proprietary signed

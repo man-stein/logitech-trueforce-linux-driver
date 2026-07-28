@@ -109,7 +109,7 @@ Obsoletes:      logi-dd < %{version}-%{release}
 The complete headless toolset for the Logitech direct-drive wheel driver:
 logi-wheel, a terminal settings UI, logi-ffb, a DirectInput force-feedback
 proxy, logi-tf-sim, a simulated-TrueForce daemon driven by game telemetry,
-and logitech-trueforce-install-shim, the TrueForce SDK shim installer for
+and logi-shim, the TrueForce SDK shim installer for
 Proton prefixes.
 
 %files -n logi-wheel
@@ -117,6 +117,7 @@ Proton prefixes.
 %{_bindir}/logi-dd
 %{_bindir}/logi-ffb
 %{_bindir}/logi-tf-sim
+%{_bindir}/logi-shim
 %{_bindir}/logitech-trueforce-install-shim
 
 %package -n logi-wheel-gui
@@ -222,7 +223,9 @@ ln -s logi-wheel "%{buildroot}%{_bindir}/logi-dd"
 # DLLs; resolves the SDK dir via --sdk-dir / $LOGITECH_TRUEFORCE_SDK_DIR /
 # ~/.local/share/logitech-trueforce/sdk).
 install -D -m 0755 tools/install-tf-shim.sh \
-    "%{buildroot}%{_bindir}/logitech-trueforce-install-shim"
+    "%{buildroot}%{_bindir}/logi-shim"
+# Transitional symlink for the pre-v0.22.0 name.
+ln -s logi-shim "%{buildroot}%{_bindir}/logitech-trueforce-install-shim"
 
 # The GUI + its desktop integration (the logi-wheel-gui package).
 install -D -m 0755 userspace/logi-wheel/target/release/logi-wheel-gui \

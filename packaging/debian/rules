@@ -49,7 +49,9 @@ override_dh_install:
 	# $$LOGITECH_TRUEFORCE_SDK_DIR / ~/.local/share/logitech-trueforce/sdk).
 	# Renamed on install, so it cannot come from logi-wheel.install.
 	install -D -m 0755 tools/install-tf-shim.sh \
-		$(TUI)/usr/bin/logitech-trueforce-install-shim
+		$(TUI)/usr/bin/logi-shim
+	# The transitional symlink for the pre-0.22.0 name is declared in
+	# debian/logi-wheel.links, next to the other rename's symlink.
 	# Everything else (udev rules, binaries, desktop entry, icon) comes
 	# from the per-package debian/<pkg>.install lists.
 	dh_install

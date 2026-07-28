@@ -1,5 +1,5 @@
 //! Runs only on a host with /dev/uhid writable (root). Enable with:
-//! `cargo test -p ffb-proxy -- --ignored`
+//! `cargo test -p logi-ffb -- --ignored`
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -8,17 +8,17 @@ use std::time::Duration;
 #[test]
 #[ignore]
 fn create_and_destroy_virtual_device() {
-    let mut dev = ffb_proxy::uhid::Device::create().expect("create uhid device");
+    let mut dev = logi_ffb::uhid::Device::create().expect("create uhid device");
     // Pump events until START, then send one input report and destroy.
     let mut saw_start = false;
     for _ in 0..20 {
-        if dev.read_event().expect("read event") == ffb_proxy::uhid::Event::Start {
+        if dev.read_event().expect("read event") == logi_ffb::uhid::Event::Start {
             saw_start = true;
             break;
         }
     }
     assert!(saw_start, "expected UHID_START");
-    let rep = ffb_proxy::descriptor::InputReport::default().to_bytes();
+    let rep = logi_ffb::descriptor::InputReport::default().to_bytes();
     dev.send_input(&rep).expect("send input");
     drop(dev); // sends UHID_DESTROY
 }
@@ -64,7 +64,7 @@ fn set_report_create_then_get_report_block_load_round_trips() {
     /// matches `report_descriptor()` shows up (the kernel creates it shortly
     /// after `UHID_START`, not synchronously with it) or `deadline` passes.
     fn find_our_hidraw(deadline: Instant) -> Option<fs::File> {
-        let want = ffb_proxy::descriptor::report_descriptor();
+        let want = logi_ffb::descriptor::report_descriptor();
         loop {
             if let Ok(entries) = fs::read_dir("/sys/class/hidraw") {
                 for entry in entries.flatten() {
@@ -84,10 +84,10 @@ fn set_report_create_then_get_report_block_load_round_trips() {
         }
     }
 
-    let mut dev = ffb_proxy::uhid::Device::create().expect("create uhid device");
+    let mut dev = logi_ffb::uhid::Device::create().expect("create uhid device");
     let mut saw_start = false;
     for _ in 0..20 {
-        if dev.read_event().expect("read event") == ffb_proxy::uhid::Event::Start {
+        if dev.read_event().expect("read event") == logi_ffb::uhid::Event::Start {
             saw_start = true;
             break;
         }
@@ -105,7 +105,7 @@ fn set_report_create_then_get_report_block_load_round_trips() {
         let mut saw_get_report = false;
         while !(saw_set_report && saw_get_report) {
             match dev.read_event().expect("read event") {
-                ffb_proxy::uhid::Event::SetReport { rnum: 0x54, id, data, .. } => {
+                logi_ffb::uhid::Event::SetReport { rnum: 0x54, id, data, .. } => {
                     // Set_Report `data` for a numbered report carries the report
                     // id in byte 0 (hidraw passes the whole buffer), so the
                     // Effect Type the host wrote is data[1], exactly as
@@ -114,14 +114,14 @@ fn set_report_create_then_get_report_block_load_round_trips() {
                     assert_eq!(data.first().copied(), Some(0x54u8), "Set_Report data must lead with the report id");
                     assert_eq!(
                         data.get(1).copied(),
-                        Some(ffb_proxy::pidff::EFFECT_TYPE_CONSTANT),
+                        Some(logi_ffb::pidff::EFFECT_TYPE_CONSTANT),
                         "Effect Type must be at data[1]"
                     );
                     dev.send_set_report_reply(id, 0).expect("reply UHID_SET_REPORT");
                     saw_set_report = true;
                 }
-                ffb_proxy::uhid::Event::GetReport { rnum: 0x56, id, .. } => {
-                    let reply = ffb_proxy::pidff::pid_block_load_reply(1);
+                logi_ffb::uhid::Event::GetReport { rnum: 0x56, id, .. } => {
+                    let reply = logi_ffb::pidff::pid_block_load_reply(1);
                     dev.send_get_report_reply(id, 0, &reply).expect("reply UHID_GET_REPORT");
                     saw_get_report = true;
                 }
@@ -133,7 +133,7 @@ fn set_report_create_then_get_report_block_load_round_trips() {
 
     // SET_REPORT(Feature, 0x54): create a Constant effect (report id byte
     // followed by the one-byte Effect Type usage, per descriptor::PID_COLLECTION).
-    let mut set_buf = [0x54u8, ffb_proxy::pidff::EFFECT_TYPE_CONSTANT];
+    let mut set_buf = [0x54u8, logi_ffb::pidff::EFFECT_TYPE_CONSTANT];
     let ret =
         unsafe { libc::ioctl(hidraw.as_raw_fd(), hidiocsfeature(set_buf.len()), set_buf.as_mut_ptr()) };
     assert!(ret >= 0, "HIDIOCSFEATURE failed: {}", std::io::Error::last_os_error());
@@ -170,27 +170,27 @@ fn set_report_create_then_get_report_block_load_round_trips() {
 #[test]
 #[ignore]
 fn pid_reports_apply_to_the_real_wheel_ff_sink() {
-    let paths = ffb_proxy::proxy::discover_wheel().expect("real wheel with FF capability");
-    let mut sink = ffb_proxy::sink::Sink::open(&paths.evdev).expect("open real wheel evdev FF node");
+    let paths = logi_ffb::proxy::discover_wheel().expect("real wheel with FF capability");
+    let mut sink = logi_ffb::sink::Sink::open(&paths.evdev).expect("open real wheel evdev FF node");
 
     // CREATE: block 1, Constant. Create New Effect is a Feature report, so it
     // no longer round-trips through the interrupt `decode`; build the op the
     // way Proxy::run's Set_Report(0x54) handler does (effect type -> kind, and
     // the device assigns the block).
-    let kind = ffb_proxy::pidff::effect_kind_from_type_byte(ffb_proxy::pidff::EFFECT_TYPE_CONSTANT)
+    let kind = logi_ffb::pidff::effect_kind_from_type_byte(logi_ffb::pidff::EFFECT_TYPE_CONSTANT)
         .expect("constant is a known effect type");
-    sink.apply(ffb_proxy::pidff::EffectOp::Create { block: 1, kind }).expect("create effect block");
+    sink.apply(logi_ffb::pidff::EffectOp::Create { block: 1, kind }).expect("create effect block");
 
     // SET_CONSTANT: block 1, magnitude 5000 (a deliberately mild level for a
     // hardware-in-the-loop test, well under the wheel's max).
     let mag = 5000i16.to_le_bytes();
     let set_constant = [0x55, 0x01, mag[0], mag[1]];
-    let op = ffb_proxy::pidff::decode(&set_constant).expect("decode SET_CONSTANT");
+    let op = logi_ffb::pidff::decode(&set_constant).expect("decode SET_CONSTANT");
     sink.apply(op).expect("EVIOCSFF for SET_CONSTANT");
 
     // EFFECT_OPERATION: block 1, start (op=1), loop once.
     let start = [0x5A, 0x01, 0x01, 0x01];
-    let op = ffb_proxy::pidff::decode(&start).expect("decode EFFECT_OPERATION start");
+    let op = logi_ffb::pidff::decode(&start).expect("decode EFFECT_OPERATION start");
     sink.apply(op).expect("EV_FF play write");
 
     // Stop it again before the test process exits, out of courtesy to
@@ -206,8 +206,8 @@ fn pid_reports_apply_to_the_real_wheel_ff_sink() {
 #[test]
 #[ignore]
 fn proxy_run_starts_and_stops_cleanly() {
-    let paths = ffb_proxy::proxy::discover_wheel().expect("real wheel with FF capability");
-    let mut proxy = ffb_proxy::proxy::Proxy::new(paths).expect("bring up proxy");
+    let paths = logi_ffb::proxy::discover_wheel().expect("real wheel with FF capability");
+    let mut proxy = logi_ffb::proxy::Proxy::new(paths).expect("bring up proxy");
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_thread = Arc::clone(&stop);

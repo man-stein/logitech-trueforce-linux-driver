@@ -1,5 +1,5 @@
 [package]
-name = "ffb-proxy"
+name = "logi-ffb"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true

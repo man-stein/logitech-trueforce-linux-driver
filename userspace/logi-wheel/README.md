@@ -42,7 +42,7 @@ the DirectInput force-feedback proxy (see below).
 
 logi-wheel is a Rust workspace of four crates (see Layout below): the
 `logi-wheel-core` library, the `logi-wheel-tui` and `logi-wheel-gui` frontends, and the
-`ffb-proxy` crate that builds `logi-ffb`. It needs a Rust toolchain (edition
+`logi-ffb` crate. It needs a Rust toolchain (edition
 2021, Rust 1.88 or newer; the Slint GUI needs 1.92). The TUI needs
 no system libraries beyond the standard terminal; the GUI additionally needs
 `pkg-config` and the fontconfig headers (`libfontconfig-dev` on Debian/Ubuntu,
@@ -125,7 +125,7 @@ ones and `?` lists them all.
 
 DirectInput games under Wine/Proton get no force feedback on the real wheel
 directly, because its HID descriptor has no PID (force-feedback) collection.
-The `logi-ffb` binary, built from the `ffb-proxy` crate in this workspace,
+The `logi-ffb` binary, built from the crate of the same name in this workspace,
 fixes that: it presents a virtual force-feedback wheel that does carry a PID
 collection, enables Wine's hidraw PID path for that virtual wheel
 automatically (via `PROTON_ENABLE_HIDRAW`, set on the launched process
@@ -144,7 +144,7 @@ title's launch options:
 logi-ffb %command%
 ```
 
-See [`crates/ffb-proxy/README.md`](crates/ffb-proxy/README.md) for how it
+See [`crates/logi-ffb/README.md`](crates/logi-ffb/README.md) for how it
 works, build instructions, and the standalone `--daemon` mode.
 
 ## Layout
@@ -158,7 +158,7 @@ works, build instructions, and the standalone `--daemon` mode.
   `logi-wheel` binary.
 - `crates/logi-wheel-gui` - the desktop UI (Slint), builds the `logi-wheel-gui`
   binary.
-- `crates/ffb-proxy` - the `logi-ffb` DirectInput force-feedback proxy binary.
+- `crates/logi-ffb` - the `logi-ffb` DirectInput force-feedback proxy binary.
 
 ## Development without a wheel
 

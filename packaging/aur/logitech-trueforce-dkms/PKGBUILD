@@ -132,11 +132,14 @@ package_logi-wheel() {
 	# TrueForce-in-Proton helper (resolves the SDK DLL dir via --sdk-dir /
 	# $LOGITECH_TRUEFORCE_SDK_DIR / ~/.local/share/logitech-trueforce/sdk).
 	install -Dm755 "$_src/tools/install-tf-shim.sh" \
-		"$pkgdir/usr/bin/logitech-trueforce-install-shim"
+		"$pkgdir/usr/bin/logi-shim"
 
-	# Transitional symlink: scripts and habits built around the old
-	# `logi-dd` binary name keep working.
+	# Transitional symlinks: scripts and habits built around the old
+	# `logi-dd` and `logitech-trueforce-install-shim` names keep working.
+	# Every binary this project installs is now `logi-*`, so that `pgrep
+	# logi-` finds all of them.
 	ln -s logi-wheel "$pkgdir/usr/bin/logi-dd"
+	ln -s logi-shim "$pkgdir/usr/bin/logitech-trueforce-install-shim"
 }
 
 package_logi-wheel-gui() {

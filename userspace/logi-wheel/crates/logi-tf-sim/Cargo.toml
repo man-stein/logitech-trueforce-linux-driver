@@ -1,5 +1,5 @@
 [package]
-name = "tf-sim"
+name = "logi-tf-sim"
 description = "Simulated TrueForce daemon: synthesizes engine haptics from game UDP telemetry"
 edition.workspace = true
 rust-version.workspace = true

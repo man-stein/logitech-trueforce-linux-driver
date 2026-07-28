@@ -1,3 +1,7 @@
-# Transitional symlink: scripts and habits built around the old logi-dd
-# binary name keep working after the logi-dd -> logi-wheel rename (0.20.0).
+# Transitional symlinks: scripts and habits built around the old binary
+# names keep working after each rename.
+#   logi-dd -> logi-wheel (0.20.0)
+#   logitech-trueforce-install-shim -> logi-shim (0.22.0), so that every
+#   binary this project installs is logi-*, and `pgrep logi-` finds them all.
 usr/bin/logi-wheel usr/bin/logi-dd
+usr/bin/logi-shim usr/bin/logitech-trueforce-install-shim

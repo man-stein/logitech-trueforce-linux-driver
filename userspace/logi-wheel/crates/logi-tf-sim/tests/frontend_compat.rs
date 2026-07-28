@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tf_sim::config::{Config, GameConfig};
+use logi_tf_sim::config::{Config, GameConfig};
 
 /// A unique fixture directory under the system temp dir, removed on drop.
 struct TempTree(PathBuf);
@@ -115,5 +115,5 @@ fn frontend_writer_creates_a_file_this_crates_reader_accepts() {
     let seen = Config::load_from(&path);
     assert!(!seen.enabled);
     assert!(!seen.game_enabled("dirt-rally-2"));
-    assert_eq!(seen.codemasters_port, tf_sim::codemasters::DEFAULT_PORT, "absent keys default");
+    assert_eq!(seen.codemasters_port, logi_tf_sim::codemasters::DEFAULT_PORT, "absent keys default");
 }
