@@ -5,6 +5,34 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.22.1 - 2026-07-29
+
+Packaging only. Nothing in the driver or the apps changed, so there is no
+reason to upgrade unless you install from the AUR.
+
+### Fixed
+
+- **The Arch package could not build in a clean chroot.** It never declared
+  `fontconfig`, which the desktop app needs at build time, so anything
+  building in a clean environment (`paru --chroot`, aurutils, devtools)
+  failed while ordinary builds succeeded on the installed copy every desktop
+  already has. The same missing dependency was reported on Fedora in #27.
+- **The Arch package's published metadata named the wrong source.** A
+  `.SRCINFO` records every field fully expanded, including the tarball URL,
+  while the `PKGBUILD` derives that URL from the version. Only three lines
+  of the `.SRCINFO` were being stamped at release time, so 0.22.0 reached
+  the AUR claiming version 0.22.0, a v0.18.0 tarball, and a checksum for
+  neither. Installs were unaffected, since the build reads the `PKGBUILD`.
+
+### Changed
+
+- **The Arch package is now built in CI before it is published**, in a clean
+  container with only its declared dependencies available. The Debian,
+  Fedora and openSUSE packages have always compiled what they ship; Arch was
+  the one channel where a recipe that could not build still reached users.
+  Its `.SRCINFO` is generated from the recipe that was just built rather
+  than edited alongside it.
+
 ## 0.22.0 - 2026-07-29
 
 ### Fixed
