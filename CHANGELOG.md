@@ -5,6 +5,46 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.23.0 - 2026-07-29
+
+### Added
+
+- **The rev lights now flash for a pit limiter**, the way they do on
+  Windows. This turned out to need nothing from the wheel at all: G Hub
+  renders a limiter by alternating the ordinary rev level between full and
+  dark at about 1.2 Hz, so `logi-tf-sim` reproduces it from telemetry with
+  no driver change and no new protocol support.
+
+  Verified on an RS50: 28 transitions across 12 seconds with a mean gap of
+  418 ms, against the 417 ms measured in a G Hub capture on Windows. The rev
+  level the same engine speed would otherwise show never appears while the
+  limiter is on, so the strip carries no rev information during it, matching
+  the captured behaviour exactly.
+
+  **BeamNG is the only telemetry source that reports a limiter so far**, and
+  whether the game ever raises that flag is unconfirmed: nobody working on
+  this has it, and its cars mostly have no pit limiter. If it never does,
+  nothing changes for anyone; a source that stays silent is treated as a car
+  without a limiter. F1 carries the same signal in a packet this daemon does
+  not read yet, so that is a natural next step for someone who can check it
+  against a live game.
+
+### Documentation
+
+- **The Dynamic OLED's transport is identified**: HID++ feature `0x8130`,
+  reached on real hardware by @PeposCJ, who displayed both static text and
+  live telemetry on the panel. The driver still sends nothing to it, and the
+  protocol notes are explicit about what is still unknown, above all whether
+  writing the display disturbs force feedback, since both share one channel.
+- **The wheel base's screen and the rim's rev lights are now clearly
+  separated** in the protocol notes. They are different hardware on
+  different features, and the documentation previously used "OLED" for the
+  base's menu while describing a flashing strip a few lines further down.
+- **The rev-light stream is documented from first-party captures**, also
+  contributed by @PeposCJ: the true start-up sequence, an acknowledgement
+  for every write, redline being an ordinary full-strip level with no
+  special command, and the pit-limiter flash above.
+
 ## 0.22.1 - 2026-07-29
 
 Packaging only. Nothing in the driver or the apps changed, so there is no
