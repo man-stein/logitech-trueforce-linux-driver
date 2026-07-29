@@ -16076,9 +16076,28 @@ static const struct hid_device_id hidpp_devices[] = {
 	{ /* Logitech G923 (PlayStation mode, switches to Classic) */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_G923_PS_WHEEL),
 	  .driver_data = HIDPP_QUIRK_CLASS_LG4FF },
+	/*
+	 * FORCE_OUTPUT_REPORTS matters here and is not decoration. Without
+	 * it __hidpp_send_report sends HID++ as a SET_REPORT control
+	 * transfer; with it, out the interrupt OUT endpoint, which is what
+	 * this wheel answers and what the in-tree driver has always used
+	 * for G920-class wheels.
+	 *
+	 * Dropping it made every HID++ command fail at the transport, so
+	 * g920_get_config could not read the force-feedback slot count and
+	 * force feedback never registered (issue #27). The reported errno
+	 * -1 was not EPERM: it is the literal sentinel __hidpp_send_report
+	 * returns when the transfer does not write the expected byte count.
+	 *
+	 * The wheel was never the problem. Hardware-confirmed on a G923
+	 * Xbox: 0x8123 is present at index 0x0b and answers GET_INFO with
+	 * 64 slots over hidraw, which reaches it by the interrupt endpoint.
+	 * The DD wheels never hit this because their own quirk routes them
+	 * down a different path entirely.
+	 */
 	{ /* Logitech G923 (Xbox) - HID++ 0x8123 via the g920 path */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_G923_XBOX_WHEEL),
-	  .driver_data = HIDPP_QUIRK_CLASS_G920 },
+	  .driver_data = HIDPP_QUIRK_CLASS_G920 | HIDPP_QUIRK_FORCE_OUTPUT_REPORTS },
 	{}
 };
 
