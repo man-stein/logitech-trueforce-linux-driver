@@ -49,9 +49,15 @@ const OFF_THROTTLE: usize = 48;
 /// OutGauge `showLights`: the dashboard lamps the game says are lit, as a
 /// DL_* bitfield. Only the pit-speed-limiter bit is read.
 const OFF_SHOW_LIGHTS: usize = 44;
-/// `DL_PITSPEED` in the OutGauge DL_* set. A source that never lights this
-/// lamp simply reports no limiter, which is indistinguishable from a car
-/// that has none.
+/// `DL_PITSPEED` in the OutGauge DL_* set.
+///
+/// UNVERIFIED AGAINST BEAMNG. The bit position is from the LFS OutGauge
+/// specification, which BeamNG implements, and the decode is covered by
+/// tests over synthetic packets. What nobody here has been able to check is
+/// whether BeamNG ever lights this particular lamp: its cars mostly have no
+/// pit limiter, and a source that never sets the bit is indistinguishable
+/// from a car that has none. If BeamNG turns out never to set it, this
+/// reports no limiter rather than a wrong one, so the failure is silence.
 const DL_PITSPEED: u32 = 0x0000_0008;
 
 /// Reject engine rates above this as not a real OutGauge sample.

@@ -412,6 +412,56 @@ mod tests {
     }
 
     #[test]
+    fn the_pit_limiter_flashes_the_strip_through_the_real_write_path() {
+        let dir = tempdir();
+        let attr = dir.join(ATTR);
+        fs::write(&attr, "").unwrap();
+        let mut leds = RevLeds::at(attr.clone());
+        let t0 = Instant::now();
+        let half = PIT_FLASH_HALF_PERIOD;
+
+        // Engage the limiter at an RPM that would otherwise show 5.
+        leds.update(50.0, 100.0, true, t0);
+        assert_eq!(read(&attr), "10", "limiter lights the whole strip, not the rev level");
+
+        // Still lit just before the half period is up.
+        leds.update(50.0, 100.0, true, t0 + half - Duration::from_millis(20));
+        assert_eq!(read(&attr), "10");
+
+        // Dark on the second half, despite RPM being unchanged.
+        leds.update(50.0, 100.0, true, t0 + half);
+        assert_eq!(read(&attr), "0", "off phase overrides a mid-range RPM");
+
+        // Lit again on the third.
+        leds.update(50.0, 100.0, true, t0 + half * 2);
+        assert_eq!(read(&attr), "10");
+
+        // Releasing the limiter hands the strip straight back to RPM.
+        leds.update(50.0, 100.0, false, t0 + half * 3);
+        assert_eq!(read(&attr), "5", "back to the rev level once the limiter clears");
+    }
+
+    #[test]
+    fn a_second_pit_limiter_starts_lit_rather_than_mid_phase() {
+        let dir = tempdir();
+        let attr = dir.join(ATTR);
+        fs::write(&attr, "").unwrap();
+        let mut leds = RevLeds::at(attr.clone());
+        let t0 = Instant::now();
+        let half = PIT_FLASH_HALF_PERIOD;
+
+        leds.update(50.0, 100.0, true, t0);
+        assert_eq!(read(&attr), "10");
+        leds.update(50.0, 100.0, false, t0 + half / 2);
+
+        // Re-engaging one and a half periods later must light the strip
+        // again immediately. A phase measured from a free-running clock
+        // would be in its dark half here and start the flash invisible.
+        leds.update(50.0, 100.0, true, t0 + half + half / 2);
+        assert_eq!(read(&attr), "10", "each limiter starts lit");
+    }
+
+    #[test]
     fn update_respects_the_pacing_floor() {
         let dir = tempdir();
         let attr = dir.join(ATTR);
