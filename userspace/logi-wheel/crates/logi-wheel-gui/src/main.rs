@@ -827,6 +827,15 @@ fn start_test_monitor(
                 return;
             };
             app.set_test_device_name(wheel.name.as_str().into());
+            // Fall back to the input node's own name when the wheel has not
+            // been identified by product id, which needs a bound driver and
+            // its sysfs directory. Only fills an unknown: `Response::Info`
+            // is authoritative and overwrites this whenever it arrives, in
+            // either order.
+            if app.get_test_wheel_kind() == bridge::WHEEL_IMAGE_UNKNOWN {
+                let named = logi_wheel_core::device::model_from_name(&wheel.name);
+                app.set_test_wheel_kind(bridge::wheel_image_index(named));
+            }
             let snap_weak = app.as_weak();
             let gone_weak = app.as_weak();
             match testio::Reader::start(

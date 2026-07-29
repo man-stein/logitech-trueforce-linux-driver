@@ -191,6 +191,31 @@ fn model_from_pid(pid: u16) -> WheelModel {
     }
 }
 
+/// The [`WheelModel`] a device's human-readable name implies, for use when
+/// the product id is not available.
+///
+/// A wheel is only identified by product id once this driver has bound it
+/// and created its sysfs directory. When binding fails, the input node's
+/// name is still there and still says exactly which wheel it is: a G923
+/// whose force-feedback setup had failed reported "Logitech G923 Racing
+/// Wheel for Xbox One and PC" on screen while the app showed a photo of an
+/// RS50, because nothing consulted the one identifier it had (issue #27).
+///
+/// Matching mirrors `evtest::is_wheel_name`, including that a real G PRO
+/// says "PRO Racing Wheel" with no "G" anywhere in it.
+pub fn model_from_name(name: &str) -> WheelModel {
+    let upper = name.to_uppercase();
+    if upper.contains("RS50") {
+        WheelModel::Rs50
+    } else if upper.contains("G923") {
+        WheelModel::G923
+    } else if upper.contains("PRO RACING WHEEL") || upper.contains("G PRO") {
+        WheelModel::GPro
+    } else {
+        WheelModel::Unknown
+    }
+}
+
 /// Parse the USB/HID product id out of a sysfs device directory name of the
 /// form `BUS:VID:PID.SEQ` (the kernel's HID device naming convention, e.g.
 /// `0003:046D:C266.0002`). `dir` is canonicalized first, since discovery's
@@ -530,6 +555,24 @@ impl<S: SysfsIo> Device<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_from_name_identifies_each_wheel() {
+        // The exact strings these wheels put on their input nodes.
+        assert_eq!(model_from_name("Logitech RS50 Base for PlayStation/PC"), WheelModel::Rs50);
+        assert_eq!(
+            model_from_name("Logitech G923 Racing Wheel for Xbox One and PC"),
+            WheelModel::G923,
+            "the name from issue #27, which the app had and did not use"
+        );
+        assert_eq!(model_from_name("Logitech G923 Racing Wheel for PlayStation"), WheelModel::G923);
+        // A real G PRO says PRO Racing Wheel, with no G at all.
+        assert_eq!(model_from_name("Logitech  PRO Racing Wheel"), WheelModel::GPro);
+        assert_eq!(model_from_name("Logitech G PRO Racing Wheel"), WheelModel::GPro);
+        // Anything else stays unknown rather than guessing a model.
+        assert_eq!(model_from_name("Some Other Gamepad"), WheelModel::Unknown);
+        assert_eq!(model_from_name(""), WheelModel::Unknown);
+    }
     use crate::sysfs::FakeSysfs;
     use crate::value::Value;
 

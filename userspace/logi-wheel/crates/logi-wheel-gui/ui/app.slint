@@ -142,10 +142,16 @@ export component App inherits Window {
     in property <float> test-degrees: 0;
     in property <string> test-degrees-text: "0.0 deg";
     in property <int> test-range: 900;
-    // Which product photo the Info/Testing page shows: 0 RS50, 1 G PRO, 2
-    // G923 (see `bridge::wheel_image_index`); set from `Response::Info`'s
-    // `model` whenever discovery identifies the connected wheel.
-    in property <int> test-wheel-kind: 0;
+    // Which product photo the Info/Testing page shows: -1 not identified
+    // (no photo), 0 RS50, 1 G PRO, 2 G923 (see `bridge::wheel_image_index`);
+    // set from `Response::Info`'s `model` whenever discovery identifies the
+    // connected wheel.
+    //
+    // The default must stay -1. `Response::Info` only arrives once a wheel
+    // IS identified, so this default is exactly the not-identified case, and
+    // when it was 0 the page showed a confident photo of an RS50 to someone
+    // holding a G923 whose driver had not bound (issue #27).
+    in property <int> test-wheel-kind: -1;
     // Whether the connected wheel is a G923 (the classic lg4ff-style
     // engine): it has no LIGHTSYNC strip and no desktop/onboard split at
     // all, so the LIGHTSYNC preview strip (not built from registry rows, so
