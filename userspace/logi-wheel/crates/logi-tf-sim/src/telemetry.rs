@@ -12,4 +12,13 @@ pub struct Telemetry {
     pub throttle: f32,
     /// Vehicle speed in meters per second.
     pub speed: f32,
+    /// Whether the car's pit-limiter is engaged, where the wire format says
+    /// so. Formats that carry no such field leave this false, which is the
+    /// same thing as "not limiting" for every consumer of it.
+    ///
+    /// Only the rev lights use this: G Hub renders a pit limiter by
+    /// flashing the whole strip rather than by any device-side effect (see
+    /// `docs/PROTOCOL_SPECIFICATION.md` 12.4), so it is reproduced here
+    /// rather than in the driver.
+    pub pit_limiter: bool,
 }

@@ -80,7 +80,8 @@ pub fn parse(pkt: &[u8]) -> Option<(&'static str, Telemetry)> {
     }
 
     let id = if pkt.len() == DR2_LEN { ID_DIRT_RALLY_2 } else { ID_FAMILY };
-    Some((id, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed }))
+    // The Codemasters formats carry no pit-limiter field.
+    Some((id, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter: false }))
 }
 
 #[cfg(test)]

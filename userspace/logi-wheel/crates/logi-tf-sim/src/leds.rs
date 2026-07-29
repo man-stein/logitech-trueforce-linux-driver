@@ -57,6 +57,23 @@ const RPM_SUFFIXES: [&str; 5] = ["::RPM1", "::RPM2", "::RPM3", "::RPM4", "::RPM5
 /// crawl (~1.6 s).
 pub const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(16);
 
+/// How long the strip stays full, then dark, while the pit limiter is
+/// engaged. G Hub renders the limiter with no device-side effect at all:
+/// it just alternates the ordinary rev level between 10 and 0, measured at
+/// ~416.7 ms per half cycle (about 1.2 Hz) in the issue #20 iRacing
+/// capture. See `docs/PROTOCOL_SPECIFICATION.md` 12.4.
+pub const PIT_FLASH_HALF_PERIOD: Duration = Duration::from_micros(416_700);
+
+/// The rev level for a pit-limiter flash `elapsed` into it: full strip for
+/// the first [`PIT_FLASH_HALF_PERIOD`], dark for the next, repeating. RPM
+/// is ignored entirely while the limiter is engaged, which is what G Hub
+/// does: on a limiter the strip carries no rev information at all.
+fn pit_flash_level(elapsed: Duration) -> u8 {
+    let half = PIT_FLASH_HALF_PERIOD.as_micros();
+    // half is a non-zero constant, so this cannot divide by zero.
+    if (elapsed.as_micros() / half) % 2 == 0 { 10 } else { 0 }
+}
+
 /// The rev level for `rpm` out of `max_rpm`: `round(10 * rpm / max_rpm)`
 /// clamped to 0-10. A zero (or negative, or NaN) `max_rpm` reads as 0 so
 /// a car that never reported its limiter shows a dark strip instead of a
@@ -129,6 +146,11 @@ pub struct RevLeds {
     last_level: Option<u8>,
     /// When the last write landed, for the pacing floor.
     last_write: Option<Instant>,
+    /// When the current pit-limiter flash began, so the phase is measured
+    /// from the moment the limiter engaged rather than from process start.
+    /// Cleared as soon as the limiter disengages, so the next one starts
+    /// lit rather than wherever a free-running clock happened to be.
+    pit_flash_since: Option<Instant>,
 }
 
 impl RevLeds {
@@ -161,14 +183,14 @@ impl RevLeds {
     /// A rev display at an explicit `wheel_rev_level` attribute path
     /// (tests point this at a plain file in a temp directory).
     pub fn at(attr: PathBuf) -> RevLeds {
-        RevLeds { backend: Backend::Attr(attr), last_level: None, last_write: None }
+        RevLeds { backend: Backend::Attr(attr), last_level: None, last_write: None, pit_flash_since: None }
     }
 
     /// A rev display driven by 5 discrete LED brightness files, RPM1
     /// (outermost pair) through RPM5 (innermost) (tests point these at
     /// plain files in a temp directory).
     pub fn at_classdevs(brightness: [PathBuf; 5]) -> RevLeds {
-        RevLeds { backend: Backend::Classdevs { brightness, lit: [false; 5] }, last_level: None, last_write: None }
+        RevLeds { backend: Backend::Classdevs { brightness, lit: [false; 5] }, last_level: None, last_write: None, pit_flash_since: None }
     }
 
     /// Feed one telemetry sample at time `now` (injected so tests control
@@ -176,8 +198,14 @@ impl RevLeds {
     /// write is at least [`MIN_WRITE_INTERVAL`] old; a skipped change is
     /// picked up by a later call since `last_level` still differs. Write
     /// failures are ignored (and not recorded, so the level is retried).
-    pub fn update(&mut self, rpm: f32, max_rpm: f32, now: Instant) {
-        let level = rev_level(rpm, max_rpm);
+    pub fn update(&mut self, rpm: f32, max_rpm: f32, pit_limiter: bool, now: Instant) {
+        let level = if pit_limiter {
+            let since = *self.pit_flash_since.get_or_insert(now);
+            pit_flash_level(now.duration_since(since))
+        } else {
+            self.pit_flash_since = None;
+            rev_level(rpm, max_rpm)
+        };
         if self.last_level == Some(level) {
             return;
         }
@@ -292,6 +320,41 @@ mod tests {
     }
 
     #[test]
+    fn pit_flash_alternates_full_and_dark_at_the_captured_period() {
+        let half = PIT_FLASH_HALF_PERIOD;
+        // Lit for the first half period, from the instant it engages.
+        assert_eq!(pit_flash_level(Duration::ZERO), 10);
+        assert_eq!(pit_flash_level(half - Duration::from_millis(1)), 10);
+        // Dark for the second.
+        assert_eq!(pit_flash_level(half), 0);
+        assert_eq!(pit_flash_level(half + half / 2), 0);
+        // And back, so it is a cycle rather than a one-shot.
+        assert_eq!(pit_flash_level(half * 2), 10);
+        assert_eq!(pit_flash_level(half * 3), 0);
+        assert_eq!(pit_flash_level(half * 4), 10);
+    }
+
+    #[test]
+    fn the_flash_period_matches_the_capture() {
+        // ~416.7 ms per half cycle, i.e. a full cycle a little over 1.2 Hz.
+        // Guards the constant itself against a careless edit.
+        assert_eq!(PIT_FLASH_HALF_PERIOD.as_micros(), 416_700);
+        let hz = 1.0 / (PIT_FLASH_HALF_PERIOD.as_secs_f64() * 2.0);
+        assert!((hz - 1.2).abs() < 0.01, "full cycle should be ~1.2 Hz, got {hz}");
+    }
+
+    #[test]
+    fn the_limiter_overrides_rpm_entirely() {
+        // At redline the ordinary level is already 10, so the interesting
+        // case is the dark half: a screaming engine must still go dark.
+        assert_eq!(rev_level(8000.0, 8000.0), 10);
+        assert_eq!(pit_flash_level(PIT_FLASH_HALF_PERIOD), 0);
+        // And an idling engine must still light the whole strip.
+        assert_eq!(rev_level(800.0, 8000.0), 1);
+        assert_eq!(pit_flash_level(Duration::ZERO), 10);
+    }
+
+    #[test]
     fn rev_level_maps_the_rpm_range_onto_0_to_10() {
         assert_eq!(rev_level(0.0, 8000.0), 0);
         assert_eq!(rev_level(4000.0, 8000.0), 5);
@@ -328,16 +391,16 @@ mod tests {
         let mut leds = RevLeds::at(attr.clone());
         let t0 = Instant::now();
 
-        leds.update(0.0, 100.0, t0);
+        leds.update(0.0, 100.0, false, t0);
         assert_eq!(read(&attr), "0", "first sample always lands");
 
         // Same level again, well past the pacing floor: no write (pinned
         // via a sentinel the skipped write would have replaced).
         fs::write(&attr, "sentinel").unwrap();
-        leds.update(1.0, 100.0, t0 + Duration::from_secs(1));
+        leds.update(1.0, 100.0, false, t0 + Duration::from_secs(1));
         assert_eq!(read(&attr), "sentinel", "unchanged level writes nothing");
 
-        leds.update(50.0, 100.0, t0 + Duration::from_secs(2));
+        leds.update(50.0, 100.0, false, t0 + Duration::from_secs(2));
         assert_eq!(read(&attr), "5", "changed level lands");
     }
 
@@ -349,16 +412,16 @@ mod tests {
         let mut leds = RevLeds::at(attr.clone());
         let t0 = Instant::now();
 
-        leds.update(20.0, 100.0, t0);
+        leds.update(20.0, 100.0, false, t0);
         assert_eq!(read(&attr), "2");
 
         // A changed level inside the floor is skipped...
-        leds.update(50.0, 100.0, t0 + Duration::from_millis(8));
+        leds.update(50.0, 100.0, false, t0 + Duration::from_millis(8));
         assert_eq!(read(&attr), "2", "no write 8 ms after the last one");
 
         // ...and picked up by the next call past it (the level still
         // differs from the last WRITTEN one).
-        leds.update(50.0, 100.0, t0 + MIN_WRITE_INTERVAL);
+        leds.update(50.0, 100.0, false, t0 + MIN_WRITE_INTERVAL);
         assert_eq!(read(&attr), "5");
     }
 
@@ -370,7 +433,7 @@ mod tests {
         fs::write(&attr, "").unwrap();
         fs::write(&idle, "5\n").unwrap();
         let mut leds = RevLeds::at(attr.clone());
-        leds.update(100.0, 100.0, Instant::now());
+        leds.update(100.0, 100.0, false, Instant::now());
         assert_eq!(read(&attr), "10");
 
         leds.stop();
@@ -379,7 +442,7 @@ mod tests {
 
         // After a stop the feeder starts fresh: the next sample writes
         // regardless of what was last written before the stop.
-        leds.update(0.0, 100.0, Instant::now());
+        leds.update(0.0, 100.0, false, Instant::now());
         assert_eq!(read(&attr), "0");
     }
 
@@ -474,7 +537,7 @@ mod tests {
         let mut leds = RevLeds::at_classdevs(brightness.clone());
         let t0 = Instant::now();
 
-        leds.update(30.0, 100.0, t0); // level 3 -> 2 pairs lit
+        leds.update(30.0, 100.0, false, t0); // level 3 -> 2 pairs lit
         let states: Vec<&str> = brightness.iter().map(|p| if read(p) == "1" { "1" } else { "0" }).collect();
         assert_eq!(states, vec!["1", "1", "0", "0", "0"], "outermost pairs (RPM1, RPM2) light first");
     }
@@ -486,7 +549,7 @@ mod tests {
         let mut leds = RevLeds::at_classdevs(brightness.clone());
         let t0 = Instant::now();
 
-        leds.update(30.0, 100.0, t0); // level 3 -> lit_count 2
+        leds.update(30.0, 100.0, false, t0); // level 3 -> lit_count 2
         assert_eq!(read(&brightness[0]), "1");
         assert_eq!(read(&brightness[1]), "1");
 
@@ -496,13 +559,13 @@ mod tests {
         for path in &brightness {
             fs::write(path, "sentinel").unwrap();
         }
-        leds.update(40.0, 100.0, t0 + Duration::from_secs(1)); // level 4 -> lit_count 2
+        leds.update(40.0, 100.0, false, t0 + Duration::from_secs(1)); // level 4 -> lit_count 2
         for path in &brightness {
             assert_eq!(read(path), "sentinel", "unchanged lit_count rewrites nothing");
         }
 
         // level 6 -> lit_count 3: only pair index 2 (RPM3) turns on.
-        leds.update(60.0, 100.0, t0 + Duration::from_secs(2));
+        leds.update(60.0, 100.0, false, t0 + Duration::from_secs(2));
         assert_eq!(read(&brightness[2]), "1", "newly-lit pair is written");
         assert_eq!(read(&brightness[0]), "sentinel", "already-lit pairs are left alone");
         assert_eq!(read(&brightness[1]), "sentinel", "already-lit pairs are left alone");
@@ -515,7 +578,7 @@ mod tests {
         let dir = tempdir();
         let brightness = make_classdevs(&dir, "wheel");
         let mut leds = RevLeds::at_classdevs(brightness.clone());
-        leds.update(100.0, 100.0, Instant::now()); // level 10 -> all 5 lit
+        leds.update(100.0, 100.0, false, Instant::now()); // level 10 -> all 5 lit
         for path in &brightness {
             assert_eq!(read(path), "1");
         }
@@ -527,7 +590,7 @@ mod tests {
 
         // After a stop the feeder starts fresh: the next sample rewrites
         // regardless of what was last written before the stop.
-        leds.update(0.0, 100.0, Instant::now());
+        leds.update(0.0, 100.0, false, Instant::now());
         for path in &brightness {
             assert_eq!(read(path), "0");
         }

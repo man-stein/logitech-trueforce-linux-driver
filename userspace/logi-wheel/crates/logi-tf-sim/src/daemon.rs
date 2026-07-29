@@ -285,7 +285,7 @@ pub fn run(cfg: &Config) -> Result<()> {
                 // paces itself (>=160 ms between writes) and only writes
                 // changed levels, so this per-iteration call is cheap.
                 if let Some(leds) = &mut a.leds {
-                    leds.update(a.tel.rpm, a.tel.max_rpm, now);
+                    leds.update(a.tel.rpm, a.tel.max_rpm, a.tel.pit_limiter, now);
                 }
             }
         }

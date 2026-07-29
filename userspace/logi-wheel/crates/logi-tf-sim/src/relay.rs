@@ -71,7 +71,7 @@ impl RelayTelemetry {
             rpm: self.rpm,
             max_rpm: self.max_rpm,
             throttle: self.throttle.clamp(0.0, 1.0),
-            speed: 0.0,
+            speed: 0.0, pit_limiter: false,
         }
     }
 }

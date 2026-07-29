@@ -20,6 +20,7 @@
 //! | 24     | engTemp     | f32  | C       |
 //! | 28     | fuel        | f32  | 0..1    |
 //! | ...    | ...         | ...  | ...     |
+//! | 44     | showLights  | u32  | DL_*    |
 //! | 48     | throttle    | f32  | 0..1    |
 //! | 52     | brake       | f32  | 0..1    |
 //! | 56     | clutch      | f32  | 0..1    |
@@ -45,12 +46,23 @@ const LEN_WITH_ID: usize = 96;
 const OFF_SPEED: usize = 12;
 const OFF_RPM: usize = 16;
 const OFF_THROTTLE: usize = 48;
+/// OutGauge `showLights`: the dashboard lamps the game says are lit, as a
+/// DL_* bitfield. Only the pit-speed-limiter bit is read.
+const OFF_SHOW_LIGHTS: usize = 44;
+/// `DL_PITSPEED` in the OutGauge DL_* set. A source that never lights this
+/// lamp simply reports no limiter, which is indistinguishable from a car
+/// that has none.
+const DL_PITSPEED: u32 = 0x0000_0008;
 
 /// Reject engine rates above this as not a real OutGauge sample.
 const RPM_CEILING: f32 = 30_000.0;
 
 fn f32_at(pkt: &[u8], off: usize) -> Option<f32> {
     Some(f32::from_le_bytes(pkt.get(off..off + 4)?.try_into().ok()?))
+}
+
+fn u32_at(pkt: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(pkt.get(off..off + 4)?.try_into().ok()?))
 }
 
 /// A stateful OutGauge decoder. Stateful only to track the running redline
@@ -85,7 +97,11 @@ impl Decoder {
         }
         self.running_max_rpm = self.running_max_rpm.max(rpm);
         let max_rpm = self.running_max_rpm.max(1.0);
-        Some((ID, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed }))
+        let pit_limiter = u32_at(pkt, OFF_SHOW_LIGHTS).is_some_and(|l| l & DL_PITSPEED != 0);
+        Some((
+            ID,
+            Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter },
+        ))
     }
 }
 
@@ -101,6 +117,33 @@ mod tests {
         pkt[OFF_RPM..OFF_RPM + 4].copy_from_slice(&rpm.to_le_bytes());
         pkt[OFF_THROTTLE..OFF_THROTTLE + 4].copy_from_slice(&throttle.to_le_bytes());
         pkt
+    }
+
+    #[test]
+    fn pit_limiter_follows_the_dl_pitspeed_lamp() {
+        let mut dec = Decoder::new();
+        let plain = packet(4000.0, 0.5, 30.0);
+        let (_, tel) = dec.parse(&plain).unwrap();
+        assert!(!tel.pit_limiter, "no lamps lit means no limiter");
+
+        let mut lit = packet(4000.0, 0.5, 30.0);
+        lit[OFF_SHOW_LIGHTS..OFF_SHOW_LIGHTS + 4].copy_from_slice(&DL_PITSPEED.to_le_bytes());
+        let (_, tel) = dec.parse(&lit).unwrap();
+        assert!(tel.pit_limiter);
+
+        // Another lamp on its own must not read as the limiter: DL_HANDBRAKE
+        // sits next to DL_PITSPEED in the same bitfield.
+        let mut other = packet(4000.0, 0.5, 30.0);
+        other[OFF_SHOW_LIGHTS..OFF_SHOW_LIGHTS + 4].copy_from_slice(&4u32.to_le_bytes());
+        let (_, tel) = dec.parse(&other).unwrap();
+        assert!(!tel.pit_limiter);
+
+        // And it must still be found when other lamps are lit alongside it.
+        let mut both = packet(4000.0, 0.5, 30.0);
+        both[OFF_SHOW_LIGHTS..OFF_SHOW_LIGHTS + 4]
+            .copy_from_slice(&(DL_PITSPEED | 4 | 256).to_le_bytes());
+        let (_, tel) = dec.parse(&both).unwrap();
+        assert!(tel.pit_limiter);
     }
 
     #[test]
