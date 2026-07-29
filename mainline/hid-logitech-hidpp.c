@@ -12168,7 +12168,6 @@ static void hidpp_dd_rescan_accessory(struct hidpp_dd_ff_data *ff)
 {
 	struct hidpp_device *hidpp = ff->hidpp;
 	struct hid_device *hid = hidpp->hid_dev;
-	unsigned int i;
 	u8 idx;
 
 	if (ff->shifter_dev_idx != HIDPP_DD_FEATURE_NOT_FOUND) {
@@ -12209,7 +12208,14 @@ static void hidpp_dd_rescan_accessory(struct hidpp_dd_ff_data *ff)
 	 * seconds, which is quick enough to notice someone plugging the
 	 * accessory in.
 	 */
-	for (i = 0; i < ARRAY_SIZE(hidpp_dd_pedal_dev_candidates); i++) {
+	/*
+	 * Deliberately not a loop. Every path below returns, so a `for` over
+	 * the candidate array would have run exactly once while implying it
+	 * sweeps the list - the opposite of what the paragraph above says this
+	 * does. The round-robin lives in accessory_scan_cursor, which advances
+	 * once per call, so the list still comes round across passes.
+	 */
+	{
 		u8 cand = hidpp_dd_pedal_dev_candidates[ff->accessory_scan_cursor];
 		u8 cand_idx, axes, banded_idx;
 
@@ -15871,7 +15877,13 @@ static void hidpp_remove(struct hid_device *hdev)
 			cancel_work_sync(&ff->tf_init_work);
 			cancel_delayed_work_sync(&ff->refresh_work);
 		}
-		return hid_hw_stop(hdev);
+		/*
+		 * Two statements, not `return hid_hw_stop(hdev);`. Returning a
+		 * void expression from a void function is a constraint
+		 * violation in ISO C that both toolchains happen to accept.
+		 */
+		hid_hw_stop(hdev);
+		return;
 	}
 
 	/*

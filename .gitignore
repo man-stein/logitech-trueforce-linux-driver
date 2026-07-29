@@ -15,6 +15,10 @@
 # release workflow's aur job stamps it in a checkout of the release tag,
 # so it has to be in the tree.
 !/packaging/aur/logitech-trueforce-dkms/.SRCINFO
+# SonarQube Cloud automatic-analysis settings. It only takes effect when
+# it is on the default branch, so the `.*` rule above would quietly stop
+# it from ever working.
+!/.sonarcloud.properties
 *.a
 *.asn1.[ch]
 *.bin
