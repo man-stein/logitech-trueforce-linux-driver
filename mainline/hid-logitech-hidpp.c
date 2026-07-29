@@ -15746,10 +15746,19 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 			 * (interface 1), not the joystick interface (interface 0).
 			 */
 			if (hidpp->supported_reports) {
-				ret = hidpp_dd_ff_init(hidpp);
-				if (ret)
+				int ff_ret = hidpp_dd_ff_init(hidpp);
+
+				/*
+				 * Warn and carry on. See the G920 branch below
+				 * for why a wheel without force feedback must
+				 * still be a wheel: failing probe here hands
+				 * the device to the in-tree driver, which is a
+				 * far worse outcome than losing FFB.
+				 */
+				if (ff_ret)
 					dd_warn(hidpp->hid_dev,
-						 "Force feedback setup failed (error %d)\n", ret);
+						 "Force feedback setup failed (error %d); continuing without it\n",
+						 ff_ret);
 			} else {
 				dd_info(hidpp->hid_dev,
 					 "Skipping FFB init on non-HID++ interface\n");
@@ -15769,10 +15778,31 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 			cfg_ret = g920_get_config(hidpp, &data);
 			if (cfg_ret) {
+				/*
+				 * Deliberately NOT propagated into `ret`. This
+				 * used to read `ret = cfg_ret`, which failed
+				 * the whole probe over a force-feedback
+				 * problem, contradicting the message right
+				 * above it.
+				 *
+				 * The cost of that is not "no force feedback".
+				 * A rejected probe releases the device, the
+				 * in-tree hid-logitech-hidpp then binds the
+				 * same interface this driver already partly
+				 * set up, and the user gets "Cannot allocate
+				 * sysfs group", "Not able to get a minor" and
+				 * a USB device wedged hard enough that lsusb
+				 * hangs. Reported on a G923 Xbox (c26e) in
+				 * issue #27, where g920_get_config returns
+				 * -EPERM.
+				 *
+				 * A wheel without force feedback is still a
+				 * wheel: steering, buttons and pedals all work
+				 * from the input side alone. Keep the device.
+				 */
 				hid_warn(hidpp->hid_dev,
-					 "g920_get_config failed: errno %d (FFB will not register)\n",
+					 "g920_get_config failed: errno %d (continuing without force feedback)\n",
 					 cfg_ret);
-				ret = cfg_ret;
 			} else {
 				hid_info(hidpp->hid_dev,
 					 "g920_get_config ok: num_effects=%d range=%u gain=0x%04x\n",
