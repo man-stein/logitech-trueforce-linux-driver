@@ -38,6 +38,24 @@
 #     C262  G920 Racing Wheel
 
 ACTION!="add|change", GOTO="trueforce_end"
+
+# The wheel's own /dev/input/event* nodes.
+#
+# Normally the system rules handle these: 50-udev-default gives input
+# devices GROUP="input", and a joystick additionally gets uaccess. Neither
+# is guaranteed. On a G923 Xbox whose probe failed and was re-bound, the
+# event nodes came up root:root 0600, so the settings apps could not read
+# live input at all and reported an unreadable /dev/input/eventN (issue
+# #27). Chowning them by hand worked and did not survive a reboot, which is
+# exactly what a udev rule is for.
+#
+# Granting this ourselves for wheels we already claim costs nothing when
+# the system rules do work, and removes a silent dependency on them when
+# they do not.
+SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c262|c266|c267|c26d|c26e|c268|c272|c276", \
+  GROUP="input", MODE="0660", TAG+="uaccess"
+
 SUBSYSTEM!="hidraw", GOTO="trueforce_end"
 
 # One alternation instead of a GOTO per PID: adding a wheel is a

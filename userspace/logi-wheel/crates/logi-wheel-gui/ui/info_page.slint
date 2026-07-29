@@ -121,7 +121,10 @@ export component InfoPage inherits Rectangle {
     // Which product photo to show below: 0 RS50 (the numbered layout used
     // for the button-callout overlay), 1 G PRO, 2 G923. See
     // `bridge::wheel_image_index` for how a frontend picks this.
-    in property <int> wheel-kind: 0;
+    // -1 = not identified (no photo), 0 RS50, 1 G PRO, 2 G923. The default
+    // is -1 rather than 0 so a wheel that has not been identified yet, or at
+    // all, shows no photo instead of a confident picture of an RS50.
+    in property <int> wheel-kind: -1;
     // True while a simulation plays (including a step's countdown lead-
     // in); disables both sim buttons and shows the Stop button.
     in property <bool> sim-running: false;
@@ -424,6 +427,10 @@ export component InfoPage inherits Rectangle {
                                         // removed, so it sits on the page's
                                         // own colour rather than a white
                                         // rectangle.
+                                        // Hidden entirely when the wheel is
+                                        // unidentified: showing the wrong
+                                        // wheel is worse than showing none.
+                                        visible: root.wheel-kind >= 0;
                                         source: root.wheel-kind == 2
                                             ? @image-url("assets/g923-wheel.png")
                                             : root.wheel-kind == 1
@@ -449,6 +456,20 @@ export component InfoPage inherits Rectangle {
                                         background: #00c8538c;
                                         visible: c.pressed && root.wheel-kind == 0;
                                     }
+                                }
+                                // Shown in place of the photo when the wheel
+                                // has not been identified, so the empty space
+                                // reads as a known state rather than a
+                                // failure to draw.
+                                Text {
+                                    visible: root.wheel-kind < 0;
+                                    text: "Wheel not identified";
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    color: Theme.muted-text-color;
                                 }
                             }
                             Text {

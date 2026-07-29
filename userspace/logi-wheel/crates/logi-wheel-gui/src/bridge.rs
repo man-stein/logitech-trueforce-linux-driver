@@ -73,9 +73,13 @@ pub const LIGHT_EDIT_SLOT_ATTR: &str = "lightsync_edit_slot";
 // the three product photos embedded as Slint assets; the numbering must
 // match that Slint `if`/`else` chain exactly.
 
-/// The RS50 (`046d:c276`), and the fallback for any wheel `wheel_image_index`
-/// cannot pin to a specific product (an `Unknown` model): the photo already
-/// embedded before per-wheel images existed.
+/// No photo: the wheel has not been identified. Distinct from every real
+/// product so an unidentified wheel shows nothing rather than asserting a
+/// model it may not be. It used to fall back to the RS50 photo, which meant
+/// a G923 whose probe had failed displayed a confident picture of a
+/// different wheel (issue #27).
+pub const WHEEL_IMAGE_UNKNOWN: i32 = -1;
+/// The RS50 (`046d:c276`).
 pub const WHEEL_IMAGE_RS50: i32 = 0;
 /// The G PRO Racing Wheel (`046d:c268`/`046d:c272`).
 pub const WHEEL_IMAGE_GPRO: i32 = 1;
@@ -88,7 +92,8 @@ pub fn wheel_image_index(model: WheelModel) -> i32 {
     match model {
         WheelModel::GPro => WHEEL_IMAGE_GPRO,
         WheelModel::G923 => WHEEL_IMAGE_G923,
-        WheelModel::Rs50 | WheelModel::Unknown => WHEEL_IMAGE_RS50,
+        WheelModel::Rs50 => WHEEL_IMAGE_RS50,
+        WheelModel::Unknown => WHEEL_IMAGE_UNKNOWN,
     }
 }
 
@@ -2296,9 +2301,14 @@ mod tests {
         assert_eq!(wheel_image_index(WheelModel::Rs50), WHEEL_IMAGE_RS50);
         assert_eq!(wheel_image_index(WheelModel::GPro), WHEEL_IMAGE_GPRO);
         assert_eq!(wheel_image_index(WheelModel::G923), WHEEL_IMAGE_G923);
-        // An unrecognised wheel falls back to the photo shown before
-        // per-wheel images existed, rather than guessing.
-        assert_eq!(wheel_image_index(WheelModel::Unknown), WHEEL_IMAGE_RS50);
+        // An unrecognised wheel shows no photo at all, rather than
+        // claiming to be one of the three we do have artwork for.
+        assert_eq!(wheel_image_index(WheelModel::Unknown), WHEEL_IMAGE_UNKNOWN);
+        // The unknown marker must not collide with any real product, or the
+        // UI cannot tell "no wheel identified" from "this exact wheel".
+        for real in [WHEEL_IMAGE_RS50, WHEEL_IMAGE_GPRO, WHEEL_IMAGE_G923] {
+            assert_ne!(WHEEL_IMAGE_UNKNOWN, real);
+        }
     }
 
     #[test]
