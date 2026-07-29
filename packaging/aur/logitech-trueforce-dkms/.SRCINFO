@@ -7,6 +7,7 @@ pkgbase = logitech-trueforce-dkms
 	license = GPL-2.0-only
 	license = GPL-3.0-or-later
 	makedepends = cargo
+	makedepends = fontconfig
 	options = !lto
 	source = logitech-trueforce-dkms-0.18.0.tar.gz::https://github.com/mescon/logitech-trueforce-linux-driver/archive/refs/tags/v0.18.0.tar.gz
 	sha256sums = 36cd8422bda97cebe01754403dbe97a9a74a6f71411ae7cd3c15105df54fbd57

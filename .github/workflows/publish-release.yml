@@ -218,9 +218,79 @@ jobs:
           osc addremove
           osc commit -m "logitech-trueforce-dkms ${VERSION} (from tag ${TAG})"
 
+  # Build the Arch package before publishing it. The debian, copr and obs
+  # jobs all compile what they ship, so a packaging break in those channels
+  # fails here rather than on a user's machine; the aur job only ever pushed
+  # a PKGBUILD, so Arch was the one channel where a broken recipe reached
+  # users unnoticed. This closes that gap: `aur` now needs this job, so a
+  # recipe that cannot build is never pushed.
+  aur-build:
+    name: Arch AUR (build check)
+    needs: validate
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build the package with makepkg
+        run: |
+          set -eu
+          pacman -Syu --noconfirm --needed curl git sudo
+
+          # makepkg refuses to run as root, so build as an unprivileged
+          # user that can still pacman -S the declared makedepends.
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+
+          VERSION="${TAG#v}"
+          curl --proto '=https' --proto-redir '=https' -fsSL -o src.tar.gz \
+            "https://github.com/mescon/logitech-trueforce-linux-driver/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(sha256sum src.tar.gz | cut -d' ' -f1)
+
+          PKG=packaging/aur/logitech-trueforce-dkms
+          # Same three fields the publish step stamps, so this builds the
+          # exact recipe that would be pushed rather than an approximation.
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" "$PKG/PKGBUILD"
+          sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKG/PKGBUILD"
+          sed -i "s/^sha256sums=(.*)/sha256sums=('${SHA}')/" "$PKG/PKGBUILD"
+
+          cp -r "$PKG" /home/builder/pkg
+          chown -R builder:builder /home/builder/pkg
+          sudo -u builder bash -euc '
+            cd /home/builder/pkg
+            # -s installs the declared makedepends: a dependency the PKGBUILD
+            # forgets to declare fails here, which is the point.
+            makepkg -s --noconfirm --nocheck
+            ls -1 *.pkg.tar.*
+          '
+      - name: Generate .SRCINFO from the stamped PKGBUILD
+        run: |
+          set -eu
+          # .SRCINFO is GENERATED here, never hand-patched. It stores every
+          # field fully expanded, including the source URL, so the previous
+          # approach of sed-ing pkgver/pkgrel/sha256sums into the committed
+          # copy left `source =` pointing at whatever release it was last
+          # written by hand for: 0.22.0 shipped to the AUR claiming version
+          # 0.22.0, a v0.18.0 tarball URL, and a checksum for neither.
+          # makepkg derives all of it from the PKGBUILD that was just built.
+          mkdir -p out
+          sudo -u builder bash -euc '
+            cd /home/builder/pkg && makepkg --printsrcinfo
+          ' > out/.SRCINFO
+          cp /home/builder/pkg/PKGBUILD out/PKGBUILD
+          grep -E "^\s+(pkgver|pkgrel|source|sha256sums) =" out/.SRCINFO
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aur-package
+          path: out/
+          include-hidden-files: true
+          retention-days: 1
+
   aur:
     name: Arch AUR
-    needs: validate
+    needs: [validate, aur-build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -236,22 +306,23 @@ jobs:
           chmod 600 ~/.ssh/aur
           ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
           echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
-      - name: Stamp version and checksum, push to the split AUR package
+      - uses: actions/download-artifact@v4
+        with:
+          name: aur-package
+          path: aur-package
+      - name: Push the built recipe to the split AUR package
         run: |
           set -eu
           VERSION="${TAG#v}"
-          curl --proto '=https' --proto-redir '=https' -fsSL -o src.tar.gz "https://github.com/mescon/logitech-trueforce-linux-driver/archive/refs/tags/${TAG}.tar.gz"
-          SHA=$(sha256sum src.tar.gz | cut -d' ' -f1)
 
           PKG=packaging/aur/logitech-trueforce-dkms
-          # Same three fields as the copr/obs stamping: version, pkgrel reset
-          # to 1, and the checksum of the tarball this release actually is.
-          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" "$PKG/PKGBUILD"
-          sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKG/PKGBUILD"
-          sed -i "s/^sha256sums=(.*)/sha256sums=('${SHA}')/" "$PKG/PKGBUILD"
-          sed -i "s/^\tpkgver = .*/\tpkgver = ${VERSION}/" "$PKG/.SRCINFO"
-          sed -i "s/^\tpkgrel = .*/\tpkgrel = 1/" "$PKG/.SRCINFO"
-          sed -i "s/^\tsha256sums = .*/\tsha256sums = ${SHA}/" "$PKG/.SRCINFO"
+          # The PKGBUILD and .SRCINFO come from aur-build, which stamped the
+          # version, built the package with them, and generated the .SRCINFO
+          # from that exact PKGBUILD. Nothing is patched here: what gets
+          # pushed is what was proven to build, and its metadata is derived
+          # rather than hand-edited, which is what let `source` rot to a
+          # v0.18.0 URL while pkgver said 0.22.0.
+          cp aur-package/PKGBUILD aur-package/.SRCINFO "$PKG/"
 
           # logitech-trueforce-dkms is a split package: PKGBUILD's pkgname
           # array lists it plus logi-wheel and logi-wheel-gui, so this one push
