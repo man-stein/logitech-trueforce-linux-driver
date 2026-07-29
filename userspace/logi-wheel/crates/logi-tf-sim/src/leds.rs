@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Rev-display feeder: mirrors telemetry RPM onto the wheel's rev LEDs.
 //!
+//! To be unambiguous, since the wheel has two light-emitting surfaces:
+//! this drives the **10-LED rev strip across the rim** (HID++ `0x807A`),
+//! never the **OLED screen on the wheel base** (HID++ `0x8130`, which
+//! nothing in this project writes). See `docs/PROTOCOL_SPECIFICATION.md`
+//! 12.3 and 12.4.
+//!
 //! Two backends, chosen at [`RevLeds::discover`] time:
 //! - The DD wheels (RS50, real G PRO) expose a single driver attribute,
 //!   `wheel_rev_level` (0-10 LEDs lit; on the RS50 the fill uses the
@@ -57,8 +63,9 @@ const RPM_SUFFIXES: [&str; 5] = ["::RPM1", "::RPM2", "::RPM3", "::RPM4", "::RPM5
 /// crawl (~1.6 s).
 pub const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(16);
 
-/// How long the strip stays full, then dark, while the pit limiter is
-/// engaged. G Hub renders the limiter with no device-side effect at all:
+/// How long the rev strip stays full, then dark, while the pit limiter is
+/// engaged. The strip, not the base's OLED screen: the limiter is rendered
+/// purely as rev-level 10/0, which is why no display support is needed. G Hub renders the limiter with no device-side effect at all:
 /// it just alternates the ordinary rev level between 10 and 0, measured at
 /// ~416.7 ms per half cycle (about 1.2 Hz) in the issue #20 iRacing
 /// capture. See `docs/PROTOCOL_SPECIFICATION.md` 12.4.

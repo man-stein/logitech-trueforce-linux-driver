@@ -1950,6 +1950,21 @@ This returns the PAGE ID at each index. G Hub queries indices 0x00 through ~0x1F
 
 ### 12.3 Dynamic OLED (Feature 0x8130, DisplayGameData)
 
+> **Not the rev lights.** This wheel has two separate light-emitting
+> surfaces, and they share nothing:
+>
+> | | Where | Feature | Driver support |
+> |---|---|---|---|
+> | **Dynamic OLED** | the screen on the wheel **base** | `0x8130` (this section) | none |
+> | **Rev-light strip** | the 10 LEDs across the **rim** | `0x807A` (12.4, section 9) | `wheel_rev_level`, `wheel_led_*` |
+>
+> The OLED is the same panel that shows the profile and settings menu
+> referred to elsewhere in this document as "the wheel's OLED menu";
+> "Dynamic" is the role it plays when a game feeds it, not a second
+> display. The rev strip is what `logi-tf-sim` drives from telemetry, and
+> what the pit-limiter flash in 12.4 alternates. Nothing in this section
+> reaches the strip, and nothing in 12.4 reaches the OLED.
+
 **Status: confirmed on hardware by a third party, not by this driver.** The
 driver neither sends nor exposes anything here. This section records what is
 known so the next person does not start from the enumeration table again.
@@ -1979,6 +1994,11 @@ force feedback.
 rather than ruled out.
 
 ### 12.4 Rev-light stream: arm sequence, acknowledgements and flashing
+
+This section is entirely about the **rim's 10-LED rev strip**, feature
+`0x807A`. It has nothing to do with the base's OLED screen (12.3): the two
+are different hardware on different features, and no command here reaches
+the display.
 
 From four first-party G Hub/iRacing captures contributed by @PeposCJ in
 issue #20 (2026-07-27). These settled three questions and found one bug.
