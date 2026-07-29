@@ -383,7 +383,7 @@ Device → Host: Interrupt IN (endpoint 0x82)
 | 0x0F | `0x8120` | GamingAttachments | Attachment/module management (openlogi registry name) |
 | 0x10 | `0x8123` | ForceFeedback | HID++ FFB (unused by this driver; documented at openlogi.org) |
 | 0x11 | `0x8127` | (undecoded, hidden) | fn2 result is constant across every onboard slot - not slot content; not sent by this driver (see "Onboard Profile Authoring" above) |
-| 0x12 | `0x8130` | (undecoded) | Not touched by any sysfs attribute |
+| 0x12 | `0x8130` | **DisplayGameData** | The Dynamic OLED's transport. Hardware-confirmed by a third party, not by this driver; not touched by any sysfs attribute (see 12.3) |
 | 0x13 | `0x8132` | (undecoded) | Not touched by any sysfs attribute |
 | **0x14** | **`0x8133`** | **Damping** | Damping slider |
 | **0x15** | **`0x8134`** | **BrakeForce** | Brake Force slider |
@@ -696,8 +696,9 @@ a live G Hub startup capture; previously missing from the table below):
 index `0x11` = `0x8127` (a hidden feature whose fn2 result reads back
 identical across every slot, i.e. NOT part of a slot's content - some
 kind of commit/sync call G Hub issues but this driver has never needed to
-send), `0x12` = `0x8130`, `0x13` = `0x8132` (both undecoded; not touched
-by any sysfs attribute).
+send), `0x12` = `0x8130` (DisplayGameData, the Dynamic OLED's transport;
+see 12.3), `0x13` = `0x8132` (undecoded; not touched by any sysfs
+attribute).
 
 **Application-level implementation:** see `docs/SYSFS_API.md`'s "Editing
 an onboard slot" section for how logi-wheel's userspace turns this wire
@@ -1947,6 +1948,76 @@ This returns the PAGE ID at each index. G Hub queries indices 0x00 through ~0x1F
 2. Discovers all features, including unknown/undocumented ones
 3. Faster overall enumeration
 
+### 12.3 Dynamic OLED (Feature 0x8130, DisplayGameData)
+
+**Status: confirmed on hardware by a third party, not by this driver.** The
+driver neither sends nor exposes anything here. This section records what is
+known so the next person does not start from the enumeration table again.
+
+The RS50's Dynamic OLED is driven through HID++ feature `0x8130`, which
+enumerates at index `0x12` on this wheel. Reported by @PeposCJ in issue #20
+(2026-07-28), who reached the panel over that feature and displayed both
+static text and live iRacing telemetry on it.
+
+What is **not** established yet, and would be needed before the driver could
+offer this:
+
+- the function numbers and payload layout (text encoding, field structure,
+  how a frame is committed)
+- whether the panel has addressable regions or takes whole frames
+- **whether writing it is safe alongside the force-feedback stream.** This is
+  the open question the reporter is working on, and it is the one that
+  matters most here: on this wheel the FFB and TrueForce streams are latency
+  sensitive, and `0x8130` traffic shares the same HID++ channel.
+
+Until that last point is settled, treat OLED writes as capable of disturbing
+force feedback.
+
+**Related undecoded candidates.** An earlier round of enumeration flagged
+`0x18A2`, `0x18B1` and `0x9315` as the interesting unknowns on `dev_idx
+0x01`. The OLED turned out not to be any of them, so they remain unexplained
+rather than ruled out.
+
+### 12.4 Rev-light stream: arm sequence, acknowledgements and flashing
+
+From four first-party G Hub/iRacing captures contributed by @PeposCJ in
+issue #20 (2026-07-27). These settled three questions and found one bug.
+
+**Arm sequence.** After `0x807A` resolves to its runtime index, G Hub sends
+fn0, fn1, fn2, then fn0 again, and only then begins the fn2 + fn6 stream:
+
+```
+10 ff 00 0c 80 7a 00   ->  12 ff 00 0c 0b 00 00      resolve 0x807A to index 0x0B
+10 ff 0b 0c 00 00 00   ->  12 ff 0b 0c 01 0a 0a      fn0
+10 ff 0b 1c 00 00 00   ->  12 ff 0b 1c 00 02 01 ...  fn1
+10 ff 0b 2c 00 00 00   ->  12 ff 0b 2c 02 00 00      fn2
+10 ff 0b 0c 00 00 00                                  fn0 again
+11 ff 0b 6c ...                                       then the fn2 + fn6 stream
+```
+
+This driver used to send an extra `fn3` with parameter 2 that G Hub never
+sends. `fn3` is SET_EFFECT, so it switched the wheel to effect 2 and
+destroyed whatever LIGHTSYNC effect the user had configured, which the
+driver then papered over by snapshotting and restoring the lighting. Both
+the stray write and its workaround were removed in v0.21.0 (`75090ad`). The
+sequence above is the first-party evidence that settled it; the `fn3` came
+from a third-party capture.
+
+**Acknowledgements.** Every write draws a `0x12` response. Over 301 short
+plus 301 long writes the pattern held without exception: `0x10` fn2 answered
+in ~2.49 ms median, then ~0.15 ms later `0x11` fn6 answered in ~2.85 ms
+median. Consistent with flow control rather than fire-and-forget.
+
+**Redline.** Only `LL = 0..10` is ever used. At redline the stream simply
+keeps sending `LL = 10` at ~60 Hz. There is no value above `0x0A`, and no
+separate flash command or alternate function.
+
+**Pit-limiter flash.** iRacing's full-strip flash is not a device effect at
+all: it is `LL = 10` and `LL = 0` alternating at ~416.7 ms, about 1.2 Hz,
+over the same fn2/fn6 pair. A telemetry feeder can therefore reproduce it
+without any new protocol support, which is why it is a candidate for
+`logi-tf-sim` rather than the driver.
+
 ---
 
 ## 13. Revision History
@@ -1972,3 +2043,4 @@ This returns the PAGE ID at each index. G Hub queries indices 0x00 through ~0x1F
 | 7.0 | 2026-07-20 | LIGHTSYNC slot selection decoded (`2026-01-30_desktop_led_colors.pcapng` frames 219/339/715 + 279/525/775, hardware-confirmed live): 0x807A fn3 effect values 5-9 ARE the five custom slots (0x05 = CUSTOM 1 .. 0x09 = CUSTOM 5) - selecting a slot is selecting its effect number, staged by fn3 and repainted by the fn6 commit (zero-parameter standalone; the full-config forms bracket an RGB upload). No separate "activate slot" function exists: 0x807B fn3 is GET_NAME, a pure read (the driver's old "activate" step did nothing, and its hardcoded fn3 = 0x05 pinned the strip to CUSTOM 1 on every slot switch; both fixed). Section 9 effect tables and sequences corrected; rev-display note reconciled - the rev fill renders the SELECTED slot's config (the earlier "not the active slot" reading was an artifact of the broken switch; post-fix colour source expected, re-verify); the arm burst's effect stomp is healed by re-asserting the pre-arm effect value after the one-time burst. |
 | 7.2 | 2026-07-28 | Accessory fully decoded and driven. `0x80B1` BANDED_AXIS: `[group][band]` addressing, fn2 reads / fn3 writes a signed 32-bit lever position, group 0 = shifter (two bands, one per direction), group 1 = digital handbrake (one); both scales given, including G Hub's 16-bit overflow above ~69% which this driver does not reproduce. `0x1B30` DEVICE_MODE: fn2 returns the switch position, values 0/2/1 for shifter/digital/analog. Pedal curves corrected to the BASE axes 1/2/3 - the pedal MCU stores an upload and never applies it. Sub-device index established as a property of the physical PORT, not the device type. |
 | 7.1 | 2026-07-28 | RS Shifter & Handbrake accessory (dev `0x04`) catalogued (5.3): full 18-feature map, names via 0x0005/0x0007, own 0x80A4 store, and the two accessory-unique public features `0x80B1` BANDED_AXIS / `0x1B30` DEVICE_MODE (first-party names, no captured wire format). Driver now discovers the accessory alongside the pedal MCU in one candidate-list pass and exposes presence via `wheel_accessory`; its own three settings were unimplemented at that revision (see 7.2). Sub-device index instability documented explicitly: no index is fixed for either the pedal MCU or the accessory. |
+| 7.3 | 2026-07-29 | Two contributions from @PeposCJ (issue #20), neither verified by this driver. `0x8130` DisplayGameData identified as the Dynamic OLED's transport, reached on hardware with static text and live iRacing telemetry on the panel (12.3); function numbers, payload layout and, critically, whether writing it disturbs the FFB stream all remain open, and `0x18A2`/`0x18B1`/`0x9315` stay unexplained rather than ruled out. Rev-light stream documented from four first-party captures (12.4): the true arm sequence is fn0/fn1/fn2/fn0 before the fn2+fn6 stream, with no `fn3` (the driver's extra `fn3` SET_EFFECT stomped the user's LIGHTSYNC effect and was removed in v0.21.0); every write draws a `0x12` acknowledgement; redline is plain `LL = 10` at ~60 Hz with no flash command; and iRacing's pit-limiter flash is only `LL` 10/0 alternating at ~416.7 ms, so a telemetry feeder can reproduce it with no new protocol support. |
