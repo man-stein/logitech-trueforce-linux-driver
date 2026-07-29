@@ -382,6 +382,11 @@ export component InfoPage inherits Rectangle {
                             img-area := Rectangle {
                                 vertical-stretch: 1;
                                 min-height: 230px;
+                                // Without a cap the photo grows with the row
+                                // and takes width the horizontal-stretch was
+                                // supposed to leave for the button panel,
+                                // which is what squeezed the labels.
+                                max-width: 480px;
                                 // Manual `contain` fit: the rotated element
                                 // must match the drawn image exactly, so the
                                 // callout children can position themselves
@@ -467,6 +472,13 @@ export component InfoPage inherits Rectangle {
                         // D-pad state underneath.
                         VerticalLayout {
                             horizontal-stretch: 9;
+                            // horizontal-stretch alone does not widen this
+                            // column: the row sizes both halves to their
+                            // content and leaves the remainder unused, which
+                            // left the grid ~190px however wide the window
+                            // was. This floor is what actually reserves the
+                            // room the three label columns need.
+                            min-width: 430px;
                             spacing: 8px;
                             alignment: start;
 
@@ -477,17 +489,24 @@ export component InfoPage inherits Rectangle {
                                 color: Theme.text-color;
                             }
                             grid := Rectangle {
-                                // Column count follows the width the labels
-                                // actually need, not a fixed breakpoint. The
-                                // longest label ("R Encoder Push", 14 chars at
-                                // 12px) is about 95px, and each cell spends
-                                // 16px on padding, so a cell narrower than
-                                // min-cell-w elides real text. Picking columns
-                                // from a hardcoded 440px threshold instead
-                                // meant a narrow window produced ~98px cells
-                                // and elided nearly every label.
-                                property <length> min-cell-w: 130px;
-                                property <int> columns: clamp(floor((self.width + 6px) / (self.min-cell-w + 6px)), 1, 3);
+                                // Fixed, NOT derived from self.width. This
+                                // grid's height depends on its row count,
+                                // which would depend on the column count,
+                                // which would depend on its width: a cycle
+                                // (width -> columns -> rows -> height ->
+                                // layout -> width) that Slint breaks by
+                                // treating the width as 0 here. The previous
+                                // `self.width > 440px ? 3 : 2` therefore
+                                // always took the false branch and pinned the
+                                // grid to 2 columns at every window size,
+                                // which combined with the uncapped photo next
+                                // door to give ~98px cells. The longest label
+                                // ("R Encoder Push") is ~95px at 12px plus
+                                // 16px of cell padding, so nearly every label
+                                // elided. Verified by probing the binding
+                                // with a 300px threshold against a panel
+                                // measured at ~560px: still the false branch.
+                                property <int> columns: 3;
                                 property <int> rows: ceil(root.buttons.length / self.columns);
                                 property <length> cell-w: (self.width - (self.columns - 1) * 6px) / self.columns;
                                 height: self.rows * 26px;
