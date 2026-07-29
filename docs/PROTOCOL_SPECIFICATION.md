@@ -2035,8 +2035,16 @@ separate flash command or alternate function.
 **Pit-limiter flash.** iRacing's full-strip flash is not a device effect at
 all: it is `LL = 10` and `LL = 0` alternating at ~416.7 ms, about 1.2 Hz,
 over the same fn2/fn6 pair. A telemetry feeder can therefore reproduce it
-without any new protocol support, which is why it is a candidate for
-`logi-tf-sim` rather than the driver.
+without any new protocol support, which is why it lives in `logi-tf-sim`
+rather than the driver.
+
+Reproduced on an RS50 on 2026-07-29, from synthetic OutGauge packets rather
+than a game: 28 transitions across 12 seconds, strictly `10` and `0`, mean
+gap 418 ms against the captured 417 ms. The rev level the same RPM would
+otherwise show (`5`, held steady throughout a control run) never appeared,
+confirming the limiter overrides the rev display entirely rather than
+blending with it. So a Windows behaviour was reproduced on Linux to within
+measurement noise from the capture alone, with no vendor documentation.
 
 ---
 

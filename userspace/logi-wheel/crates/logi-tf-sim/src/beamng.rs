@@ -51,13 +51,16 @@ const OFF_THROTTLE: usize = 48;
 const OFF_SHOW_LIGHTS: usize = 44;
 /// `DL_PITSPEED` in the OutGauge DL_* set.
 ///
-/// UNVERIFIED AGAINST BEAMNG. The bit position is from the LFS OutGauge
-/// specification, which BeamNG implements, and the decode is covered by
-/// tests over synthetic packets. What nobody here has been able to check is
-/// whether BeamNG ever lights this particular lamp: its cars mostly have no
-/// pit limiter, and a source that never sets the bit is indistinguishable
-/// from a car that has none. If BeamNG turns out never to set it, this
-/// reports no limiter rather than a wrong one, so the failure is silence.
+/// The bit position is from the LFS OutGauge specification that BeamNG
+/// implements. Everything downstream of this constant is hardware-verified:
+/// on 2026-07-29 a synthetic OutGauge packet with this bit set drove a real
+/// RS50's rev strip through the full flash (see [`crate::leds`]).
+///
+/// What remains UNVERIFIED is BeamNG itself: nobody here has the game, so
+/// whether it ever lights this particular lamp is unknown, and its cars
+/// mostly have no pit limiter. A source that never sets the bit is
+/// indistinguishable from a car that has none, so if BeamNG never sets it
+/// this reports no limiter rather than a wrong one. The failure is silence.
 const DL_PITSPEED: u32 = 0x0000_0008;
 
 /// Reject engine rates above this as not a real OutGauge sample.

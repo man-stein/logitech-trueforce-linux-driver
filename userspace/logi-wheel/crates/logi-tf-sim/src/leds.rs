@@ -69,6 +69,11 @@ pub const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(16);
 /// it just alternates the ordinary rev level between 10 and 0, measured at
 /// ~416.7 ms per half cycle (about 1.2 Hz) in the issue #20 iRacing
 /// capture. See `docs/PROTOCOL_SPECIFICATION.md` 12.4.
+///
+/// Reproduced on an RS50 on 2026-07-29, driving the real strip from
+/// synthetic OutGauge packets: 28 transitions, strictly 10 and 0, mean gap
+/// 418 ms against the captured 417 ms, with the rev level the same RPM
+/// would otherwise show (5) never appearing.
 pub const PIT_FLASH_HALF_PERIOD: Duration = Duration::from_micros(416_700);
 
 /// The rev level for a pit-limiter flash `elapsed` into it: full strip for
