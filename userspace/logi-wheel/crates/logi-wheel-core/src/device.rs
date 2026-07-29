@@ -237,8 +237,32 @@ fn pid_from_hid_dir(dir: &std::path::Path) -> Option<u16> {
 /// `gain` and `autocenter` all present. `combine_pedals` is deliberately not
 /// required here (older/trimmed ports could omit it), but the registry only
 /// ever offers it when `available()` says so.
+///
+/// Used for the dev-override directory, which carries no product id to check
+/// against, so the full set is the only evidence available that a fixture is
+/// meant to be a wheel. Real devices go through [`classic_ffb_present`],
+/// which does have a product id behind it.
 fn classic_attrs_present(dir: &std::path::Path) -> bool {
     dir.join("range").exists() && dir.join("gain").exists() && dir.join("autocenter").exists()
+}
+
+/// Whether `dir` belongs to a wheel whose force feedback has registered, by
+/// the one attribute every classic engine creates: `range`.
+///
+/// Deliberately weaker than [`classic_attrs_present`], and safe because
+/// every caller pairs it with a product-id check. The two force-feedback
+/// engines behind a G923 do not expose the same sysfs surface: the ported
+/// lg4ff engine (PlayStation editions) creates `range`, `gain` and
+/// `autocenter`, while the HID++ 0x8123 engine (Xbox edition) creates only
+/// `range`, and puts gain and autocenter on the input device instead.
+///
+/// Requiring all three therefore hid the Xbox edition completely. Its owner
+/// had working force feedback in games while the settings apps insisted no
+/// wheel was connected (issue #27). Settings whose files are absent are
+/// already reported unavailable by [`Device::available`], so accepting the
+/// wheel here shows what it does have rather than inventing anything.
+fn classic_ffb_present(dir: &std::path::Path) -> bool {
+    dir.join("range").exists()
 }
 
 /// The dev-override sysfs directory: `LOGI_WHEEL_SYSFS_DIR`, falling back to
@@ -294,7 +318,7 @@ impl Device<RealSysfs> {
             // Only trust the classic attr set when the PID confirms a real
             // G923: an unrelated device coincidentally exposing similarly-
             // named sysfs files must not be adopted as a wheel.
-            if classic_attrs_present(&dir)
+            if classic_ffb_present(&dir)
                 && pid_from_hid_dir(&dir).map(model_from_pid) == Some(WheelModel::G923)
             {
                 return Ok(Device {
@@ -964,6 +988,32 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(pid_from_hid_dir(&dir), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn classic_ffb_present_accepts_a_range_only_wheel() {
+        let dir = std::env::temp_dir().join(format!(
+            "logi-wheel-device-test-rangeonly-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!classic_ffb_present(&dir), "nothing there yet");
+
+        // The G923 Xbox surface: HID++ 0x8123 creates range and nothing else.
+        std::fs::write(dir.join("range"), "900\n").unwrap();
+        assert!(classic_ffb_present(&dir), "range alone is a registered wheel");
+        assert!(
+            !classic_attrs_present(&dir),
+            "and it is exactly the case the three-file check rejects"
+        );
+
+        // The PlayStation surface still qualifies under both.
+        std::fs::write(dir.join("gain"), "100\n").unwrap();
+        std::fs::write(dir.join("autocenter"), "0\n").unwrap();
+        assert!(classic_ffb_present(&dir));
+        assert!(classic_attrs_present(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
