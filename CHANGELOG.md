@@ -5,6 +5,57 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.22.0 - 2026-07-29
+
+### Fixed
+
+- **A real G PRO was not recognised as a wheel.** It reports no "G PRO"
+  anywhere: its product string is "PRO Racing Wheel", so its input node
+  arrives as "Logitech  PRO Racing Wheel", with no G and two spaces. The
+  desktop and terminal apps skipped it in the Test view, and `logi-ffb`
+  skipped it entirely, which left DirectInput force feedback dead on that
+  wheel. Reported and half-fixed by @aderumier in #51; `logi-ffb` keeps its
+  own copy of that check, which the pull request could not reach.
+- **Most button names in Info / Testing were cut short**, showing
+  "R Encoder ..." where the name should be. The panel never grew with the
+  window: the layout sized it to its contents and left the rest of the row
+  empty, so the names had about 98px to fit in whatever the window size.
+  The wheel photo beside it is capped now so it cannot take that room back.
+- **Two driver defects found by static analysis.** The accessory rescan
+  looped over its candidate list in a way that could only ever run once,
+  contradicting the round-robin it documents, and the removal path returned
+  a value from a function that returns none, which is not valid C even
+  though both compilers accept it. Neither was reachable as a user-visible
+  bug; both are gone.
+
+### Changed
+
+- **Every binary this project installs is now named `logi-*`**, so that
+  `pgrep logi-` finds all of them. The one exception was the TrueForce SDK
+  shim installer, `logitech-trueforce-install-shim`, now **`logi-shim`**.
+  The old name stays as a symlink in every package, and the apps look for
+  both, so nothing that already calls it needs changing.
+- The `ffb-proxy` and `tf-sim` crates are renamed to `logi-ffb` and
+  `logi-tf-sim`, matching the binaries they build. No installed name
+  changes as a result; this only affects reading the source tree.
+
+### Documentation
+
+- **Logi Wheel has a section of its own in the README**, directly under the
+  introduction and with the screenshot beside it. The app you actually open
+  every day previously appeared only as an aside, by binary name, even
+  though the logo at the top of that page is its logo.
+- The Info / Testing screenshot is retaken. The old one predated the
+  current wheel artwork and showed the truncated button names described
+  above.
+- The from-source install row lists the fontconfig headers the GUI needs,
+  which were only written down in the userspace README before, not where
+  someone following the install table would look.
+- The superseded HID-BPF pedal-shaping prototype is kept under
+  `docs/prototypes/` for two findings that are recorded nowhere else, with
+  a correction to its own design note, whose premise that hardware curves
+  do not apply on PC was overturned by the 0.21.0 pedal fix.
+
 ## 0.21.0 - 2026-07-28
 
 ### Fixed
