@@ -5,6 +5,63 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.24.0 - 2026-07-30
+
+### The G923 Xbox edition works
+
+**Force feedback and TrueForce both work on the G923 Xbox edition for the
+first time.** Hardware-confirmed by the wheel's owner in
+[#27](https://github.com/mescon/logitech-trueforce-linux-driver/issues/27):
+force feedback in Assetto Corsa Competizione, and TrueForce in
+Automobilista 2. Nobody working on this project owns that wheel, so all of
+it was found by someone running diagnostics on hardware that was giving him
+nothing back. Every fix below came out of that.
+
+- **Force feedback never registered, and took the USB device down with it.**
+  Every command this driver sent that wheel went out as a control transfer
+  rather than through the interrupt endpoint it answers on, so the driver
+  could not read the wheel's force-feedback configuration and gave up on the
+  device entirely. The in-tree driver then claimed the same interface, and
+  the wheel wedged badly enough that even listing USB devices hung.
+- **A force-feedback problem no longer costs you the whole wheel.** The
+  driver used to refuse a wheel outright when force feedback would not
+  start, which handed it to another driver: strictly worse than simply
+  having no force feedback, since steering, buttons and pedals work
+  regardless. It now warns and carries on.
+- **TrueForce is found on wheels with two USB interfaces.** The transport
+  was located by interface number, which was right for every wheel with
+  three. The Xbox edition has two, and carries it on the second, so it was
+  unreachable. It is now identified by what it announces itself as, which
+  works whatever the numbering.
+- **The apps no longer insist a working wheel is absent.** Detection
+  required three settings files before admitting a wheel exists, which
+  describes the PlayStation editions' force-feedback engine; the Xbox
+  edition's creates one. Its owner had force feedback working in a game
+  while both apps reported no wheel connected.
+
+### Fixed
+
+- **The wheel's own input devices could come up unreadable**, so the apps
+  could not show live input. The udev rule only covered the wheel's raw HID
+  nodes and left the input nodes to the system's own rules, which do not
+  always apply. Fixing it by hand worked and did not survive a reboot.
+- **An unidentified wheel showed a photo of an RS50.** Both the default and
+  the unknown case pointed at the same picture, so "not identified yet" and
+  "this is an RS50" looked identical, and a G923 owner was shown a confident
+  photograph of a different wheel. Unidentified now draws no photo and says
+  so, and a wheel whose driver has not bound is identified from the name its
+  input device reports rather than not at all.
+
+### Known limitation
+
+- On the Xbox edition, a game reaching the Logitech SDK directly (with
+  `PROTON_ENABLE_HIDRAW=1`) will have its rotation range pushed to 90
+  degrees by the SDK. The direct-drive wheels restore that automatically;
+  that mechanism reads the wheel's encoder over a feature the Xbox edition
+  does not carry, so it does not cover it yet. Writing the range back once
+  after the game starts is a complete workaround, from the Steering page or
+  the `range` attribute directly.
+
 ## 0.23.0 - 2026-07-29
 
 ### Added
