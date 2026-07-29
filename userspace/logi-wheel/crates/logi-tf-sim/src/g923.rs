@@ -93,7 +93,12 @@ pub const PID_XBOX: u16 = 0xC26E;
 
 /// USB interface number of the TrueForce (vendor page 0xFFFD) transport.
 /// The kernel zero-pads the sysfs value ("02"), so compare numerically.
-const TF_IFACE: u8 = 2;
+/// Where the TrueForce interface sits on every three-interface wheel seen
+/// so far. Recorded for orientation only: discovery matches the vendor page
+/// (see [`report_descriptor_matches`]), never this number, so a wheel that
+/// numbers its interfaces differently still works.
+#[allow(dead_code)]
+const TF_IFACE_TYPICAL: u8 = 2;
 /// First three bytes of a report descriptor opening with
 /// `Usage Page (0xFFFD)` (tag 0x06, 2-byte little-endian data FD FF).
 const VENDOR_PAGE_PREFIX: [u8; 3] = [0x06, 0xFD, 0xFF];
@@ -197,7 +202,7 @@ pub fn discover_at(hidraw_root: &Path, hid_bus_root: &Path) -> Option<G923Paths>
         }
         let device_link = entry.path().join("device");
         let Ok(hid_device_dir) = std::fs::canonicalize(&device_link) else { continue };
-        if !is_g923_tf_interface(&hid_device_dir) {
+        if !is_g923_device(&hid_device_dir) {
             continue;
         }
         if !report_descriptor_matches(&device_link) {
@@ -219,27 +224,34 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
     u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
 }
 
-/// True if the (already-canonicalized) HID device directory sits on the
-/// G923's TrueForce USB interface: its parent (the USB interface dir) has
-/// `bInterfaceNumber == 2`, and that parent's parent (the USB device dir)
-/// has a G923 `idVendor`/`idProduct`.
-fn is_g923_tf_interface(hid_device_dir: &Path) -> bool {
+/// True if the (already-canonicalized) HID device directory belongs to a
+/// G923, by the `idVendor`/`idProduct` of the USB device two levels up.
+///
+/// Deliberately says nothing about WHICH interface. The interface number is
+/// not what identifies the TrueForce transport; the vendor usage page in its
+/// report descriptor is, and [`report_descriptor_matches`] checks that. This
+/// used to also require `bInterfaceNumber == 2`, which is true of every
+/// wheel with three interfaces but describes where the transport happened to
+/// sit rather than what it is. A G923 Xbox has two interfaces, with the
+/// joystick and HID++ sharing interface 0, so anything it carries on
+/// interface 1 was unreachable however plainly its descriptor announced
+/// itself (issue #27).
+fn is_g923_device(hid_device_dir: &Path) -> bool {
     let Some(iface_dir) = hid_device_dir.parent() else { return false };
     let Some(usb_dir) = iface_dir.parent() else { return false };
-    let ifnum = read_trim(&iface_dir.join("bInterfaceNumber")).and_then(|s| s.parse::<u8>().ok());
-    if ifnum != Some(TF_IFACE) {
-        return false;
-    }
     let vid = read_trim(&usb_dir.join("idVendor")).and_then(|s| parse_hex_u16(&s));
     let pid = read_trim(&usb_dir.join("idProduct")).and_then(|s| parse_hex_u16(&s));
     vid == Some(VID) && pid.is_some_and(is_g923_pid)
 }
 
 /// True if `device_link`'s `report_descriptor` opens with the vendor-page
-/// prefix ([`VENDOR_PAGE_PREFIX`]). Belt-and-suspenders alongside the
-/// interface-number check above: a report descriptor mismatch on a
-/// same-PID interface would mean the kernel driver's interface layout
-/// changed underneath this assumption.
+/// prefix ([`VENDOR_PAGE_PREFIX`], usage page `0xFFFD`).
+///
+/// This is the discriminator, not a secondary check: it is what tells the
+/// TrueForce transport apart from the wheel's other interfaces. On an RS50
+/// the joystick opens `05 01`, HID++ opens `06 43 ff` (page `0xFF43`), and
+/// only the TrueForce interface opens `06 fd ff`, so the page selects
+/// exactly one interface per wheel regardless of how they are numbered.
 fn report_descriptor_matches(device_link: &Path) -> bool {
     let Ok(bytes) = std::fs::read(device_link.join("report_descriptor")) else { return false };
     bytes.starts_with(&VENDOR_PAGE_PREFIX)
@@ -892,6 +904,61 @@ mod tests {
 
             FakeSysfs { root, hidraw_root, hid_bus_root }
         }
+    }
+
+    /// A two-interface wheel, the G923 Xbox shape: interface 0 carries the
+    /// joystick AND HID++, and the TrueForce transport is on interface 1.
+    /// The old interface-number gate made this undiscoverable.
+    fn build_two_interface(pid: &str, tf_descriptor: &[u8]) -> FakeSysfs {
+        let root = tempdir();
+        let usb_dev = root.join("devices/usb1/1-1");
+        std::fs::create_dir_all(&usb_dev).unwrap();
+        std::fs::write(usb_dev.join("idVendor"), "046d\n").unwrap();
+        std::fs::write(usb_dev.join("idProduct"), format!("{pid}\n")).unwrap();
+
+        let if0 = usb_dev.join("1-1:1.0");
+        let hid0 = if0.join("0003:046D:C26E.0007");
+        std::fs::create_dir_all(&hid0).unwrap();
+        std::fs::write(if0.join("bInterfaceNumber"), "00\n").unwrap();
+        std::fs::write(hid0.join(FFB_OUTPUT_ATTR), "0\n").unwrap();
+
+        let if1 = usb_dev.join("1-1:1.1");
+        let hid1 = if1.join("0003:046D:C26E.0008");
+        std::fs::create_dir_all(&hid1).unwrap();
+        std::fs::write(if1.join("bInterfaceNumber"), "01\n").unwrap();
+        std::fs::write(hid1.join("report_descriptor"), tf_descriptor).unwrap();
+
+        let hidraw_root = root.join("class/hidraw");
+        let hidraw7 = hidraw_root.join("hidraw7");
+        std::fs::create_dir_all(&hidraw7).unwrap();
+        symlink(&hid1, hidraw7.join("device")).unwrap();
+
+        let hid_bus_root = root.join("bus/hid/devices");
+        std::fs::create_dir_all(&hid_bus_root).unwrap();
+        symlink(&hid0, hid_bus_root.join("0003:046D:C26E.0007")).unwrap();
+        symlink(&hid1, hid_bus_root.join("0003:046D:C26E.0008")).unwrap();
+
+        FakeSysfs { root, hidraw_root, hid_bus_root }
+    }
+
+    #[test]
+    fn finds_the_transport_on_a_two_interface_wheel() {
+        // The G923 Xbox layout from issue #27: no interface 2 exists at
+        // all, so requiring one made TrueForce unreachable on that wheel.
+        let fs = build_two_interface("c26e", &vendor_page_descriptor());
+        let found = discover_at(&fs.hidraw_root, &fs.hid_bus_root)
+            .expect("the vendor page identifies the transport wherever it sits");
+        assert!(found.hidraw.ends_with("hidraw7"));
+        assert!(found.ffb_output.is_some(), "the interface-0 sibling is still correlated");
+    }
+
+    #[test]
+    fn an_interface_without_the_vendor_page_is_not_the_transport() {
+        // Same two-interface wheel, but interface 1 announces the HID++
+        // page (0xFF43) instead. Nothing should match: the page is what
+        // discriminates, so a wrong page must not be rescued by position.
+        let fs = build_two_interface("c26e", &[0x06, 0x43, 0xFF, 0x09, 0x01]);
+        assert!(discover_at(&fs.hidraw_root, &fs.hid_bus_root).is_none());
     }
 
     fn vendor_page_descriptor() -> Vec<u8> {
