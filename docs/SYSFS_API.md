@@ -1154,8 +1154,47 @@ HID++ feature, so `wheel_rev_level` does not exist here.
 ### Xbox edition (c26e)
 
 The G923 Xbox edition routes through the driver's HID++ 0x8123 (G920-style)
-force-feedback path instead of the classic engine and exposes only `range`
-(clamped to `180`-`900` there). Unverified pending a tester.
+force-feedback path instead of the classic engine, so it exposes `range`
+(clamped to `180`-`900`) and `range_restore`, and none of the classic
+engine's `gain`/`autocenter`/`combine_pedals` or its rev-LED devices.
+Force feedback and TrueForce are both hardware-confirmed on this edition
+(issue #27, 2026-07-30).
+
+#### range_restore
+
+**Access**: Read/Write, mode 0664
+**Default**: `0`, off
+
+Put the rotation range back when a game moves it.
+
+A game reaching the Logitech SDK directly (which on Linux means
+`PROTON_ENABLE_HIDRAW=1`) pushes its own configured steering rotation at the
+wheel as a TrueForce type-`0x0e` packet. That bypasses the HID++ range
+feature entirely, so nothing is notified, and a title configured for 90
+degrees silently locks the wheel to 90 with a soft stop there. The SDK sends
+it once at session start, so putting the range back sticks for that session.
+
+With this set to `1`, the driver re-reads the range the wheel is actually
+enforcing every two seconds and re-applies the configured one if a game has
+moved it. It gives up after three restores and logs once, so a program that
+genuinely wants a different range wins rather than being fought forever;
+writing `1` again forgives that count.
+
+**Why it defaults to off.** Enabling it means the driver writes a range while
+a game holds the wheel. On the direct-drive wheels, doing that at the wrong
+moment desynchronised the centre violently, which is why their equivalent
+checks the rim is still and near centre first, using an encoder read this
+wheel does not offer. The check here reads the reported steering axis
+instead and refuses to write unless the rim is within 3% of centre, which is
+believed equivalent but has not been proven on this hardware. Turn it on
+deliberately, and watch the wheel the first time.
+
+Doing it by hand is a complete alternative, since the push is one-shot:
+
+```bash
+# after the game has started and taken the wheel
+echo 900 > /sys/class/hidraw/hidrawN/device/range
+```
 
 ---
 

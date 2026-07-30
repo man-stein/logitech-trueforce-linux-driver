@@ -2939,6 +2939,35 @@ struct hidpp_ff_private_data {
 	struct list_head pending;	/* FIFO of hidpp_ff_work_data */
 	spinlock_t lock;		/* guards pending + queue_len; taken from atomic ctx */
 	int queue_len;
+
+	/*
+	 * Operating-range restore (G923 Xbox edition and anything else on
+	 * this HID++ force-feedback path).
+	 *
+	 * A game reaching the Logitech SDK directly pushes its configured
+	 * steering rotation as a TrueForce type-0x0e packet, which does not
+	 * go through the HID++ range feature at all and so produces no
+	 * notification. A title configured for 90 degrees therefore silently
+	 * locks the wheel to 90 (see docs/TRUEFORCE_PROTOCOL.md). The write
+	 * is one-shot at session init, so re-applying the range sticks.
+	 *
+	 * The direct-drive wheels heal this from their own poll. That
+	 * mechanism reads the rim's encoder over the HID++ calibration
+	 * sub-device to confirm the wheel is still before touching the
+	 * range, which this path has no access to; `idev` below is how the
+	 * equivalent check is done here instead, from the axis the wheel
+	 * already reports.
+	 *
+	 * Default OFF. Enabling it means writing a range while a game holds
+	 * the wheel, and the direct-drive experience is that doing so at the
+	 * wrong moment desynchronises the centre violently. Opt in per wheel
+	 * via the range_restore attribute once you have seen it behave.
+	 */
+	struct delayed_work range_poll;
+	struct input_dev *idev;		/* for the stillness check; not owned */
+	bool restore_enabled;		/* range_restore sysfs, default 0 */
+	u8 restore_attempts;		/* capped; a persistent writer wins */
+	bool restore_gave_up;		/* so the give-up line logs once */
 };
 
 struct hidpp_ff_work_data {
@@ -3357,73 +3386,66 @@ static void hidpp_ff_set_gain(struct input_dev *dev, u16 gain)
 	hidpp_ff_queue_work(data, HIDPP_FF_EFFECTID_NONE, HIDPP_FF_SET_GLOBAL_GAINS, params, ARRAY_SIZE(params));
 }
 
-static ssize_t hidpp_ff_range_show(struct device *dev, struct device_attribute *attr, char *buf)
+/*
+ * The force-feedback state for `hid`, following the wheel's cross-interface
+ * layout: these sysfs attributes hang off the HID++ interface, while the
+ * input device carrying the force-feedback state is on interface 0. Returns
+ * NULL when the wheel has no force feedback registered.
+ */
+static struct hidpp_ff_private_data *hidpp_ff_data_for(struct hid_device *hid)
 {
-	struct hid_device *hid = to_hid_device(dev);
 	struct hid_input *hidinput;
 	struct input_dev *idev;
-	struct hidpp_ff_private_data *data;
-	struct usb_interface *iface;
 
-	/* Handle cross-interface case: range sysfs is on interface 1, inputs on 0 */
 	if (hid_is_usb(hid)) {
-		iface = to_usb_interface(hid->dev.parent);
+		struct usb_interface *iface = to_usb_interface(hid->dev.parent);
+
 		if (iface->cur_altsetting->desc.bInterfaceNumber != 0) {
-			struct hid_device *hid0;
-			hid0 = usb_get_intfdata(usb_ifnum_to_if(hid_to_usb_dev(hid), 0));
+			struct hid_device *hid0 =
+				usb_get_intfdata(usb_ifnum_to_if(hid_to_usb_dev(hid), 0));
 			if (hid0)
 				hid = hid0;
 		}
 	}
-
 	if (list_empty(&hid->inputs))
-		return -ENODEV;
-
+		return NULL;
 	hidinput = list_entry(hid->inputs.next, struct hid_input, list);
 	idev = hidinput->input;
 	if (!idev || !idev->ff)
-		return -ENODEV;
+		return NULL;
+	return idev->ff->private;
+}
 
-	data = idev->ff->private;
+static ssize_t hidpp_ff_range_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct hidpp_ff_private_data *data =
+		hidpp_ff_data_for(to_hid_device(dev));
+
+	if (!data)
+		return -ENODEV;
 	return sysfs_emit(buf, "%u\n", data->range);
 }
 
 static ssize_t hidpp_ff_range_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct hid_device *hid = to_hid_device(dev);
-	struct hid_input *hidinput;
-	struct input_dev *idev;
 	struct hidpp_ff_private_data *data;
-	struct usb_interface *iface;
 	u8 params[2];
 	int range;
 	int ret;
+	/* Read before hidpp_ff_data_for may walk to a sibling interface; both
+	 * interfaces belong to one USB device, so the id is the same either
+	 * way, but taking it from the device the write arrived on is clearer.
+	 */
 	__u16 product = hid->product;
 
 	ret = kstrtoint(buf, 10, &range);
 	if (ret)
 		return ret;
 
-	/* Handle cross-interface case: range sysfs is on interface 1, inputs on 0 */
-	if (hid_is_usb(hid)) {
-		iface = to_usb_interface(hid->dev.parent);
-		if (iface->cur_altsetting->desc.bInterfaceNumber != 0) {
-			struct hid_device *hid0;
-			hid0 = usb_get_intfdata(usb_ifnum_to_if(hid_to_usb_dev(hid), 0));
-			if (hid0)
-				hid = hid0;
-		}
-	}
-
-	if (list_empty(&hid->inputs))
+	data = hidpp_ff_data_for(hid);
+	if (!data)
 		return -ENODEV;
-
-	hidinput = list_entry(hid->inputs.next, struct hid_input, list);
-	idev = hidinput->input;
-	if (!idev || !idev->ff)
-		return -ENODEV;
-
-	data = idev->ff->private;
 
 	/* Direct-drive wheels (RS50, G Pro) support up to 1080 degrees rotation */
 	if (product == USB_DEVICE_ID_LOGITECH_RS50 ||
@@ -3443,6 +3465,185 @@ static ssize_t hidpp_ff_range_store(struct device *dev, struct device_attribute 
 
 static DEVICE_ATTR(range, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH, hidpp_ff_range_show, hidpp_ff_range_store);
 
+/*
+ * range_restore: opt in to putting the operating range back after a game's
+ * SDK session has moved it (see hidpp_ff_range_poll_work).
+ *
+ * Off by default, and it should stay that way until someone has watched it
+ * on the wheel in question. Enabling it means this driver writes a range
+ * while a game holds the wheel; the direct-drive equivalent had to learn
+ * that doing so at the wrong moment desynchronises the centre violently,
+ * which is why the write here is gated on the rim being near centre.
+ */
+static ssize_t hidpp_ff_range_restore_show(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct hidpp_ff_private_data *data =
+		hidpp_ff_data_for(to_hid_device(dev));
+
+	if (!data)
+		return -ENODEV;
+	return sysfs_emit(buf, "%u\n", READ_ONCE(data->restore_enabled) ? 1U : 0U);
+}
+
+static ssize_t hidpp_ff_range_restore_store(struct device *dev,
+					    struct device_attribute *attr,
+					    const char *buf, size_t count)
+{
+	struct hidpp_ff_private_data *data =
+		hidpp_ff_data_for(to_hid_device(dev));
+	bool on;
+	int ret;
+
+	if (!data)
+		return -ENODEV;
+	ret = kstrtobool(buf, &on);
+	if (ret)
+		return ret;
+
+	/* Re-enabling forgives the strike count, so a user can retry. */
+	if (on) {
+		data->restore_attempts = 0;
+		data->restore_gave_up = false;
+	}
+	WRITE_ONCE(data->restore_enabled, on);
+	return count;
+}
+static DEVICE_ATTR(range_restore, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH,
+		   hidpp_ff_range_restore_show, hidpp_ff_range_restore_store);
+
+/* How often to re-read the wheel's live operating range. */
+#define HIDPP_FF_RANGE_POLL_MS		2000
+/* Give up after this many restores; a persistent external writer wins. */
+#define HIDPP_FF_RANGE_MAX_ATTEMPTS	3
+/*
+ * How far off centre the rim may be, as a fraction of its full travel, for a
+ * range write to be considered safe. A range change while the rim is
+ * deflected or held is what desynchronises the centre on the direct-drive
+ * wheels, so this is the same precaution reached by a different route.
+ */
+#define HIDPP_FF_RANGE_STILL_NUM	3
+#define HIDPP_FF_RANGE_STILL_DEN	100
+
+/*
+ * True if the rim is close enough to centre for a range write. Reads the
+ * steering axis the wheel already reports rather than the calibration
+ * sub-device the direct-drive path uses, which this wheel does not carry.
+ *
+ * Absent or unreadable axis information returns false: the whole point of
+ * this check is to refuse when the rim's position is unknown.
+ */
+static bool hidpp_ff_rim_near_centre(struct hidpp_ff_private_data *data)
+{
+	struct input_dev *idev = data->idev;
+	int min, max, centre, pos, span, allow;
+
+	if (!idev)
+		return false;
+	if (!test_bit(ABS_X, idev->absbit))
+		return false;
+
+	min = input_abs_get_min(idev, ABS_X);
+	max = input_abs_get_max(idev, ABS_X);
+	span = max - min;
+	if (span <= 0)
+		return false;
+
+	centre = min + span / 2;
+	pos = input_abs_get_val(idev, ABS_X);
+	allow = span * HIDPP_FF_RANGE_STILL_NUM / HIDPP_FF_RANGE_STILL_DEN;
+
+	return abs(pos - centre) <= allow;
+}
+
+/*
+ * Read the range the wheel is actually enforcing, which is not necessarily
+ * the one this driver last set: the SDK's type-0x0e push bypasses HID++
+ * entirely, so data->range can be stale in exactly the case worth catching.
+ */
+static int hidpp_ff_read_aperture(struct hidpp_ff_private_data *data, u16 *range)
+{
+	struct hidpp_report response;
+	int ret;
+
+	ret = hidpp_send_fap_command_sync(data->hidpp, data->feature_index,
+					  HIDPP_FF_GET_APERTURE, NULL, 0,
+					  &response);
+	if (ret)
+		return ret < 0 ? ret : -EPROTO;
+
+	*range = get_unaligned_be16(&response.fap.params[0]);
+	return 0;
+}
+
+/*
+ * Self-arming poll: compare the wheel's live range against the one this
+ * driver believes it set, and put it back if a game has moved it.
+ *
+ * Deliberately conservative. It skips entirely while disabled, refuses to
+ * write unless the rim is near centre, does not consume an attempt when it
+ * skips for that reason, and stops after HIDPP_FF_RANGE_MAX_ATTEMPTS so a
+ * program that really does want a different range wins rather than being
+ * fought forever.
+ */
+static void hidpp_ff_range_poll_work(struct work_struct *work)
+{
+	struct hidpp_ff_private_data *data =
+		container_of(to_delayed_work(work),
+			     struct hidpp_ff_private_data, range_poll);
+	struct hid_device *hid = data->hidpp->hid_dev;
+	u16 live;
+	u8 params[2];
+
+	if (!READ_ONCE(data->restore_enabled))
+		goto rearm;
+	if (data->range <= 0)
+		goto rearm;
+	if (hidpp_ff_read_aperture(data, &live))
+		goto rearm;
+
+	if (live == (u16)data->range) {
+		/* Back in agreement: forgive earlier strikes. */
+		data->restore_attempts = 0;
+		data->restore_gave_up = false;
+		goto rearm;
+	}
+
+	if (data->restore_attempts >= HIDPP_FF_RANGE_MAX_ATTEMPTS) {
+		if (!data->restore_gave_up) {
+			data->restore_gave_up = true;
+			hid_info(hid,
+				 "operating range held at %u by something else; leaving it alone (wanted %d)\n",
+				 live, data->range);
+		}
+		goto rearm;
+	}
+
+	if (!hidpp_ff_rim_near_centre(data)) {
+		/*
+		 * No strike consumed: this is a "not now", not a failure. A
+		 * later poll will catch it once the rim settles.
+		 */
+		hid_dbg(hid, "range restore deferred (rim not near centre)\n");
+		goto rearm;
+	}
+
+	params[0] = (u16)data->range >> 8;
+	params[1] = (u16)data->range & 0xff;
+	hidpp_ff_queue_work(data, -1, HIDPP_FF_SET_APERTURE, params,
+			    ARRAY_SIZE(params));
+	data->restore_attempts++;
+	hid_info(hid,
+		 "operating range was %u, restoring %d (attempt %u/%u; disable via range_restore)\n",
+		 live, data->range, data->restore_attempts,
+		 HIDPP_FF_RANGE_MAX_ATTEMPTS);
+
+rearm:
+	queue_delayed_work(system_long_wq, &data->range_poll,
+			   msecs_to_jiffies(HIDPP_FF_RANGE_POLL_MS));
+}
+
 static void hidpp_ff_destroy(struct ff_device *ff)
 {
 	struct hidpp_ff_private_data *data = ff->private;
@@ -3451,6 +3652,15 @@ static void hidpp_ff_destroy(struct ff_device *ff)
 	hid_info(hid, "Unloading HID++ force feedback.\n");
 
 	device_remove_file(&hid->dev, &dev_attr_range);
+	device_remove_file(&hid->dev, &dev_attr_range_restore);
+
+	/*
+	 * Stop the range poll before the queue it posts into is destroyed.
+	 * It re-arms itself, so this has to be the cancel that waits.
+	 */
+	WRITE_ONCE(data->restore_enabled, false);
+	cancel_delayed_work_sync(&data->range_poll);
+
 	/* drains and waits for the worker, leaving the pending list empty */
 	destroy_workqueue(data->wq);
 
@@ -3603,6 +3813,24 @@ static int hidpp_ff_init(struct hidpp_device *hidpp,
 	spin_lock_init(&data->lock);
 	INIT_WORK(&data->work, hidpp_ff_work_handler);
 	data->queue_len = 0;
+
+	/*
+	 * Operating-range restore. The input device is kept for the rim
+	 * stillness check only, and is the same one this force-feedback
+	 * device hangs off, so it outlives the poll. Off until asked for.
+	 */
+	data->idev = dev;
+	data->restore_enabled = false;
+	data->restore_attempts = 0;
+	data->restore_gave_up = false;
+	INIT_DELAYED_WORK(&data->range_poll, hidpp_ff_range_poll_work);
+	error = device_create_file(&(hidpp->hid_dev->dev), &dev_attr_range_restore);
+	if (error)
+		hid_warn(hidpp->hid_dev,
+			 "Unable to create sysfs interface for \"range_restore\", errno %d!\n",
+			 error);
+	queue_delayed_work(system_long_wq, &data->range_poll,
+			   msecs_to_jiffies(HIDPP_FF_RANGE_POLL_MS));
 
 	hid_info(hid, "Force feedback support loaded (firmware release %d).\n",
 		 version);
