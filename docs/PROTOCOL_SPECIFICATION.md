@@ -1974,19 +1974,47 @@ enumerates at index `0x12` on this wheel. Reported by @PeposCJ in issue #20
 (2026-07-28), who reached the panel over that feature and displayed both
 static text and live iRacing telemetry on it.
 
-What is **not** established yet, and would be needed before the driver could
-offer this:
+**Functions** (@PeposCJ, 2026-07-30, RS50 hardware):
 
-- the function numbers and payload layout (text encoding, field structure,
-  how a frame is committed)
-- whether the panel has addressable regions or takes whole frames
-- **whether writing it is safe alongside the force-feedback stream.** This is
-  the open question the reporter is working on, and it is the one that
-  matters most here: on this wheel the FFB and TrueForce streams are latency
-  sensitive, and `0x8130` traffic shares the same HID++ channel.
+| fn | Purpose |
+|----|---------|
+| 0 | layout count |
+| 1 | layout descriptor |
+| 2 | clear pending Dynamic data |
+| 3 | set layout / data |
 
-Until that last point is settled, treat OLED writes as capable of disturbing
-force feedback.
+The wheel reports **10 layouts, A to J**. Layout J (index 9) exposes four
+text fields with capacities 19 / 10 / 19 / 10. Static and repeated writes
+are both hardware-confirmed.
+
+**It is a typed renderer, not a framebuffer.** The firmware holds a 128x64
+monochrome buffer, but no `0x8130` command accepts framebuffer bytes,
+coordinates, pixels or partial regions. Each layout exposes bounded text
+fields and normalised values, and the firmware draws them:
+
+```
+host -> typed Layout A-J data -> firmware renderer -> framebuffer -> OLED
+```
+
+So a driver-side interface for this would be a small set of typed fields per
+layout, not a bitmap surface. That rules out the character-device shape a
+framebuffer would have implied.
+
+**Transport: interface 1, endpoint 0, HID SET_REPORT.** Deliberately not
+Logitech's DirectInput Escape path. That path reaches the panel, but its
+exclusive Acquire/Unacquire lifecycle emits `RESET_ALL`,
+`SET_GLOBAL_GAINS(0xFFFF)`, `RESET_ALL` on `0x8123`, which killed iRacing's
+shift LEDs and centre feel until the game rebuilt its wheel state. Do not
+use it.
+
+**Safety: not settled, and the caveat is sharper than it looks.** See 12.5.
+Coexistence has been observed but only in the one case where the endpoint
+happens to be quiet: iRacing has native TrueForce, so it carries steering
+force in `cur` on the TrueForce stream and never writes force to HID++. Five
+writes at 1 Hz rendered and acknowledged while TrueForce ran at ~1000
+submissions/sec, with no observable disturbance, car stationary in the pits.
+That is not evidence that OLED writes are safe in a title that does write
+force to HID++, and 12.5 gives reason to expect they are not.
 
 **Related undecoded candidates.** An earlier round of enumeration flagged
 `0x18A2`, `0x18B1` and `0x9315` as the interesting unknowns on `dev_idx
@@ -2046,6 +2074,73 @@ confirming the limiter overrides the rev display entirely rather than
 blending with it. So a Windows behaviour was reproduced on Linux to within
 measurement noise from the capture alone, with no vendor documentation.
 
+### 12.5 HID++ endpoint contention: a non-force write cuts live force
+
+Third-party finding (@Mhytee / TF4ALL, 2026-07-30, corroborated by
+@PeposCJ's independent OLED captures in issue #20). Observation, not
+mechanism: nobody has established why.
+
+**While any force is present on the HID++ endpoint, a write to that endpoint
+which is not force appears to cut the force.** Regardless of who sends it,
+how small it is, or how gently it is paced. Rev-light writes on `0x807A`
+during a game's DirectInput force were the original case, on Windows with a
+G PRO. Pacing was tuned down to a 60 ms floor and fixed nothing.
+
+Two things it is *not*:
+
+- **Not a multiple-writers problem.** Two independent programs writing the
+  endpoint at once disturbed nothing, and one program doing both force and
+  LEDs still dropped out.
+- **Not solved by cadence.** See above.
+
+The only configuration where it stops is force carried on the TrueForce
+stream with the HID++ endpoint kept completely force-free.
+
+**"Ignored is not the same as absent."** This is the part that took longest
+to see, and the part most likely to mislead a reading of a capture. While the
+TrueForce stream carries force, the wheel obeys `cur` and appears to ignore
+force sent to HID++, so the endpoint looks free. It is not: the game's writes
+are still on the wire and still break things until they actually stop.
+
+So a quiet-looking endpoint proves only that the current title has native
+TrueForce and never writes force there.
+
+**Unexplained counter-evidence.** In a capture of Logitech's own stack,
+`0x8123` force pairs interleave with `0x807A` rev-light updates as close as
+37 ms apart with no measurable degradation:
+
+```
+FFB inter-packet gaps near an LED write    : median 3.00 ms  p99  15 ms  max 107 ms
+FFB inter-packet gaps away from LED writes : median 3.01 ms  p99 240 ms  max 969 ms
+```
+
+No third party has reproduced that. Whatever Logitech does to make them
+coexist is not known.
+
+**What this means for this driver.** Mostly nothing today, and that is worth
+stating explicitly so it is not mistaken for a latent bug:
+
+- **Direct-drive wheels are not exposed.** Their force rides endpoint `0x03`,
+  not HID++, so `wheel_led_*` and the rev-level writes never compete with
+  force on the same endpoint. Games cannot put force there either: force
+  reaches the wheel through this driver, which sends it to `0x03`.
+- **The PlayStation G923 is not exposed.** Its force is the classic engine's
+  plain HID output reports, and its rev LEDs are `led_classdev` entries
+  driven by the same engine. Neither is HID++.
+- **The G923 Xbox edition is the one wheel where this could bite**, because
+  its force genuinely does ride HID++ `0x8123`. It has `0x807A` in its
+  feature map, so rev lights are *technically* reachable. Today this driver
+  exposes no LED surface for it at all: the `led_classdev` entries come from
+  the classic engine it does not use, and `wheel_led_*` belongs to the
+  direct-drive path it does not use either.
+
+**Consequence for future work:** adding rev-light support to the G923 Xbox
+edition is not a matter of wiring up `0x807A`. On that wheel it would be
+writing non-force to the same endpoint its force arrives on, which is exactly
+the configuration described above. It would need force moved off HID++ first,
+or evidence that this wheel behaves differently from the G PRO the finding
+came from.
+
 ---
 
 ## 13. Revision History
@@ -2072,3 +2167,4 @@ measurement noise from the capture alone, with no vendor documentation.
 | 7.2 | 2026-07-28 | Accessory fully decoded and driven. `0x80B1` BANDED_AXIS: `[group][band]` addressing, fn2 reads / fn3 writes a signed 32-bit lever position, group 0 = shifter (two bands, one per direction), group 1 = digital handbrake (one); both scales given, including G Hub's 16-bit overflow above ~69% which this driver does not reproduce. `0x1B30` DEVICE_MODE: fn2 returns the switch position, values 0/2/1 for shifter/digital/analog. Pedal curves corrected to the BASE axes 1/2/3 - the pedal MCU stores an upload and never applies it. Sub-device index established as a property of the physical PORT, not the device type. |
 | 7.1 | 2026-07-28 | RS Shifter & Handbrake accessory (dev `0x04`) catalogued (5.3): full 18-feature map, names via 0x0005/0x0007, own 0x80A4 store, and the two accessory-unique public features `0x80B1` BANDED_AXIS / `0x1B30` DEVICE_MODE (first-party names, no captured wire format). Driver now discovers the accessory alongside the pedal MCU in one candidate-list pass and exposes presence via `wheel_accessory`; its own three settings were unimplemented at that revision (see 7.2). Sub-device index instability documented explicitly: no index is fixed for either the pedal MCU or the accessory. |
 | 7.3 | 2026-07-29 | Two contributions from @PeposCJ (issue #20), neither verified by this driver. `0x8130` DisplayGameData identified as the Dynamic OLED's transport, reached on hardware with static text and live iRacing telemetry on the panel (12.3); function numbers, payload layout and, critically, whether writing it disturbs the FFB stream all remain open, and `0x18A2`/`0x18B1`/`0x9315` stay unexplained rather than ruled out. Rev-light stream documented from four first-party captures (12.4): the true arm sequence is fn0/fn1/fn2/fn0 before the fn2+fn6 stream, with no `fn3` (the driver's extra `fn3` SET_EFFECT stomped the user's LIGHTSYNC effect and was removed in v0.21.0); every write draws a `0x12` acknowledgement; redline is plain `LL = 10` at ~60 Hz with no flash command; and iRacing's pit-limiter flash is only `LL` 10/0 alternating at ~416.7 ms, so a telemetry feeder can reproduce it with no new protocol support. |
+| 7.4 | 2026-07-30 | Dynamic OLED largely decoded and the HID++ endpoint's contention behaviour recorded, both from issue #20 and neither verified by this driver. `0x8130`: fn0 layout count, fn1 layout descriptor, fn2 clear pending, fn3 set layout/data; 10 layouts A-J, layout J exposing four text fields at 19/10/19/10; a typed firmware renderer rather than a framebuffer (the firmware has a 128x64 buffer but no command accepts pixels, coordinates or regions), reached at interface 1 endpoint 0 by SET_REPORT, explicitly NOT via Logitech's DirectInput Escape path whose Acquire/Unacquire lifecycle emits RESET_ALL / SET_GLOBAL_GAINS / RESET_ALL on 0x8123 (12.3). New 12.5: while any force is present on the HID++ endpoint, a non-force write to it cuts the force, independent of sender count and unimproved by pacing; a quiet-looking endpoint only means the title has native TrueForce and never writes force there ("ignored is not the same as absent"). Recorded with its consequence: the G923 Xbox edition is the only wheel here whose force rides HID++, so rev-light support for it cannot simply reuse 0x807A. |
