@@ -191,6 +191,28 @@ Two firmware behaviours discovered while reproducing this
   game keeps its session alive, which is why real launch-time resets
   persist.
 
+**Which wheels honour it** (2026-07-30):
+
+| Wheel | Honours type-`0x0e`? |
+|---|---|
+| RS50 | yes, root-caused here |
+| G923 Xbox (`c26e`) | yes, an owner's ACC session locks to 90 (issue #27) |
+| G923 PlayStation (`c266`) | **no**, tested on hardware |
+
+The PlayStation edition was tested directly: a live TrueForce session was
+established (full init sequence sent, silent stream running, confirmed by the
+daemon's own `stream start`), a type-`0x0e` carrying `90.0` was pushed on the
+`0xFFFD` transport, and the rim then turned its full travel with no early soft
+stop. Repeated with the session up rather than idle, since the first attempt
+made exactly the mistake the session-scoping note above describes, and a bare
+push on an idle interface is a no-op on every wheel including the RS50.
+
+That bounds the operating-range restore work to the wheels whose force rides
+HID++: the direct-drive wheels, which already heal it, and the G923 Xbox
+edition, which has `range_restore` (see `docs/SYSFS_API.md`). The PlayStation
+edition's classic engine exposes no range readback at all, so it is fortunate
+rather than incidental that it needs none.
+
 AC EVO's init also differs from the canonical G Hub init in two more
 packets: a type-`0x0b` with float `1.0` (purpose unknown) and a
 type-`0x09` carrying floats `1.0` and `350.0`.
