@@ -55,6 +55,8 @@ the contract is "it works on RS50 and G Pro as listed here".
 - **The PlayStation G923 ignores the rotation push** described above, tested
   on hardware, so it needs no restore of its own.
 
+## 0.24.0 - 2026-07-30
+
 ### The G923 Xbox edition works
 
 **Force feedback and TrueForce both work on the G923 Xbox edition for the
