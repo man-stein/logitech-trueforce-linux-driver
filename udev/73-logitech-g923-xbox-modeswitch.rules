@@ -18,12 +18,28 @@
 # four43/logitech-g923-driver install script, both of which apply this
 # exact recipe to the G923 Xbox edition specifically.
 #
-# Known conflict: the out-of-tree "xone" Xbox-controller driver also
-# matches Xbox-branded accessories and can claim 046d:c26d before this
-# rule's RUN gets a chance to run, which blocks the switch outright (the
-# device stays claimed in console mode). If the wheel never reappears as
-# c26e, check whether xone bound to it (see the README's G923 section)
-# and blacklist or unbind it for this device.
+# NEVER call usb_modeswitch from RUN+= directly. RUN+= executes inside
+# the udev worker and holds the device lock for the whole USB control
+# transfer. On a Legion Go running SteamOS that wedged USB hotplug badly
+# enough to take the desktop down, and the machine would not finish
+# booting while the wheel was attached; because the built-in controllers
+# are internal USB devices, a stalled USB stack reads as a total freeze.
+# No oops was recorded, which is what a lock-up rather than a crash looks
+# like (issue #52, with thanks for a very precise diagnosis).
+#
+# So the work is dispatched with systemd-run --no-block and the worker
+# returns immediately. This mirrors upstream usb_modeswitch, which ships
+# usb_modeswitch@.service for exactly this reason.
+#
+# Driver contention: in console mode the wheel speaks Xbox GIP, so
+# xbox-gip binds it first (the out-of-tree xone driver does the same on
+# other setups), and usb_modeswitch cannot drive an interface another
+# driver already owns. logi-g923-modeswitch releases the holder before
+# switching, so this is handled rather than merely documented.
+#
+# Without systemd-run this rule does nothing at all, deliberately: a
+# silent no-op is a far better failure than freezing the machine. Run
+# `sudo logi-g923-modeswitch` by hand on such a system.
 #
 # Gated on usb_modeswitch actually being installed (it is a recommended,
 # not hard, dependency in every packaging channel): some distros ship it
@@ -35,6 +51,6 @@
 ACTION!="add|change", GOTO="g923_xbox_modeswitch_end"
 SUBSYSTEM!="usb", GOTO="g923_xbox_modeswitch_end"
 
-ATTR{idVendor}=="046d", ATTR{idProduct}=="c26d", PROGRAM=="/bin/sh -c 'command -v usb_modeswitch'", RUN+="/bin/sh -c 'usb_modeswitch -v 046d -p c26d -M 0f00010142 -C 0x03 -m 01 -r 81 2>/dev/null'"
+ATTR{idVendor}=="046d", ATTR{idProduct}=="c26d", PROGRAM=="/bin/sh -c 'command -v systemd-run >/dev/null && command -v usb_modeswitch >/dev/null'", RUN+="/bin/sh -c 'systemd-run --no-block --collect --description=\"Logitech G923 Xbox mode switch\" /usr/bin/logi-g923-modeswitch >/dev/null 2>&1'"
 
 LABEL="g923_xbox_modeswitch_end"

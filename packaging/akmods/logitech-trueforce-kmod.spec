@@ -118,6 +118,7 @@ Proton prefixes.
 %{_bindir}/logi-ffb
 %{_bindir}/logi-tf-sim
 %{_bindir}/logi-shim
+%{_bindir}/logi-g923-modeswitch
 %{_bindir}/logitech-trueforce-install-shim
 
 %package -n logi-wheel-gui
@@ -224,6 +225,9 @@ ln -s logi-wheel "%{buildroot}%{_bindir}/logi-dd"
 # ~/.local/share/logitech-trueforce/sdk).
 install -D -m 0755 tools/install-tf-shim.sh \
     "%{buildroot}%{_bindir}/logi-shim"
+# G923 Xbox mode-switch helper, dispatched by udev rule 73.
+install -D -m 0755 tools/g923-xbox-modeswitch.sh \
+    "%{buildroot}%{_bindir}/logi-g923-modeswitch"
 # Transitional symlink for the pre-v0.22.0 name.
 ln -s logi-shim "%{buildroot}%{_bindir}/logitech-trueforce-install-shim"
 

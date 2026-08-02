@@ -139,6 +139,11 @@ package_logi-wheel() {
 	install -Dm755 "$_src/tools/install-tf-shim.sh" \
 		"$pkgdir/usr/bin/logi-shim"
 
+	# G923 Xbox mode-switch helper, dispatched by udev rule 73. Must not be
+	# run from the udev worker itself; see the rule's own comment.
+	install -Dm755 "$_src/tools/g923-xbox-modeswitch.sh" \
+		"$pkgdir/usr/bin/logi-g923-modeswitch"
+
 	# Transitional symlinks: scripts and habits built around the old
 	# `logi-dd` and `logitech-trueforce-install-shim` names keep working.
 	# Every binary this project installs is now `logi-*`, so that `pgrep

@@ -224,6 +224,9 @@ ln -s logi-wheel %{buildroot}%{_bindir}/logi-dd
 # TrueForce-in-Proton shim installer (no-op without the proprietary SDK DLLs).
 install -D -m 0755 tools/install-tf-shim.sh \
     %{buildroot}%{_bindir}/logi-shim
+# G923 Xbox mode-switch helper, dispatched by udev rule 73.
+install -D -m 0755 tools/g923-xbox-modeswitch.sh \
+    %{buildroot}%{_bindir}/logi-g923-modeswitch
 # Transitional symlink for the pre-v0.22.0 name.
 ln -s logi-shim %{buildroot}%{_bindir}/logitech-trueforce-install-shim
 # The GUI + its desktop integration (the logi-wheel-gui subpackage).
@@ -253,6 +256,7 @@ ln -s logi-wheel-gui %{buildroot}%{_bindir}/logi-dd-gui
 %{_bindir}/logi-ffb
 %{_bindir}/logi-tf-sim
 %{_bindir}/logi-shim
+%{_bindir}/logi-g923-modeswitch
 %{_bindir}/logitech-trueforce-install-shim
 
 %files -n logi-wheel-gui
