@@ -5,7 +5,55 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## 0.24.0 - 2026-07-30
+## 0.25.0 - 2026-08-02
+
+### Fixed
+
+- **The G923 Xbox mode-switch rule could freeze the machine.** Upgrade if you
+  own that wheel. The rule ran `usb_modeswitch` directly from udev, which
+  means inside the udev worker, holding the device lock for the whole USB
+  transfer. On a handheld whose built-in controllers sit on internal USB
+  that read as a total system freeze, and the machine would not finish
+  booting while the wheel was plugged in. The switch now runs outside udev,
+  and releases whatever already holds the wheel first, since in console mode
+  an Xbox controller driver claims it before we get there. Reported with a
+  diagnosis better than the bug deserved (issue #52).
+
+  On a system without systemd the rule now does nothing rather than risking
+  that, and the switch can be run by hand with `sudo logi-g923-modeswitch`.
+
+### Added
+
+- **`range_restore`**, for wheels whose force feedback runs over HID++,
+  which today means the G923 Xbox edition. **Off by default.**
+
+  A game reaching the Logitech SDK directly, which on Linux means
+  `PROTON_ENABLE_HIDRAW=1`, pushes its own steering rotation at the wheel and
+  can soft-lock you at 45 degrees each way. Every game tested does it; they
+  differ only in whether you can steer through it. Turning this on puts your
+  range back within a couple of seconds.
+
+  It defaults to off because it writes a rotation range while a game is
+  holding your wheel, and on the direct-drive wheels mistiming that
+  desynchronised the centre badly. The check that prevents it here is
+  believed equivalent to theirs but has not been proven on this hardware, so
+  it is opt-in rather than assumed safe. Writing the range back by hand once
+  after the game starts remains a complete alternative. See
+  `docs/SYSFS_API.md`.
+
+### Documentation
+
+- **The RS50's Dynamic OLED is largely decoded**, contributed by @PeposCJ:
+  the command set, ten layouts, and the finding that shapes any future
+  support, which is that the panel takes typed text fields per layout rather
+  than a picture. The driver still sends nothing to it.
+- **What a busy HID++ channel tolerates**, from @Mhytee's TF4ALL work and
+  corroborated independently: while a game's force is on that channel, any
+  other write to it cuts the force, and pacing does not help. This corrects
+  guidance in this project's own notes, and it is why the Xbox edition's rev
+  lights cannot simply be switched on.
+- **The PlayStation G923 ignores the rotation push** described above, tested
+  on hardware, so it needs no restore of its own.
 
 ### The G923 Xbox edition works
 

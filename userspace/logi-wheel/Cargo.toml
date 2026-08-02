@@ -5,5 +5,5 @@ members = ["crates/logi-wheel-core", "crates/logi-wheel-tui", "crates/logi-ffb",
 [workspace.package]
 edition = "2021"
 rust-version = "1.74"
-version = "0.24.0"
+version = "0.25.0"
 license = "GPL-2.0"
