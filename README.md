@@ -279,6 +279,15 @@ keeping hands clear during AC EVO map loads) are covered under
 - **Rotation snaps to 90° at session start:** some sims reset it via their own SDK
   path; the driver restores your range automatically within 20 seconds. Re-apply
   the game's own steering-lock setting so it stops pushing 90°.
+- **Force feedback feels vague, or unrelated to what the car is doing, on
+  Debian 13 / MX Linux 25:** check your kernel. Debian's **6.12 series from
+  about 6.12.90 onward** produces exactly this, and it is not the driver:
+  an owner reproduced it on 6.12.90 and 6.12.100 and had correct force
+  feedback on the same machine, same wheel and same driver commit, under
+  **6.18.15** (issue #53). Debian 12's 6.12.35 is also unaffected, so
+  something changed within the 6.12 stable branch. Install a newer kernel
+  (on MX Linux, the AHS repository ships one) rather than chasing wheel
+  settings.
 
 More cases, with commands, are on the
 [Troubleshooting](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Troubleshooting)
