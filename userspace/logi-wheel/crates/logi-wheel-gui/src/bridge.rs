@@ -13,7 +13,7 @@ use logi_wheel_core::launchers::DiscoveredGame;
 use logi_wheel_core::tfsim;
 
 use crate::viewmodel::Row;
-use crate::{AddableGame, CurvePoint, LedColor, SettingRow, SetupGame, SlotNameRow};
+use crate::{AddableGame, CurvePoint, LedColor, SettingRow, SetupEffect, SetupGame, SlotNameRow};
 
 // Stable `SettingRow.kind` tag numbering; keep in sync with the doc comment
 // on `SettingRow` and the per-kind branches in `ui/widgets.slint`.
@@ -891,6 +891,25 @@ fn action_tag(action: SetupAction) -> i32 {
         SetupAction::SimulatedTrueForce => ACTION_SIM_TF,
         SetupAction::WorksOutOfBox => ACTION_OUT_OF_BOX,
     }
+}
+
+/// The Setup page's per-layer effect rows: every layer the daemon renders,
+/// in presentation order, carrying its live gain from tf-sim.conf.
+///
+/// The list itself is fixed (it is the daemon's effect set); only the gains
+/// come from the file, so an unwritten key shows that layer's default rather
+/// than zero, which is what the daemon would render for it too.
+pub fn setup_effects(cfg: &tfsim::Config) -> Vec<SetupEffect> {
+    tfsim::EFFECTS
+        .iter()
+        .map(|e| SetupEffect {
+            key: e.key.into(),
+            label: e.label.into(),
+            blurb: e.blurb.into(),
+            gain: i32::from(cfg.effect_gains.get(e.key)),
+            fed: e.fed,
+        })
+        .collect()
 }
 
 /// Build the Setup page's "Your games" list from the games discovered
@@ -2356,4 +2375,55 @@ mod tests {
         let traced = curve_thumb_commands(&[(0, 0), (FULL, FULL)]);
         assert_eq!(traced, linear);
     }
+
+    #[test]
+    fn setup_effects_lists_every_layer_in_presentation_order() {
+        let cfg = tfsim::Config::default();
+        let rows = setup_effects(&cfg);
+        assert_eq!(rows.len(), tfsim::EFFECTS.len());
+        for (row, effect) in rows.iter().zip(tfsim::EFFECTS) {
+            assert_eq!(row.key.as_str(), effect.key, "order or key drifted");
+            assert!(!row.label.is_empty(), "{} has no label", effect.key);
+            assert!(!row.blurb.is_empty(), "{} has no blurb", effect.key);
+            assert_eq!(row.fed, effect.fed);
+        }
+    }
+
+    #[test]
+    fn a_layer_the_file_never_mentions_shows_its_default_not_zero() {
+        // The daemon renders an unwritten layer at its default, so showing
+        // 0 would misreport the mix the user is actually feeling.
+        let cfg = tfsim::Config::default();
+        let rows = setup_effects(&cfg);
+        let engine = rows.iter().find(|r| r.key == "engine").expect("engine row");
+        assert_eq!(engine.gain, 100);
+        let drs = rows.iter().find(|r| r.key == "drs").expect("drs row");
+        assert_eq!(drs.gain, 40);
+    }
+
+    #[test]
+    fn setup_effects_reports_the_configured_gain() {
+        let mut cfg = tfsim::Config::default();
+        cfg.effect_gains.set("gear_shift", 12);
+        let rows = setup_effects(&cfg);
+        let shift = rows.iter().find(|r| r.key == "gear_shift").expect("gear_shift row");
+        assert_eq!(shift.gain, 12);
+        // And nothing else moved with it.
+        let abs = rows.iter().find(|r| r.key == "abs").expect("abs row");
+        assert_eq!(abs.gain, i32::from(tfsim::effect_by_key("abs").unwrap().default_gain));
+    }
+
+    #[test]
+    fn the_layers_no_source_feeds_are_marked_as_such() {
+        // These are the rows that carry the explanatory note in the UI. If a
+        // decoder later starts supplying one, this test is the reminder to
+        // flip the flag so the note stops lying.
+        let unfed: Vec<String> = setup_effects(&tfsim::Config::default())
+            .iter()
+            .filter(|r| !r.fed)
+            .map(|r| r.key.to_string())
+            .collect();
+        assert_eq!(unfed, ["road_bumps", "airborne", "collision", "drs"]);
+    }
+
 }

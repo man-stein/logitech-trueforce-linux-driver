@@ -26,6 +26,19 @@ export struct SetupGame {
     sim-intensity: int,
 }
 
+// One haptic layer of the simulated-TrueForce effects engine, built on the
+// Rust side (`bridge::setup_effects`) from `logi_wheel_core::tfsim::EFFECTS`
+// and the live gains in tf-sim.conf. `key` is the config key suffix the
+// slider writes back (`effect_<key>`); `fed` is false for a layer no
+// telemetry format supplies yet, which the row explains rather than hiding.
+export struct SetupEffect {
+    key: string,
+    label: string,
+    blurb: string,
+    gain: int,
+    fed: bool,
+}
+
 // One entry in the "Add a game" dialog's picker: a discovered Wine game the
 // compatibility registry does not recognise and that is not shimmed yet
 // (`bridge::addable_games`). `prefix` is the shim installer's target.
@@ -205,6 +218,12 @@ export component Setup inherits Rectangle {
     in property <bool> tf-enabled: false;
     in property <int> tf-intensity: 60;
     in property <int> tf-pitch: 100;
+    // The effects layer: master switch plus one row per haptic layer.
+    in property <bool> tf-effects: true;
+    in property <[SetupEffect]> tf-effect-rows: [];
+    // Kept beside the other section-open flags so the layer list starts
+    // collapsed: ten sliders would otherwise bury the controls above it.
+    property <bool> effects-open: false;
     in property <bool> tf-sweep-running: false;
     in property <string> tf-output: "";
     // The test sweep's consent dialog; the sweep only ever fires from its
@@ -253,6 +272,8 @@ export component Setup inherits Rectangle {
     callback tf-set-enabled(bool);
     callback tf-set-intensity(int);
     callback tf-set-pitch(int);
+    callback tf-set-effects(bool);
+    callback tf-set-effect-gain(string, int);
     callback tf-start-daemon();
     callback tf-stop-daemon();
     // Fired only from the consent dialog's Continue button: runs
@@ -674,6 +695,99 @@ export component Setup inherits Rectangle {
                         color: Theme.muted-text-color;
                         wrap: word-wrap;
                     }
+
+                    // The haptic effects layer. Collapsed by default: ten
+                    // sliders would otherwise bury the master controls.
+                    Rectangle { height: 4px; }
+                    // Everything below reads this switch's own state rather
+                    // than `tf-effects`, which Rust pushes once at startup
+                    // and never refreshes: the list has to fold away the
+                    // moment the switch goes off, not on the next reload.
+                    effects-switch := Switch {
+                        text: "Extra effects (limiters, shifts, ABS, grip)";
+                        checked: root.tf-effects;
+                        toggled => { root.tf-set-effects(self.checked); }
+                    }
+                    Text {
+                        text: "Beyond the engine note: the limiters cutting, the drivetrain taking a shift, the ABS pump, the tyres letting go. Turning this off leaves only the engine, and keeps each layer's own level for when you turn it back on.";
+                        font-size: 11px;
+                        color: Theme.muted-text-color;
+                        wrap: word-wrap;
+                    }
+                    TouchArea {
+                        height: 24px;
+                        enabled: effects-switch.checked;
+                        clicked => { root.effects-open = !root.effects-open; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.effects-open
+                                    ? "Hide individual levels"
+                                    : "Adjust individual levels";
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                color: effects-switch.checked
+                                    ? Palette.accent-background
+                                    : Theme.muted-text-color;
+                            }
+                            Text {
+                                text: root.effects-open ? "\u{25be}" : "\u{25b8}";
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                color: effects-switch.checked
+                                    ? Palette.accent-background
+                                    : Theme.muted-text-color;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                    if effects-switch.checked && root.effects-open: VerticalLayout {
+                        spacing: 6px;
+                        for effect in root.tf-effect-rows: VerticalLayout {
+                            spacing: 2px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 110px;
+                                    text: effect.label;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    color: effect.fed
+                                        ? Theme.text-color
+                                        : Theme.muted-text-color;
+                                }
+                                effect-slider := Slider {
+                                    horizontal-stretch: 1;
+                                    minimum: 0;
+                                    maximum: 100;
+                                    value: effect.gain;
+                                    // Committed on release, not on every
+                                    // drag tick, same rule as the sliders
+                                    // above.
+                                    released(v) => {
+                                        root.tf-set-effect-gain(effect.key, round(v));
+                                    }
+                                }
+                                Text {
+                                    width: 36px;
+                                    text: round(effect-slider.value) + "%";
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    color: Theme.muted-text-color;
+                                }
+                            }
+                            Text {
+                                text: effect.fed
+                                    ? effect.blurb
+                                    : effect.blurb + " No game we read sends this yet, so it stays silent.";
+                                font-size: 11px;
+                                color: Theme.muted-text-color;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    Rectangle { height: 4px; }
                     HorizontalLayout {
                         spacing: 8px;
                         Button {

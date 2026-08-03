@@ -56,6 +56,149 @@ impl Default for GameConfig {
     }
 }
 
+
+/// One haptic layer of the daemon's effects engine.
+///
+/// Mirrored, not shared, with `logi_tf_sim::effects::EffectId` for the same
+/// reason the rest of this module mirrors the daemon's config: the crates
+/// cannot link (see the module doc). The `frontend_compat` integration test
+/// in the daemon's crate is what keeps the two lists from drifting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Effect {
+    /// The config key suffix, as in `effect_rev_limiter`.
+    pub key: &'static str,
+    /// What to call it in a user interface.
+    pub label: &'static str,
+    /// One line on what it feels like.
+    pub blurb: &'static str,
+    /// Percent gain when nothing has been configured.
+    pub default_gain: u8,
+    /// Whether any telemetry format the daemon parses supplies this layer's
+    /// input today.
+    ///
+    /// A layer with nothing feeding it is silent, not broken: the effect is
+    /// implemented and the missing piece is a decoder field. A user interface
+    /// should say so rather than presenting a slider that does nothing for
+    /// reasons it does not explain.
+    pub fed: bool,
+}
+
+/// Every layer, in the order a user interface should present them.
+///
+/// Deliberately not the daemon's mix order: this runs from the layer that is
+/// always there to the ones that only fire on an event, which is the order
+/// somebody tuning the mix reads it in.
+pub const EFFECTS: &[Effect] = &[
+    Effect {
+        key: "engine",
+        label: "Engine",
+        blurb: "The engine note itself, rising and falling with the revs.",
+        default_gain: 100,
+        fed: true,
+    },
+    Effect {
+        key: "rev_limiter",
+        label: "Rev limiter",
+        blurb: "The hard chop of an engine sitting against its limiter.",
+        default_gain: 70,
+        fed: true,
+    },
+    Effect {
+        key: "pit_limiter",
+        label: "Pit limiter",
+        blurb: "A slower pulse while the pit-lane speed limiter is engaged.",
+        default_gain: 50,
+        fed: true,
+    },
+    Effect {
+        key: "gear_shift",
+        label: "Gear shifts",
+        blurb: "A thump through the drivetrain as the gear changes.",
+        default_gain: 60,
+        fed: true,
+    },
+    Effect {
+        key: "abs",
+        label: "ABS",
+        blurb: "The pulsing of the ABS pump under heavy braking.",
+        default_gain: 60,
+        fed: true,
+    },
+    Effect {
+        key: "traction_loss",
+        label: "Traction loss",
+        blurb: "A buzz as the driven wheels start to let go.",
+        default_gain: 50,
+        fed: true,
+    },
+    Effect {
+        key: "road_bumps",
+        label: "Road surface",
+        blurb: "Texture from the road, rising with speed.",
+        default_gain: 40,
+        fed: false,
+    },
+    Effect {
+        key: "airborne",
+        label: "Airborne",
+        blurb: "How far the road quiets with the wheels off the ground.",
+        default_gain: 85,
+        fed: false,
+    },
+    Effect {
+        key: "collision",
+        label: "Impacts",
+        blurb: "A hit when the car strikes something.",
+        default_gain: 80,
+        fed: false,
+    },
+    Effect {
+        key: "drs",
+        label: "DRS",
+        blurb: "A tick as a drag-reduction wing opens or closes.",
+        default_gain: 40,
+        fed: false,
+    },
+];
+
+/// Look up a layer by its config key.
+pub fn effect_by_key(key: &str) -> Option<&'static Effect> {
+    EFFECTS.iter().find(|e| e.key == key)
+}
+
+/// Per-layer gains, in percent, parallel to [`EFFECTS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectGains {
+    gains: [u8; EFFECTS.len()],
+}
+
+impl Default for EffectGains {
+    fn default() -> Self {
+        let mut gains = [0u8; EFFECTS.len()];
+        for (slot, effect) in gains.iter_mut().zip(EFFECTS) {
+            *slot = effect.default_gain;
+        }
+        EffectGains { gains }
+    }
+}
+
+impl EffectGains {
+    /// Gain for `key`, or that layer's default if the key is unknown.
+    pub fn get(&self, key: &str) -> u8 {
+        match EFFECTS.iter().position(|e| e.key == key) {
+            Some(i) => self.gains[i],
+            None => 0,
+        }
+    }
+
+    /// Set `key`'s gain, clamped to 100. Unknown keys are ignored.
+    pub fn set(&mut self, key: &str, pct: u8) {
+        if let Some(i) = EFFECTS.iter().position(|e| e.key == key) {
+            self.gains[i] = pct.min(100);
+        }
+    }
+}
+
 /// The keys of tf-sim's configuration the front-ends edit. The `port.*`
 /// keys are intentionally absent: the front-ends never touch them, and
 /// [`write_key_in`] preserves them (and anything else) on every write.
@@ -70,6 +213,10 @@ pub struct Config {
     /// Whether the daemon also drives the wheel's rev display
     /// (`wheel_rev_level`) from telemetry RPM while streaming.
     pub leds: bool,
+    /// Whether the haptic layers beyond the engine note are mixed in.
+    pub effects: bool,
+    /// Per-layer gain; see [`EFFECTS`].
+    pub effect_gains: EffectGains,
     /// Per-game overrides, keyed by tf-sim game id.
     pub games: BTreeMap<String, GameConfig>,
 }
@@ -81,6 +228,8 @@ impl Default for Config {
             intensity: DEFAULT_INTENSITY,
             pitch_pct: DEFAULT_PITCH,
             leds: true,
+            effects: true,
+            effect_gains: EffectGains::default(),
             games: BTreeMap::new(),
         }
     }
@@ -204,7 +353,18 @@ impl Config {
                         cfg.leds = v;
                     }
                 }
+                "effects" => {
+                    if let Some(v) = parse_bool(raw) {
+                        cfg.effects = v;
+                    }
+                }
                 _ => {
+                    if let Some(name) = key.strip_prefix("effect_") {
+                        if let Some(v) = parse_percent(raw) {
+                            cfg.effect_gains.set(name, v);
+                        }
+                        continue;
+                    }
                     let Some(rest) = key.strip_prefix("game.") else { continue };
                     let Some((id, field)) = rest.rsplit_once('.') else { continue };
                     if id.is_empty() {
@@ -290,6 +450,21 @@ pub fn set_leds_in(path: &Path, leds: bool) -> Result<(), Error> {
 }
 
 /// Write one game's enable switch.
+/// Turn the whole effects layer on or off, leaving each layer's own gain
+/// as it was so that switching back restores the tuned mix.
+pub fn set_effects_in(path: &Path, effects: bool) -> Result<(), Error> {
+    write_key_in(path, "effects", if effects { "1" } else { "0" })
+}
+
+/// Set one layer's gain. An unknown key is rejected rather than written, so
+/// a typo cannot leave a dead `effect_*` line in the user's file.
+pub fn set_effect_gain_in(path: &Path, key: &str, pct: u8) -> Result<(), Error> {
+    if effect_by_key(key).is_none() {
+        return Ok(());
+    }
+    write_key_in(path, &format!("effect_{key}"), &pct.min(100).to_string())
+}
+
 pub fn set_game_enabled_in(path: &Path, id: &str, enabled: bool) -> Result<(), Error> {
     write_key_in(path, &format!("game.{id}.enabled"), if enabled { "1" } else { "0" })
 }

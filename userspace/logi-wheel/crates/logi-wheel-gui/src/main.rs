@@ -1063,6 +1063,10 @@ fn main() -> Result<(), slint::PlatformError> {
         app.set_setup_tf_enabled(cfg.enabled);
         app.set_setup_tf_intensity(i32::from(cfg.intensity));
         app.set_setup_tf_pitch(i32::from(cfg.pitch_pct));
+        app.set_setup_tf_effects(cfg.effects);
+        app.set_setup_tf_effect_rows(slint::ModelRc::new(slint::VecModel::from(
+            bridge::setup_effects(&cfg),
+        )));
     }
     refresh_tf_daemon(app.as_weak(), None);
     // Installed once, here, and never replaced: `load_rows`/`update_row`
@@ -2239,6 +2243,30 @@ fn main() -> Result<(), slint::PlatformError> {
                 logi_wheel_core::tfsim::set_pitch_in(
                     &logi_wheel_core::tfsim::default_path(),
                     v.clamp(10, 200) as u8,
+                ),
+            );
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        app.on_setup_tf_set_effects(move |v| {
+            let Some(app) = app_weak.upgrade() else { return };
+            report_tf_write(
+                &app,
+                logi_wheel_core::tfsim::set_effects_in(&logi_wheel_core::tfsim::default_path(), v),
+            );
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        app.on_setup_tf_set_effect_gain(move |key, v| {
+            let Some(app) = app_weak.upgrade() else { return };
+            report_tf_write(
+                &app,
+                logi_wheel_core::tfsim::set_effect_gain_in(
+                    &logi_wheel_core::tfsim::default_path(),
+                    &key,
+                    v.clamp(0, 100) as u8,
                 ),
             );
         });

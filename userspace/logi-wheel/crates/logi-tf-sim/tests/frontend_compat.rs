@@ -134,3 +134,67 @@ fn frontend_writer_creates_a_file_this_crates_reader_accepts() {
     assert!(!seen.game_enabled("dirt-rally-2"));
     assert_eq!(seen.codemasters_port, logi_tf_sim::codemasters::DEFAULT_PORT, "absent keys default");
 }
+
+/// The front-end mirrors the daemon's effect list because the crates cannot
+/// link. Nothing but this test stops the two drifting: a layer added to one
+/// and not the other is a slider that writes a key nothing reads, or a key
+/// nothing can reach.
+#[test]
+fn the_frontends_effect_list_matches_the_daemons() {
+    let daemon: Vec<&str> = EffectId::ALL.iter().map(|id| id.key()).collect();
+    let mut frontend: Vec<&str> =
+        logi_wheel_core::tfsim::EFFECTS.iter().map(|e| e.key).collect();
+    frontend.sort_unstable();
+    let mut daemon_sorted = daemon.clone();
+    daemon_sorted.sort_unstable();
+    assert_eq!(daemon_sorted, frontend, "the two effect lists have drifted");
+
+    // Defaults too: a front-end showing 40 where the daemon uses 60 lies
+    // about the mix until the user touches the slider.
+    for id in EffectId::ALL {
+        let mirrored = logi_wheel_core::tfsim::effect_by_key(id.key())
+            .unwrap_or_else(|| panic!("front-end is missing {}", id.key()));
+        assert_eq!(
+            mirrored.default_gain,
+            id.default_gain(),
+            "default gain for {} differs",
+            id.key()
+        );
+    }
+}
+
+/// A gain written by the front-end has to be the gain the daemon renders.
+#[test]
+fn a_gain_the_frontend_writes_is_the_gain_the_daemon_reads() {
+    let tree = TempTree::new();
+    let path = tree.path().join("tf-sim.conf");
+    full_config().save_to(&path).unwrap();
+
+    logi_wheel_core::tfsim::set_effects_in(&path, true).unwrap();
+    for (i, id) in EffectId::ALL.into_iter().enumerate() {
+        logi_wheel_core::tfsim::set_effect_gain_in(&path, id.key(), (i as u8) * 9 + 5).unwrap();
+    }
+
+    let seen = Config::load_from(&path);
+    assert!(seen.effects);
+    for (i, id) in EffectId::ALL.into_iter().enumerate() {
+        assert_eq!(seen.effect_gains.get(id), (i as u8) * 9 + 5, "{}", id.key());
+    }
+
+    // And the front-end reads back what it wrote.
+    let mirrored = logi_wheel_core::tfsim::Config::load_from(&path);
+    for (i, id) in EffectId::ALL.into_iter().enumerate() {
+        assert_eq!(mirrored.effect_gains.get(id.key()), (i as u8) * 9 + 5, "{}", id.key());
+    }
+}
+
+/// A typo must not leave a dead key in the user's file.
+#[test]
+fn an_unknown_layer_name_writes_nothing() {
+    let tree = TempTree::new();
+    let path = tree.path().join("tf-sim.conf");
+    full_config().save_to(&path).unwrap();
+    logi_wheel_core::tfsim::set_effect_gain_in(&path, "turbo_whistle", 50).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("turbo_whistle"), "a typo reached the file");
+}

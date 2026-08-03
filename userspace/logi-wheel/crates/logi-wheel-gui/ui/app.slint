@@ -4,13 +4,13 @@ import { SettingRow, SettingsList } from "widgets.slint";
 import { CurveEditor, CurvePoint } from "curve_editor.slint";
 import { RgbStrip, LedColor } from "rgb_strip.slint";
 import { SlotTextEditor, SlotNameRow } from "slot_text.slint";
-import { Setup, SetupGame, AddableGame } from "setup.slint";
+import { Setup, SetupGame, SetupEffect, AddableGame } from "setup.slint";
 import { InfoPage, TestButton, TestAxis, TestCallout, TestPlanRow } from "info_page.slint";
 import { ComputerProfiles } from "computer_profiles.slint";
 import { OnboardSlotEditor } from "onboard_editor.slint";
 import { LedPreview } from "led_preview.slint";
 export { SettingRow } from "widgets.slint";
-export { SetupGame, AddableGame } from "setup.slint";
+export { SetupGame, SetupEffect, AddableGame } from "setup.slint";
 export { TestButton, TestAxis, TestCallout, TestPlanRow } from "info_page.slint";
 export { CurvePoint } from "curve_editor.slint";
 export { LedColor } from "rgb_strip.slint";
@@ -97,6 +97,8 @@ export component App inherits Window {
     in property <bool> setup-tf-enabled: false;
     in property <int> setup-tf-intensity: 60;
     in property <int> setup-tf-pitch: 100;
+    in property <bool> setup-tf-effects: true;
+    in property <[SetupEffect]> setup-tf-effect-rows: [];
     in property <bool> setup-tf-sweep-running: false;
     in property <string> setup-tf-output: "";
     callback setup-copy-launch();
@@ -108,6 +110,8 @@ export component App inherits Window {
     callback setup-tf-set-enabled(bool);
     callback setup-tf-set-intensity(int);
     callback setup-tf-set-pitch(int);
+    callback setup-tf-set-effects(bool);
+    callback setup-tf-set-effect-gain(string, int);
     callback setup-tf-start-daemon();
     callback setup-tf-stop-daemon();
     callback setup-tf-sweep();
@@ -513,6 +517,8 @@ export component App inherits Window {
                     tf-enabled: root.setup-tf-enabled;
                     tf-intensity: root.setup-tf-intensity;
                     tf-pitch: root.setup-tf-pitch;
+                    tf-effects: root.setup-tf-effects;
+                    tf-effect-rows: root.setup-tf-effect-rows;
                     tf-sweep-running: root.setup-tf-sweep-running;
                     tf-output: root.setup-tf-output;
                     copy-launch() => { root.setup-copy-launch(); }
@@ -524,6 +530,8 @@ export component App inherits Window {
                     tf-set-enabled(v) => { root.setup-tf-set-enabled(v); }
                     tf-set-intensity(v) => { root.setup-tf-set-intensity(v); }
                     tf-set-pitch(v) => { root.setup-tf-set-pitch(v); }
+                    tf-set-effects(v) => { root.setup-tf-set-effects(v); }
+                    tf-set-effect-gain(k, v) => { root.setup-tf-set-effect-gain(k, v); }
                     tf-start-daemon() => { root.setup-tf-start-daemon(); }
                     tf-stop-daemon() => { root.setup-tf-stop-daemon(); }
                     tf-sweep() => { root.setup-tf-sweep(); }
