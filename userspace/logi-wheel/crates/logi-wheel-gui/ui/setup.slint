@@ -57,11 +57,23 @@ component AccordionSection inherits Rectangle {
     border-radius: Theme.panel-radius;
     border-width: 1px;
     border-color: Theme.panel-border;
+    // A Rectangle stretches vertically by default, so inside the page's
+    // VerticalLayout every section grew to claim a share of the leftover
+    // space: collapsed headers floated in the middle of tall empty boxes,
+    // and an open section's body was pushed clear outside its own border.
+    // A section is exactly as tall as its header plus its body.
+    vertical-stretch: 0;
 
     VerticalLayout {
         // The header row: click, or Enter/Space while focused, toggles the
         // section open/closed.
         Rectangle {
+            // The header's children (focus scope, focus ring, touch area)
+            // all fill this rectangle rather than sitting in a layout, so it
+            // has no intrinsic height of its own and stretched to whatever
+            // the parent offered. Size it from the one child that does know
+            // how tall it is, the same trick the body below uses.
+            height: hdr.preferred-height;
             fs := FocusScope {
                 key-pressed(event) => {
                     if (event.text == Key.Return || event.text == Key.Space) {
@@ -70,7 +82,7 @@ component AccordionSection inherits Rectangle {
                     }
                     return EventResult.reject;
                 }
-                HorizontalLayout {
+                hdr := HorizontalLayout {
                     padding: 14px;
                     spacing: 8px;
                     Text {
@@ -683,9 +695,16 @@ export component Setup inherits Rectangle {
                     }
                 }
 
+                // Collect the page's leftover vertical space here, in one
+                // deliberate place. Without it the slack is shared out among
+                // whichever children happen to stretch, which pushes the
+                // footer links apart from each other and from the sections.
+                Rectangle { vertical-stretch: 1; }
+
                 // The full compatibility list lives in the wiki now; this
                 // link stays at the bottom, always visible.
                 HorizontalLayout {
+                    vertical-stretch: 0;
                     alignment: start;
                     spacing: 6px;
 
