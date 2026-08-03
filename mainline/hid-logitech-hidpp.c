@@ -2968,6 +2968,7 @@ struct hidpp_ff_private_data {
 	bool restore_enabled;		/* range_restore sysfs, default 0 */
 	u8 restore_attempts;		/* capped; a persistent writer wins */
 	bool restore_gave_up;		/* so the give-up line logs once */
+	bool restore_probed;		/* so the first poll result logs once */
 };
 
 struct hidpp_ff_work_data {
@@ -3506,6 +3507,9 @@ static ssize_t hidpp_ff_range_restore_store(struct device *dev,
 	if (on) {
 		data->restore_attempts = 0;
 		data->restore_gave_up = false;
+		/* And report the next poll's outcome again, so a retry
+		 * produces evidence rather than repeating the silence. */
+		data->restore_probed = false;
 	}
 	WRITE_ONCE(data->restore_enabled, on);
 	return count;
@@ -3595,13 +3599,45 @@ static void hidpp_ff_range_poll_work(struct work_struct *work)
 	struct hid_device *hid = data->hidpp->hid_dev;
 	u16 live;
 	u8 params[2];
+	int ret;
 
 	if (!READ_ONCE(data->restore_enabled))
 		goto rearm;
 	if (data->range <= 0)
 		goto rearm;
-	if (hidpp_ff_read_aperture(data, &live))
+
+	ret = hidpp_ff_read_aperture(data, &live);
+	if (ret) {
+		/*
+		 * Say so, once per enable. This is an opt-in diagnostic
+		 * feature, and it used to fail here in total silence: no
+		 * line on a failed read, none on agreement either, so a
+		 * wheel where the restore cannot work looked exactly like
+		 * one where it worked and was not needed. The owner had no
+		 * way to tell those apart, and neither did we (issue #27).
+		 */
+		if (!data->restore_probed) {
+			data->restore_probed = true;
+			hid_info(hid,
+				 "range restore: cannot read the wheel's operating range (%d), so it cannot put anything back on this wheel\n",
+				 ret);
+		}
 		goto rearm;
+	}
+
+	/*
+	 * The first successful read after each enable, reported once. It is
+	 * the one number that says whether the soft lock a game applies is
+	 * even the operating range: if the wheel is locked to 90 degrees and
+	 * still reports the range this driver set, then the lock is
+	 * something else and no amount of restoring will move it.
+	 */
+	if (!data->restore_probed) {
+		data->restore_probed = true;
+		hid_info(hid,
+			 "range restore: wheel reports operating range %u, this driver wants %d\n",
+			 live, data->range);
+	}
 
 	if (live == (u16)data->range) {
 		/* Back in agreement: forgive earlier strikes. */
