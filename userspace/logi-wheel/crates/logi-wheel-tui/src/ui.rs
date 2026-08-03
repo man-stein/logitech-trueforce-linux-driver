@@ -900,8 +900,10 @@ fn setup_sections<S: SysfsIo>(
                 }
             }
             SetupSection::SimTf => {
-                let hint = if inside {
-                    "[m master  e intensity  p pitch  d daemon  t sweep  Esc back]"
+                let hint = if inside && app.tf_effects_open {
+                    "[[ ] layer  v level  l hide  m/e/p/x/d/t  Esc back]"
+                } else if inside {
+                    "[m master  e intensity  p pitch  x effects  l layers  d daemon  t sweep  Esc back]"
                 } else {
                     "[Enter opens the controls]"
                 };
@@ -959,6 +961,64 @@ fn setup_sections<S: SysfsIo>(
                         "  the engine. Turn it on per game in Your games (g).",
                         dim,
                     )));
+                    // The haptic effects layer.
+                    lines.push(Line::from(vec![
+                        Span::raw("  extra effects: "),
+                        Span::styled(
+                            if app.tf_cfg.effects { "on" } else { "off" },
+                            found_style(app.tf_cfg.effects),
+                        ),
+                        Span::styled("   (limiters, shifts, ABS, grip)", dim),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  only for games you enabled above; games with built-in",
+                        dim,
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        "  TrueForce are not affected by any of it.",
+                        dim,
+                    )));
+                    if app.tf_effects_open {
+                        for (i, effect) in logi_wheel_core::tfsim::EFFECTS.iter().enumerate() {
+                            let picked = i == app.tf_effect_idx;
+                            let gain = app.tf_cfg.effect_gains.get(effect.key);
+                            let value = match (&app.tf_effect_edit, picked) {
+                                (Some(d), true) => Span::styled(
+                                    format!("{d}_"),
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                _ => Span::raw(format!("{gain}%")),
+                            };
+                            let name = if picked {
+                                Span::styled(
+                                    format!("{:<14}", effect.label),
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                )
+                            } else {
+                                Span::raw(format!("{:<14}", effect.label))
+                            };
+                            lines.push(Line::from(vec![
+                                Span::raw(if picked { "  > " } else { "    " }),
+                                name,
+                                value,
+                            ]));
+                            // The caveat only on the selected row: ten of
+                            // them at once would drown the list.
+                            if picked && !effect.note.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    format!("      {}", effect.note),
+                                    dim,
+                                )));
+                            }
+                        }
+                    } else if app.tf_cfg.effects {
+                        lines.push(Line::from(Span::styled(
+                            "  l shows each layer's level",
+                            dim,
+                        )));
+                    }
                 } else {
                     lines.push(Line::from(vec![
                         Span::styled("  master: ", dim),
@@ -1905,6 +1965,78 @@ mod tests {
         assert!(
             text.contains("Copy from computer profile"),
             "the copy action must render:\n{text}"
+        );
+    }
+
+    /// Drive the Setup view down to the Simulated TrueForce section and
+    /// enter it, which is what makes its controls visible.
+    fn sim_tf_app() -> App<FakeSysfs> {
+        use crossterm::event::KeyCode;
+        let mut a = setup_view_app();
+        a.focus = Focus::Content;
+        for _ in 0..3 {
+            a.on_key(KeyCode::Down);
+        }
+        assert_eq!(a.setup_section(), crate::app::SetupSection::SimTf);
+        a.on_key(KeyCode::Enter);
+        a
+    }
+
+    #[test]
+    fn the_effects_layer_and_its_scope_are_on_screen() {
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let a = sim_tf_app();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(text.contains("extra effects:"), "the layer switch is shown:\n{text}");
+        // The scope has to be visible without opening anything, or somebody
+        // tunes ten levels and wonders why their sim feels the same.
+        assert!(
+            text.contains("only for games you enabled above"),
+            "the scope is stated:\n{text}"
+        );
+        assert!(
+            text.contains("built-in"),
+            "and that built-in TrueForce is unaffected:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_layer_list_appears_only_once_asked_for() {
+        use crossterm::event::KeyCode;
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut a = sim_tf_app();
+        term.draw(|f| draw(f, &a)).unwrap();
+        assert!(!screen(&term).contains("Rev limiter"), "ten layers stay folded");
+
+        a.on_key(KeyCode::Char('l'));
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        for label in ["Engine", "Rev limiter", "Gear shifts", "ABS", "Impacts", "DRS"] {
+            assert!(text.contains(label), "missing layer {label}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_selected_layer_is_marked_and_carries_its_caveat() {
+        use crossterm::event::KeyCode;
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut a = sim_tf_app();
+        a.on_key(KeyCode::Char('l'));
+        // Engine leads and works everywhere, so it has nothing to warn about.
+        term.draw(|f| draw(f, &a)).unwrap();
+        assert!(screen(&term).contains("> Engine"), "the selection is marked");
+
+        // Walk to a layer only one game feeds.
+        for _ in 0..2 {
+            a.on_key(KeyCode::Char(']'));
+        }
+        term.draw(|f| draw(f, &a)).unwrap();
+        let text = screen(&term);
+        assert!(text.contains("> Pit limiter"), "selection moved:\n{text}");
+        assert!(
+            text.contains("Only BeamNG"),
+            "a layer one game feeds says so:\n{text}"
         );
     }
 }

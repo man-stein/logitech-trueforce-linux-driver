@@ -321,6 +321,14 @@ pub struct App<S: SysfsIo> {
     /// The pitch line editor's draft, same lifecycle as
     /// `tf_intensity_edit` (the `p` key; commits 10-200).
     pub tf_pitch_edit: Option<String>,
+    /// Whether the per-layer haptic effect list is shown (the `l` key).
+    /// Ten layers would crowd the section, so they stay folded until asked
+    /// for, matching the GUI's disclosure.
+    pub tf_effects_open: bool,
+    /// Which layer of [`tfsim::EFFECTS`] the list has selected.
+    pub tf_effect_idx: usize,
+    /// Gain draft for the selected layer (the `v` key; commits 0-100).
+    pub tf_effect_edit: Option<String>,
     /// A test sweep waiting for its y/n confirmation (armed by `t` in the
     /// Setup view). Nothing plays without the explicit `y`: the sweep
     /// drives the wheel with real haptic force.
@@ -455,6 +463,9 @@ impl<S: SysfsIo> App<S> {
             tf_daemon: false,
             tf_intensity_edit: None,
             tf_pitch_edit: None,
+            tf_effects_open: false,
+            tf_effect_idx: 0,
+            tf_effect_edit: None,
             tf_sweep_confirm: false,
             tf_sweep: None,
             test: TestView::default(),
@@ -690,6 +701,7 @@ impl<S: SysfsIo> App<S> {
             || self.test.confirm.is_some()
             || self.tf_intensity_edit.is_some()
             || self.tf_pitch_edit.is_some()
+            || self.tf_effect_edit.is_some()
             || self.tf_sweep_confirm
         {
             return false;
@@ -1511,6 +1523,26 @@ impl<S: SysfsIo> App<S> {
         self.tf_report(if target { "master on" } else { "master off" }, outcome);
     }
 
+    /// Flip the whole haptic effects layer (the Setup view's `x`). Each
+    /// layer's own gain is left alone, so switching back restores the mix
+    /// rather than resetting it.
+    fn tf_toggle_effects(&mut self) {
+        let target = !self.tf_cfg.effects;
+        let outcome = tfsim::set_effects_in(&self.tf_conf, target);
+        self.tf_report(if target { "effects on" } else { "effects off" }, outcome);
+    }
+
+    /// Move the layer-list selection (the Setup view's `[` and `]`).
+    fn tf_move_effect(&mut self, d: i32) {
+        let n = tfsim::EFFECTS.len() as i32;
+        self.tf_effect_idx = ((self.tf_effect_idx as i32 + d).rem_euclid(n)) as usize;
+    }
+
+    /// The layer the list has selected.
+    pub fn tf_selected_effect(&self) -> &'static tfsim::Effect {
+        &tfsim::EFFECTS[self.tf_effect_idx.min(tfsim::EFFECTS.len() - 1)]
+    }
+
     /// Flip the selected game's simulated-TF switch (the Setup view's
     /// `g`), for games whose title maps to a tf-sim id; anything else
     /// gets a status explanation instead of a silent no-op.
@@ -1617,15 +1649,30 @@ impl<S: SysfsIo> App<S> {
         }
     }
 
-    /// The intensity/pitch line editors' key handling (exactly one of the
-    /// two drafts is active when this is called): digits build the value,
-    /// Enter commits it into tf-sim.conf when it parses inside the
-    /// field's range, Esc discards.
+    /// The value editors' key handling (exactly one of the three drafts is
+    /// active when this is called): digits build the value, Enter commits it
+    /// into tf-sim.conf when it parses inside the field's range, Esc
+    /// discards.
     fn tf_edit_key(&mut self, key: crossterm::event::KeyCode) {
         use crossterm::event::KeyCode::*;
-        let is_intensity = self.tf_intensity_edit.is_some();
-        let Some(draft) =
-            self.tf_intensity_edit.as_mut().or(self.tf_pitch_edit.as_mut())
+        // Which field is being edited, decided before the draft is borrowed.
+        enum Field {
+            Intensity,
+            Pitch,
+            Effect,
+        }
+        let field = if self.tf_intensity_edit.is_some() {
+            Field::Intensity
+        } else if self.tf_pitch_edit.is_some() {
+            Field::Pitch
+        } else {
+            Field::Effect
+        };
+        let Some(draft) = self
+            .tf_intensity_edit
+            .as_mut()
+            .or(self.tf_pitch_edit.as_mut())
+            .or(self.tf_effect_edit.as_mut())
         else {
             return;
         };
@@ -1634,27 +1681,38 @@ impl<S: SysfsIo> App<S> {
                 let text = draft.clone();
                 self.tf_intensity_edit = None;
                 self.tf_pitch_edit = None;
-                match text.trim().parse::<u16>() {
-                    Ok(v) if is_intensity && v <= 100 => {
+                self.tf_effect_edit = None;
+                let parsed = text.trim().parse::<u16>();
+                match (field, parsed) {
+                    (Field::Intensity, Ok(v)) if v <= 100 => {
                         let outcome = tfsim::set_intensity_in(&self.tf_conf, v as u8);
                         self.tf_report(&format!("intensity {v}%"), outcome);
                     }
-                    Ok(v) if !is_intensity && (10..=200).contains(&v) => {
+                    (Field::Pitch, Ok(v)) if (10..=200).contains(&v) => {
                         let outcome = tfsim::set_pitch_in(&self.tf_conf, v as u8);
                         self.tf_report(&format!("pitch {v}%"), outcome);
                     }
-                    _ => {
-                        self.status = if is_intensity {
-                            "intensity: enter 0-100".to_string()
-                        } else {
-                            "pitch: enter 10-200".to_string()
-                        };
+                    (Field::Effect, Ok(v)) if v <= 100 => {
+                        let effect = self.tf_selected_effect();
+                        let (key, label) = (effect.key, effect.label);
+                        let outcome = tfsim::set_effect_gain_in(&self.tf_conf, key, v as u8);
+                        self.tf_report(&format!("{label} {v}%"), outcome);
+                    }
+                    (Field::Intensity, _) => {
+                        self.status = "intensity: enter 0-100".to_string();
+                    }
+                    (Field::Pitch, _) => {
+                        self.status = "pitch: enter 10-200".to_string();
+                    }
+                    (Field::Effect, _) => {
+                        self.status = "effect level: enter 0-100".to_string();
                     }
                 }
             }
             Esc => {
                 self.tf_intensity_edit = None;
                 self.tf_pitch_edit = None;
+                self.tf_effect_edit = None;
             }
             Backspace => {
                 draft.pop();
@@ -2292,7 +2350,10 @@ impl<S: SysfsIo> App<S> {
         if self.is_setup() {
             // The intensity/pitch line editors swallow every key while
             // active, same rule as the SDK-dir editor below.
-            if self.tf_intensity_edit.is_some() || self.tf_pitch_edit.is_some() {
+            if self.tf_intensity_edit.is_some()
+                || self.tf_pitch_edit.is_some()
+                || self.tf_effect_edit.is_some()
+            {
                 self.tf_edit_key(key);
                 return;
             }
@@ -2408,6 +2469,25 @@ impl<S: SysfsIo> App<S> {
                 }
                 Char('d') if inside && section == SetupSection::SimTf => {
                     self.tf_toggle_daemon()
+                }
+                // The haptic effects layer: master, then the per-layer list.
+                Char('x') if inside && section == SetupSection::SimTf => {
+                    self.tf_toggle_effects()
+                }
+                Char('l') if inside && section == SetupSection::SimTf => {
+                    self.tf_effects_open = !self.tf_effects_open;
+                }
+                // `[` and `]` rather than Up/Down, which belong to moving
+                // between Setup sections and must keep working from here.
+                Char('[') if inside && section == SetupSection::SimTf && self.tf_effects_open => {
+                    self.tf_move_effect(-1)
+                }
+                Char(']') if inside && section == SetupSection::SimTf && self.tf_effects_open => {
+                    self.tf_move_effect(1)
+                }
+                Char('v') if inside && section == SetupSection::SimTf && self.tf_effects_open => {
+                    let gain = self.tf_cfg.effect_gains.get(self.tf_selected_effect().key);
+                    self.tf_effect_edit = Some(gain.to_string());
                 }
                 // Arm the consent step; `t` never plays anything itself.
                 Char('t') if inside && section == SetupSection::SimTf => {
@@ -5115,5 +5195,123 @@ mod tests {
         a.on_key(KeyCode::PageDown);
         assert_eq!((a.info_scroll, a.setup_scroll), (0, 0));
         assert_eq!(a.scroll_content_height(), 0, "no composed content to scroll");
+    }
+
+    #[test]
+    fn setup_x_toggles_the_effects_layer_without_touching_the_levels() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        assert!(a.tf_cfg.effects, "defaults on");
+        a.on_key(KeyCode::Char('x'));
+        assert!(!a.tf_cfg.effects);
+        let text = std::fs::read_to_string(&a.tf_conf).unwrap();
+        assert!(text.contains("effects=0"), "conf written: {text}");
+        a.on_key(KeyCode::Char('x'));
+        assert!(a.tf_cfg.effects, "and back");
+    }
+
+    #[test]
+    fn setup_l_folds_the_layer_list_and_the_brackets_walk_it() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        assert!(!a.tf_effects_open, "ten layers stay folded until asked for");
+        a.on_key(KeyCode::Char('l'));
+        assert!(a.tf_effects_open);
+        assert_eq!(a.tf_selected_effect().key, "engine");
+        a.on_key(KeyCode::Char(']'));
+        assert_eq!(a.tf_selected_effect().key, "rev_limiter");
+        a.on_key(KeyCode::Char('['));
+        assert_eq!(a.tf_selected_effect().key, "engine");
+        // Wraps rather than sticking at the ends.
+        a.on_key(KeyCode::Char('['));
+        assert_eq!(a.tf_selected_effect().key, "drs", "walking back off the top wraps");
+        a.on_key(KeyCode::Char(']'));
+        assert_eq!(a.tf_selected_effect().key, "engine");
+    }
+
+    #[test]
+    fn the_brackets_do_nothing_while_the_list_is_folded() {
+        // They are section-scoped keys; with no list on screen they must not
+        // silently move a selection the user cannot see.
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char(']'));
+        a.on_key(KeyCode::Char(']'));
+        assert_eq!(a.tf_effect_idx, 0);
+        assert!(a.tf_effect_edit.is_none(), "v is inert too");
+    }
+
+    #[test]
+    fn setup_v_edits_the_selected_layers_level_with_a_range_check() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('l'));
+        a.on_key(KeyCode::Char(']'));
+        a.on_key(KeyCode::Char(']'));
+        assert_eq!(a.tf_selected_effect().key, "pit_limiter");
+        a.on_key(KeyCode::Char('v'));
+        assert_eq!(a.tf_effect_edit.as_deref(), Some("50"), "draft seeds from the value");
+        a.on_key(KeyCode::Backspace);
+        a.on_key(KeyCode::Backspace);
+        a.on_key(KeyCode::Char('3'));
+        a.on_key(KeyCode::Char('5'));
+        a.on_key(KeyCode::Enter);
+        assert!(a.tf_effect_edit.is_none());
+        assert_eq!(a.tf_cfg.effect_gains.get("pit_limiter"), 35);
+        let text = std::fs::read_to_string(&a.tf_conf).unwrap();
+        assert!(text.contains("effect_pit_limiter=35"), "conf written: {text}");
+        // And only that layer moved.
+        assert_eq!(a.tf_cfg.effect_gains.get("engine"), 100);
+        assert_eq!(a.tf_cfg.effect_gains.get("rev_limiter"), 70);
+    }
+
+    #[test]
+    fn an_out_of_range_level_is_refused_rather_than_clamped_silently() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('l'));
+        a.on_key(KeyCode::Char('v'));
+        for _ in 0..3 {
+            a.on_key(KeyCode::Backspace);
+        }
+        for c in "150".chars() {
+            a.on_key(KeyCode::Char(c));
+        }
+        a.on_key(KeyCode::Enter);
+        assert_eq!(a.tf_cfg.effect_gains.get("engine"), 100, "the value was not written");
+        assert!(a.status.contains("0-100"), "and the reason is on screen: {}", a.status);
+    }
+
+    #[test]
+    fn esc_abandons_a_level_draft() {
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('l'));
+        a.on_key(KeyCode::Char('v'));
+        a.on_key(KeyCode::Char('7'));
+        a.on_key(KeyCode::Esc);
+        assert!(a.tf_effect_edit.is_none());
+        assert_eq!(a.tf_cfg.effect_gains.get("engine"), 100, "nothing was committed");
+    }
+
+    #[test]
+    fn the_level_editor_swallows_keys_that_would_otherwise_navigate() {
+        // Same rule the intensity and pitch editors follow: while a draft is
+        // open, a stray 'm' must not toggle the master switch.
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('l'));
+        a.on_key(KeyCode::Char('v'));
+        let was = a.tf_cfg.enabled;
+        a.on_key(KeyCode::Char('m'));
+        assert_eq!(a.tf_cfg.enabled, was, "the master switch was reachable mid-edit");
+        assert!(a.tf_effect_edit.is_some(), "and the draft survived");
     }
 }

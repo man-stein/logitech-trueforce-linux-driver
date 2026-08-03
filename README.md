@@ -216,8 +216,9 @@ right away, no group membership needed.
 
   Beyond the engine note there is a **haptic effects layer**: both limiters,
   gear shifts, the ABS pump, traction loss, surface texture, impacts and DRS.
-  Tune it in Setup, under "Simulated TrueForce", with "Extra effects" and then
-  "Adjust individual levels".
+  Tune it in Setup, under "Simulated TrueForce": in the GUI, "Extra effects"
+  then "Adjust individual levels"; in the terminal app, `x` toggles the layer
+  and `l` lists it, with `[` `]` to pick a layer and `v` to set its level.
 
   How much of it you feel depends on what your game's telemetry carries, and
   each slider says so rather than leaving you to find out. Only the engine

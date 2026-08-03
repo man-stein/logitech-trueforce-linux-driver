@@ -23,9 +23,10 @@ the contract is "it works on RS50 and G Pro as listed here".
   None of it applies to games with built-in TrueForce, which get their effects
   from the game itself.
 
-  Tunable from the app: Setup, "Simulated TrueForce", "Extra effects". Only
-  the engine layer is hardware-validated, so reports on how the rest feel are
-  welcome.
+  Tunable from both apps, under Setup's "Simulated TrueForce": a switch and a
+  slider per layer in the GUI, and the `x` / `l` / `[` `]` / `v` keys in the
+  terminal app. Only the engine layer is hardware-validated, so reports on how
+  the rest feel are welcome.
 
 - **OutGauge now decodes gear, brake, clutch, and the ABS and traction
   lamps.** These feed the effects above. The gear field also reaches the
