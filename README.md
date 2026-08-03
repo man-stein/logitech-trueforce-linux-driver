@@ -214,6 +214,26 @@ right away, no group membership needed.
   it) lets you feel the effect without launching a game.
   Hardware-verified with those test sweeps; in-game reports welcome.
 
+  Beyond the engine note there is a **haptic effects layer**: both limiters,
+  gear shifts, the ABS pump, traction loss, surface texture, impacts and DRS.
+  How much of it you actually feel depends on what your game's telemetry
+  carries, since an effect with nothing feeding it stays silent rather than
+  guessing. OutGauge sources (BeamNG.drive, and anything else speaking it)
+  currently feed the most. The layer has no GUI yet; it is configured in
+  `~/.config/logi-tf-sim/tf-sim.conf`:
+
+  ```ini
+  effects=1            # 0 leaves only the engine note, as before
+  effect_gear_shift=60 # 0-100 per layer; 0 silences that one alone
+  ```
+
+  The layers are `engine`, `rev_limiter`, `pit_limiter`, `gear_shift`, `abs`,
+  `traction_loss`, `road_bumps`, `airborne`, `collision` and `drs`.
+  `effect_airborne` is a depth rather than a level: it sets how far the road
+  is quieted with the wheels off the ground. Only the engine layer is
+  hardware-validated so far, so if something feels wrong, turn that one layer
+  down and please say so in an issue.
+
 ## Configuring the wheel
 
 Run **logi-wheel-gui** (or **logi-wheel** in a terminal) and edit settings live:

@@ -5,6 +5,38 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Added
+
+- **A haptic effects layer for simulated TrueForce.** Until now the wheel felt
+  exactly one thing: the engine. There are now ten layers: the engine note,
+  both limiters, gear shifts, the ABS pump, traction loss, surface texture,
+  airborne, impacts and DRS. Each has its own gain in `tf-sim.conf`
+  (`effect_gear_shift=60` and so on, 0-100), and `effects=0` restores the
+  engine-only behaviour exactly.
+
+  How much you feel depends on your game: an effect whose input the telemetry
+  does not carry stays silent rather than guessing. OutGauge sources
+  (BeamNG.drive and anything else speaking it) feed the most today. Surface,
+  impacts, airborne and DRS have no source yet and are silent everywhere; the
+  missing piece for those is a decoder field, not the effect.
+
+  No GUI yet: the layer is config-file only for now. Only the engine layer is
+  hardware-validated, so reports on how the rest feel are welcome.
+
+- **OutGauge now decodes gear, brake, clutch, and the ABS and traction
+  lamps.** These feed the effects above. The gear field also reaches the
+  shared-memory relay format, which had carried one all along with nowhere to
+  put it.
+
+### Fixed
+
+- **Saving the config dropped `cylinders`.** It was read from the file but
+  never written back, so any value other than the default was lost the next
+  time anything saved. The round-trip test missed it by having picked the
+  default for that one field.
+
 ## 0.25.0 - 2026-08-02
 
 ### Fixed
