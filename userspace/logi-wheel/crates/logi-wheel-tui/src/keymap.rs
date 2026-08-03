@@ -283,6 +283,14 @@ fn setup_section<S: SysfsIo>(app: &App<S>) -> Section {
                 keys.push(bf("m", "master on/off"));
                 keys.push(bf("e", "intensity"));
                 keys.push(bf("p", "pitch"));
+                keys.push(bfs("x", "extra effects on/off", "effects"));
+                keys.push(bfs("l", "show/hide the effect levels", "levels"));
+                // Only once the list is on screen, or the footer advertises
+                // keys that do nothing.
+                if app.tf_effects_open {
+                    keys.push(bfs("[ ]", "pick an effect", "effect"));
+                    keys.push(bfs("v", "set the effect's level", "level"));
+                }
                 keys.push(bfs("d", "start/stop the daemon", "daemon"));
                 keys.push(bfs("t", "play a test sweep", "sweep"));
                 keys.push(b("Esc/Left", "back to the sections"));
