@@ -51,6 +51,6 @@
 ACTION!="add|change", GOTO="g923_xbox_modeswitch_end"
 SUBSYSTEM!="usb", GOTO="g923_xbox_modeswitch_end"
 
-ATTR{idVendor}=="046d", ATTR{idProduct}=="c26d", PROGRAM=="/bin/sh -c 'command -v systemd-run >/dev/null && command -v usb_modeswitch >/dev/null'", RUN+="/bin/sh -c 'systemd-run --no-block --collect --description=\"Logitech G923 Xbox mode switch\" /usr/bin/logi-g923-modeswitch >/dev/null 2>&1'"
+ATTR{idVendor}=="046d", ATTR{idProduct}=="c26d", PROGRAM=="/bin/sh -c 'command -v systemd-run >/dev/null && command -v usb_modeswitch >/dev/null && [ -x /usr/bin/logi-g923-modeswitch ]'", RUN+="/bin/sh -c 'systemd-run --no-block --collect --description=\"Logitech G923 Xbox mode switch\" /usr/bin/logi-g923-modeswitch >/dev/null 2>&1'"
 
 LABEL="g923_xbox_modeswitch_end"

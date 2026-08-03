@@ -28,6 +28,8 @@ UDEV_G923_SRC="$REPO_ROOT/udev/72-logitech-g923-rebind.rules"
 UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
 UDEV_G923_XBOX_SRC="$REPO_ROOT/udev/73-logitech-g923-xbox-modeswitch.rules"
 UDEV_G923_XBOX_DST="/etc/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
+MODESWITCH_SRC="$REPO_ROOT/tools/g923-xbox-modeswitch.sh"
+MODESWITCH_DST="/usr/bin/logi-g923-modeswitch"
 MODPROBE_SRC="$REPO_ROOT/packaging/modprobe.d/hid-logitech-dd.conf"
 MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
 
@@ -115,6 +117,21 @@ if [ -f "$UDEV_G923_SRC" ]; then
 		udevadm trigger --subsystem-match=hid
 	else
 		echo "udev rule up to date ($UDEV_G923_DST)"
+	fi
+fi
+
+# The helper the c26d rule runs. It has to be installed BEFORE the rule
+# that invokes it: the rule dispatches through systemd-run with its output
+# discarded, so a missing helper fails invisibly and the wheel simply never
+# leaves Xbox console mode. That is indistinguishable from a dead wheel,
+# which is exactly how it was reported (issue #27). Every distro package
+# already installed it; only this from-source path did not.
+if [ -f "$MODESWITCH_SRC" ]; then
+	if ! cmp -s "$MODESWITCH_SRC" "$MODESWITCH_DST" 2>/dev/null; then
+		echo "== installing $MODESWITCH_DST =="
+		install -Dm 0755 "$MODESWITCH_SRC" "$MODESWITCH_DST"
+	else
+		echo "mode-switch helper up to date ($MODESWITCH_DST)"
 	fi
 fi
 

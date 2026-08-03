@@ -27,6 +27,7 @@ UDEV_FFB_DST="/etc/udev/rules.d/71-logi-ffb-uhid.rules"
 UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
 UDEV_G923_XBOX_DST="/etc/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
 MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
+MODESWITCH_DST="/usr/bin/logi-g923-modeswitch"
 WHEEL_PIDS="c276 c272 c268"
 # Steam appids of the Logitech-SDK sims for launch-option checks:
 #   ACC, AC EVO, AC, AMS2, Le Mans Ultimate, rFactor 2
@@ -145,6 +146,15 @@ doctor() {
 		ok "G923 Xbox edition (c26d) mode-switch rule installed"
 	else
 		wrn "G923 Xbox mode-switch rule missing - the Xbox edition will not switch out of console mode (run: sudo ./tools/setup.sh)"
+	fi
+	# Checked separately from the rule above: the rule dispatches this
+	# through systemd-run with the output discarded, so a missing helper
+	# leaves no trace anywhere and simply looks like a wheel that never
+	# enumerates (issue #27).
+	if [ -x "$MODESWITCH_DST" ]; then
+		ok "G923 Xbox mode-switch helper installed"
+	else
+		wrn "G923 Xbox mode-switch helper missing ($MODESWITCH_DST) - the rule above cannot do anything without it, and the Xbox edition will look like a dead wheel (run: sudo ./tools/setup.sh)"
 	fi
 	if [ -f "$MODPROBE_DST" ]; then
 		ok "hid-logitech-dd modprobe.d config installed"

@@ -74,6 +74,6 @@ TAG+="uaccess", MODE="0660"
 # marker, so a literal shell "$f" must be written "$$f" (passes
 # udevadm verify; on lenient udev versions "$f" happened to survive
 # as a literal, but that is non-portable).
-RUN+="/bin/sh -c 'for f in /sys/class/hidraw/%k/device/wheel_* /sys/class/hidraw/%k/device/range /sys/class/hidraw/%k/device/gain /sys/class/hidraw/%k/device/autocenter /sys/class/hidraw/%k/device/combine_pedals /sys/class/hidraw/%k/device/damper_level /sys/class/hidraw/%k/device/spring_level /sys/class/hidraw/%k/device/friction_level; do [ -e \"$$f\" ] || continue; chmod 0666 \"$$f\"; done'"
+RUN+="/bin/sh -c 'for f in /sys/class/hidraw/%k/device/wheel_* /sys/class/hidraw/%k/device/range /sys/class/hidraw/%k/device/range_restore /sys/class/hidraw/%k/device/gain /sys/class/hidraw/%k/device/autocenter /sys/class/hidraw/%k/device/combine_pedals /sys/class/hidraw/%k/device/damper_level /sys/class/hidraw/%k/device/spring_level /sys/class/hidraw/%k/device/friction_level; do [ -e \"$$f\" ] || continue; chmod 0666 \"$$f\"; done'"
 
 LABEL="trueforce_end"
