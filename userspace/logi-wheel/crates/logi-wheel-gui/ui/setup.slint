@@ -29,14 +29,17 @@ export struct SetupGame {
 // One haptic layer of the simulated-TrueForce effects engine, built on the
 // Rust side (`bridge::setup_effects`) from `logi_wheel_core::tfsim::EFFECTS`
 // and the live gains in tf-sim.conf. `key` is the config key suffix the
-// slider writes back (`effect_<key>`); `fed` is false for a layer no
-// telemetry format supplies yet, which the row explains rather than hiding.
+// slider writes back (`effect_<key>`); `fed` is false for a layer no game
+// supplies yet, and `note` carries the caveat to show beside it ("" when
+// there is none), so a slider that will do nothing in the games you play
+// says so instead of leaving you to find out.
 export struct SetupEffect {
     key: string,
     label: string,
     blurb: string,
     gain: int,
     fed: bool,
+    note: string,
 }
 
 // One entry in the "Add a game" dialog's picker: a discovered Wine game the
@@ -714,6 +717,12 @@ export component Setup inherits Rectangle {
                         color: Theme.muted-text-color;
                         wrap: word-wrap;
                     }
+                    Text {
+                        text: "These apply only to the games you switched simulated TrueForce on for in the list above. Games with built-in TrueForce, like ACC and Assetto Corsa EVO, get their effects from the game itself and are not affected by anything here.";
+                        font-size: 11px;
+                        color: Theme.muted-text-color;
+                        wrap: word-wrap;
+                    }
                     TouchArea {
                         height: 24px;
                         enabled: effects-switch.checked;
@@ -778,9 +787,9 @@ export component Setup inherits Rectangle {
                                 }
                             }
                             Text {
-                                text: effect.fed
+                                text: effect.note == ""
                                     ? effect.blurb
-                                    : effect.blurb + " No game we read sends this yet, so it stays silent.";
+                                    : effect.blurb + " " + effect.note;
                                 font-size: 11px;
                                 color: Theme.muted-text-color;
                                 wrap: word-wrap;

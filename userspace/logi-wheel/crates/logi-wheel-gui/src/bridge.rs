@@ -908,6 +908,7 @@ pub fn setup_effects(cfg: &tfsim::Config) -> Vec<SetupEffect> {
             blurb: e.blurb.into(),
             gain: i32::from(cfg.effect_gains.get(e.key)),
             fed: e.fed,
+            note: e.note.into(),
         })
         .collect()
 }
@@ -2424,6 +2425,38 @@ mod tests {
             .map(|r| r.key.to_string())
             .collect();
         assert_eq!(unfed, ["road_bumps", "airborne", "collision", "drs"]);
+    }
+
+    #[test]
+    fn only_the_layers_every_game_feeds_are_shown_without_a_caveat() {
+        // Being fed by *something* is not the same as working in the game
+        // you play. Most games send engine speed, redline, throttle and road
+        // speed and nothing else; the gear, the pedals and the ABS and
+        // traction lamps come from OutGauge, which here means BeamNG. Only
+        // the two layers that work everywhere may go without a note.
+        let quiet: Vec<String> = setup_effects(&tfsim::Config::default())
+            .iter()
+            .filter(|r| r.note.is_empty())
+            .map(|r| r.key.to_string())
+            .collect();
+        assert_eq!(quiet, ["engine", "rev_limiter"]);
+    }
+
+    #[test]
+    fn every_caveated_layer_says_which_games_it_needs() {
+        for row in setup_effects(&tfsim::Config::default()) {
+            if row.note.is_empty() {
+                continue;
+            }
+            // A note that does not name a game, or say there is none, tells
+            // the reader nothing they can act on.
+            let n = row.note.to_string();
+            assert!(
+                n.contains("BeamNG") || n.contains("No game"),
+                "{}'s note names no source: {n}",
+                row.key
+            );
+        }
     }
 
 }

@@ -73,14 +73,21 @@ pub struct Effect {
     pub blurb: &'static str,
     /// Percent gain when nothing has been configured.
     pub default_gain: u8,
-    /// Whether any telemetry format the daemon parses supplies this layer's
-    /// input today.
+    /// Whether any game the daemon reads supplies this layer's input today.
     ///
     /// A layer with nothing feeding it is silent, not broken: the effect is
-    /// implemented and the missing piece is a decoder field. A user interface
-    /// should say so rather than presenting a slider that does nothing for
-    /// reasons it does not explain.
+    /// implemented and the missing piece is a decoder field.
     pub fed: bool,
+    /// The caveat to show beside this layer, or "" when there is none.
+    ///
+    /// [`fed`](Effect::fed) alone is too coarse to be honest. Most games send
+    /// only engine speed, redline, throttle and road speed; the gear, the
+    /// pedals and the ABS and traction lamps come from OutGauge, which among
+    /// the games here means BeamNG. So a layer can be genuinely implemented
+    /// and genuinely fed, and still do nothing at all in the game the person
+    /// reading the slider actually plays. Saying which is the difference
+    /// between a control and a puzzle.
+    pub note: &'static str,
 }
 
 /// Every layer, in the order a user interface should present them.
@@ -95,6 +102,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "The engine note itself, rising and falling with the revs.",
         default_gain: 100,
         fed: true,
+        note: "",
     },
     Effect {
         key: "rev_limiter",
@@ -102,6 +110,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "The hard chop of an engine sitting against its limiter.",
         default_gain: 70,
         fed: true,
+        note: "",
     },
     Effect {
         key: "pit_limiter",
@@ -109,6 +118,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "A slower pulse while the pit-lane speed limiter is engaged.",
         default_gain: 50,
         fed: true,
+        note: "Only BeamNG sends this today; silent in the other games.",
     },
     Effect {
         key: "gear_shift",
@@ -116,6 +126,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "A thump through the drivetrain as the gear changes.",
         default_gain: 60,
         fed: true,
+        note: "Only BeamNG sends this today; silent in the other games.",
     },
     Effect {
         key: "abs",
@@ -123,6 +134,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "The pulsing of the ABS pump under heavy braking.",
         default_gain: 60,
         fed: true,
+        note: "Only BeamNG sends this today; silent in the other games.",
     },
     Effect {
         key: "traction_loss",
@@ -130,6 +142,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "A buzz as the driven wheels start to let go.",
         default_gain: 50,
         fed: true,
+        note: "Only BeamNG sends this today; silent in the other games.",
     },
     Effect {
         key: "road_bumps",
@@ -137,6 +150,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "Texture from the road, rising with speed.",
         default_gain: 40,
         fed: false,
+        note: "No game we read sends this yet, so it stays silent.",
     },
     Effect {
         key: "airborne",
@@ -144,6 +158,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "How far the road quiets with the wheels off the ground.",
         default_gain: 85,
         fed: false,
+        note: "No game we read sends this yet, so it stays silent.",
     },
     Effect {
         key: "collision",
@@ -151,6 +166,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "A hit when the car strikes something.",
         default_gain: 80,
         fed: false,
+        note: "No game we read sends this yet, so it stays silent.",
     },
     Effect {
         key: "drs",
@@ -158,6 +174,7 @@ pub const EFFECTS: &[Effect] = &[
         blurb: "A tick as a drag-reduction wing opens or closes.",
         default_gain: 40,
         fed: false,
+        note: "No game we read sends this yet, so it stays silent.",
     },
 ];
 
