@@ -978,7 +978,10 @@ fn setup_sections<S: SysfsIo>(
                         "  TrueForce are not affected by any of it.",
                         dim,
                     )));
-                    if app.tf_effects_open {
+                    // Gated on the layer being on, matching the GUI: levels
+                    // that currently do nothing should not be presented as
+                    // if they did.
+                    if app.tf_effects_open && app.tf_cfg.effects {
                         for (i, effect) in logi_wheel_core::tfsim::EFFECTS.iter().enumerate() {
                             let picked = i == app.tf_effect_idx;
                             let gain = app.tf_cfg.effect_gains.get(effect.key);

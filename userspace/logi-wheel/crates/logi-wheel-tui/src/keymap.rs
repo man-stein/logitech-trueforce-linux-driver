@@ -287,7 +287,7 @@ fn setup_section<S: SysfsIo>(app: &App<S>) -> Section {
                 keys.push(bfs("l", "show/hide the effect levels", "levels"));
                 // Only once the list is on screen, or the footer advertises
                 // keys that do nothing.
-                if app.tf_effects_open {
+                if app.tf_layer_list_open() {
                     keys.push(bfs("[ ]", "pick an effect", "effect"));
                     keys.push(bfs("v", "set the effect's level", "level"));
                 }

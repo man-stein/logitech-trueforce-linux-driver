@@ -1532,6 +1532,13 @@ impl<S: SysfsIo> App<S> {
         self.tf_report(if target { "effects on" } else { "effects off" }, outcome);
     }
 
+    /// Whether the per-layer list is actually on screen. Folding it away and
+    /// switching the whole layer off both hide it, and the keys that walk it
+    /// have to agree with what the user can see.
+    pub fn tf_layer_list_open(&self) -> bool {
+        self.tf_effects_open && self.tf_cfg.effects
+    }
+
     /// Move the layer-list selection (the Setup view's `[` and `]`).
     fn tf_move_effect(&mut self, d: i32) {
         let n = tfsim::EFFECTS.len() as i32;
@@ -2479,13 +2486,13 @@ impl<S: SysfsIo> App<S> {
                 }
                 // `[` and `]` rather than Up/Down, which belong to moving
                 // between Setup sections and must keep working from here.
-                Char('[') if inside && section == SetupSection::SimTf && self.tf_effects_open => {
+                Char('[') if inside && section == SetupSection::SimTf && self.tf_layer_list_open() => {
                     self.tf_move_effect(-1)
                 }
-                Char(']') if inside && section == SetupSection::SimTf && self.tf_effects_open => {
+                Char(']') if inside && section == SetupSection::SimTf && self.tf_layer_list_open() => {
                     self.tf_move_effect(1)
                 }
-                Char('v') if inside && section == SetupSection::SimTf && self.tf_effects_open => {
+                Char('v') if inside && section == SetupSection::SimTf && self.tf_layer_list_open() => {
                     let gain = self.tf_cfg.effect_gains.get(self.tf_selected_effect().key);
                     self.tf_effect_edit = Some(gain.to_string());
                 }
@@ -5313,5 +5320,32 @@ mod tests {
         a.on_key(KeyCode::Char('m'));
         assert_eq!(a.tf_cfg.enabled, was, "the master switch was reachable mid-edit");
         assert!(a.tf_effect_edit.is_some(), "and the draft survived");
+    }
+
+    #[test]
+    fn switching_the_layer_off_takes_its_levels_off_screen_too() {
+        // The GUI hides them; the TUI has to agree, or one front-end shows
+        // levels that currently do nothing while the other does not. Found
+        // by driving the real TUI, not by a test, which is why it is one now.
+        use crossterm::event::KeyCode;
+        let mut a = tf_setup_app();
+        enter_setup(&mut a, SetupSection::SimTf);
+        a.on_key(KeyCode::Char('l'));
+        assert!(a.tf_layer_list_open(), "list is up while effects are on");
+
+        a.on_key(KeyCode::Char('x'));
+        assert!(!a.tf_cfg.effects);
+        assert!(!a.tf_layer_list_open(), "the list must go with the layer");
+
+        // And its keys go quiet with it rather than moving an unseen cursor.
+        let before = a.tf_effect_idx;
+        a.on_key(KeyCode::Char(']'));
+        a.on_key(KeyCode::Char('v'));
+        assert_eq!(a.tf_effect_idx, before, "selection moved off screen");
+        assert!(a.tf_effect_edit.is_none(), "an editor opened for a hidden row");
+
+        // Switching back on restores it, with the fold state intact.
+        a.on_key(KeyCode::Char('x'));
+        assert!(a.tf_layer_list_open(), "the list came back with the layer");
     }
 }
