@@ -35,6 +35,22 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Fixed
 
+- **The G923 Xbox edition came up dead after a from-source install.** Upgrade
+  if you own that wheel and installed with `tools/setup.sh`. The udev rule
+  that switches the wheel out of Xbox console mode was installed, but the
+  helper script that rule runs was not, and the rule dispatches it through
+  `systemd-run` with the output discarded, so the failure produced no error,
+  no log line and no switch. The wheel stayed in console mode and looked like
+  hardware that had died. Distro packages (AUR, Debian, COPR, OBS) always
+  installed the helper and were never affected. The rule now refuses to fire
+  without it, and `tools/setup.sh` reports the helper on its own line, since
+  "rule installed" was true throughout and told owners nothing (issue #27).
+
+- **`range_restore` needed a root shell.** The 90-degree restore switch was
+  added to the driver but left out of the list of attributes the udev rule
+  makes writable, so turning it on meant becoming root rather than writing it
+  like every other knob beside it (issue #27).
+
 - **Setup page sections were drawn several times taller than their contents**,
   with each title floating in the middle of an empty box and an open section's
   body rendered outside its own border.
