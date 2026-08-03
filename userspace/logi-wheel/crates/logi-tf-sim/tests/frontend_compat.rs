@@ -46,7 +46,7 @@ fn full_config() -> Config {
     Config {
         enabled: false,
         intensity: 42,
-        pitch_pct: 50,
+        pitch_pct: 50, cylinders: 4,
         leds: false,
         codemasters_port: 30500,
         pcars_port: 5607,

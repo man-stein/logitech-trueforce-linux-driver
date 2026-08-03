@@ -10,6 +10,7 @@
 //! Keys:
 //! - `enabled` (0/1): master switch
 //! - `intensity` (0-100): master intensity
+//! - `cylinders` (1-16): sets the engine note's firing rate with the RPM
 //! - `leds` (0/1): drive the wheel's rev display from telemetry RPM
 //! - `port.codemasters` (also serves modern F1 and EA Sports WRC),
 //!   `port.pcars`, `port.beamng`, `port.relay`: UDP listen ports
@@ -59,9 +60,18 @@ pub struct Config {
     pub enabled: bool,
     /// Master intensity, 0-100.
     pub intensity: u8,
-    /// Felt rev-rate scale in percent (10-200; 100 = fundamental at the
-    /// crank rate rpm/60 Hz, 50 = half for a slower engine feel).
+    /// Felt rev-rate scale in percent (10-200). 100 puts the fundamental at
+    /// the engine's true firing rate for [`Config::cylinders`]; lower is
+    /// slower and heavier. See `synth::firing_frequency`.
     pub pitch_pct: u8,
+    /// Cylinders, for the firing rate the engine note is built on. A
+    /// four-stroke fires every cylinder once per two revolutions, so this
+    /// sets the pitch as much as RPM does: a V8 fires twice as often as a
+    /// four at the same RPM.
+    ///
+    /// Per-game override lives in [`GameConfig`]; a car-level source would
+    /// be better still, since this is really a property of the car.
+    pub cylinders: u8,
     /// Whether the daemon also drives the wheel's rev display
     /// (`wheel_rev_level`) from telemetry RPM while streaming.
     pub leds: bool,
@@ -87,10 +97,25 @@ impl Default for Config {
         Config {
             enabled: true,
             intensity: DEFAULT_INTENSITY,
-            // Default 50: at 100 (crank-rate fundamental) the hardware
-            // feel-test read as an alarmingly fast engine (2026-07-20);
-            // half rate feels like an engine, not a dentist drill.
-            pitch_pct: 50,
+            // 25 with the default four cylinders reproduces exactly what
+            // this daemon emitted before the firing rate was modelled:
+            // rpm/60 * (4/2) * 0.25 == rpm/120, the old rpm/60 * 0.5.
+            //
+            // Deliberately not the physically correct 100. The old model
+            // was missing the cylinder term, but the value people settled
+            // on was chosen by feel on real hardware: at the old 100 the
+            // feel-test read as "an alarmingly fast engine" (2026-07-20),
+            // and correcting the maths does not retroactively make that
+            // observation wrong. Changing the default would silently alter
+            // the feel for every existing user on the strength of theory.
+            //
+            // What the fix buys immediately is that pitch now means the
+            // same thing on every engine: a V8 and a four at the same
+            // setting are correct relative to each other, which they were
+            // not before. Whether the honest default should move toward
+            // 100 wants a hardware feel-test, not arithmetic.
+            pitch_pct: 25,
+            cylinders: crate::synth::DEFAULT_CYLINDERS,
             leds: true,
             codemasters_port: codemasters::DEFAULT_PORT,
             pcars_port: pcars::DEFAULT_PORT,
@@ -230,6 +255,16 @@ impl Config {
                         }
                     }
                 }
+                "cylinders" => {
+                    // 1..16 covers a Ducati twin through a W16. Out of range
+                    // keeps the default rather than producing an engine note
+                    // nothing on earth makes.
+                    if let Ok(v) = raw.parse::<u8>() {
+                        if (1..=16).contains(&v) {
+                            cfg.cylinders = v;
+                        }
+                    }
+                }
                 "leds" => {
                     if let Some(v) = parse_bool(raw) {
                         cfg.leds = v;
@@ -364,7 +399,7 @@ mod tests {
         let mut cfg = Config {
             enabled: false,
             intensity: 42,
-            pitch_pct: 50,
+            pitch_pct: 50, cylinders: 4,
             leds: false,
             codemasters_port: 30500,
             pcars_port: 5607,

@@ -63,7 +63,13 @@ pub fn run(cfg: &Config, pitch_override_pct: Option<u8>, stop: &AtomicBool) -> R
         let t = (i * CHUNK_MS) as f32 / 1000.0;
         let (rpm, throttle) = sweep_at(t);
         samples.clear();
-        synth.generate(rpm, throttle, intensity, pitch, CHUNK_MS, &mut samples);
+        let note = crate::synth::EngineNote {
+            rpm,
+            throttle,
+            cylinders: cfg.cylinders,
+            pitch_scale: pitch,
+        };
+        synth.generate(&note, intensity, CHUNK_MS, &mut samples);
         stream.push(&samples)?;
         thread::sleep(Duration::from_millis(CHUNK_MS as u64));
     }

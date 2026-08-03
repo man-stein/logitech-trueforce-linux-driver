@@ -276,7 +276,13 @@ pub fn run(cfg: &Config) -> Result<()> {
                     let pitch = f32::from(cfg.pitch_pct) / 100.0;
                     let rpm = a.tel.rpm.min(a.tel.max_rpm * 1.05);
                     a.samples.clear();
-                    a.synth.generate(rpm, a.tel.throttle, intensity, pitch, count as usize, &mut a.samples);
+                    let note = crate::synth::EngineNote {
+                        rpm,
+                        throttle: a.tel.throttle,
+                        cylinders: cfg.cylinders,
+                        pitch_scale: pitch,
+                    };
+                    a.synth.generate(&note, intensity, count as usize, &mut a.samples);
                     if let Err(e) = a.stream.push(&a.samples) {
                         stop_reason = Some(format!("stream push failed: {e}"));
                     }
