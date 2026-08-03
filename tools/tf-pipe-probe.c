@@ -36,18 +36,23 @@
  * For a Proton title that is
  * ~/.steam/steam/steamapps/compatdata/<appid>/pfx.
  *
- * STATUS: written against the SDK's own strings and reviewed, but NOT yet
- * run end to end. It needs a mingw toolchain to build, and the machine it
- * was written on has neither that nor a Wine that can launch anything. If
- * you only want to know WHETHER the SDK reaches for this pipe, and not what
- * it would say, there is a cheaper answer that builds nothing at all: run
- * the game with Wine's file channel on and grep the log.
+ * STATUS: built and smoke-tested. It serves the pipe and waits as intended.
+ * What it has NOT yet captured is a real conversation, because the SDK only
+ * starts its connection client once a game initialises it; merely loading
+ * the DLL is not enough, as tested. So the useful run is on a machine with
+ * the affected game: start this first, then launch the game.
  *
- *   PROTON_LOG=1 WINEDEBUG=+file %command%
- *   grep -i 'logi\.trueforce' ~/steam-*.log
+ * The prior question, whether the SDK reaches for this pipe under Proton at
+ * all, is now answered and the answer is yes. From a reporter's Wine log
+ * (issue #27), repeating continuously:
  *
- * A hit proves the SDK looks for the pipe under Proton; silence proves it
- * does not, and sends this whole line of enquiry elsewhere. Do that first.
+ *   CreateFileW L"\\\\.\\pipe\\logi.trueforce.connect" ... creation 3
+ *   CreateFileW Unable to create file ... (status c0000034)
+ *
+ * creation 3 is OPEN_EXISTING and c0000034 is STATUS_OBJECT_NAME_NOT_FOUND,
+ * so the SDK is the client, nothing serves the pipe under Proton, and it
+ * retries forever, which matches the library's own
+ * "Client failed to connect: polling again in %ld ms".
  */
 
 #include <windows.h>
