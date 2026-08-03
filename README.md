@@ -125,9 +125,9 @@ takes a different path than the RS50 and G PRO above, but the result is the
 same: real forces in games, engine haptics through the rim, working rev
 lights, and the settings app.
 
-The PlayStation edition is verified on hardware. The Xbox edition is
-implemented from the same protocol but has never been run on a real unit -
-details on both below.
+Both editions are now verified on hardware. The Xbox edition was confirmed
+by an owner over the course of issue #27, on a wheel none of the maintainers
+own (see [CREDITS.md](CREDITS.md)).
 
 **PlayStation edition** (`046d:c266`/`c267`) is fully supported and verified on
 hardware:
@@ -142,10 +142,18 @@ hardware:
 - **Settings**: rotation range, force strength, autocenter and combined pedals,
   through `logi-wheel` or Oversteer.
 
-**Xbox edition** (`046d:c26e`) is implemented but **untested**, since we have no
-Xbox unit. It boots into a console-only mode that Linux cannot use, so install
-`usb_modeswitch` and a udev rule flips it to PC mode automatically when you plug
-it in. Reports from owners are very welcome.
+**Xbox edition** (`046d:c26e`) has **force feedback and TrueForce**, both
+confirmed on a real unit. Neither existed for this wheel on Linux before.
+
+It boots into a console-only mode that Linux cannot use, so install
+`usb_modeswitch`; a udev rule then flips it to PC mode automatically when you
+plug it in.
+
+One known limitation: some sims lock the steering to 90 degrees (45 each
+way). That is not the wheel or this driver. Logitech's TrueForce SDK asks
+G HUB for your wheel's rotation over a local pipe, nothing answers that under
+Proton, and the game falls back to 90, which is the minimum of the wheel's
+legal range. Tracked in #27.
 
 Two notes for the curious: the wheel plugs in as `c267` (PlayStation) or `c26d`
 (Xbox) and the driver switches it to its PC mode automatically, and the G923's
@@ -353,6 +361,13 @@ Logitech's TrueForce SDK DLLs are not part of this project and are not
 redistributed here; you supply them from your own G HUB installation.
 
 ## Acknowledgments
+
+Most of what this driver knows about the hardware came from people who
+tested wheels the maintainers do not own and reported what happened. They
+are credited individually in **[CREDITS.md](CREDITS.md)**, which is where
+the work that never shows up in a commit log is recorded.
+
+The projects this one is built on:
 
 - Based on [JacKeTUs/hid-logitech-hidpp](https://github.com/JacKeTUs/hid-logitech-hidpp),
   which adds G PRO wheel support and improved force feedback.
