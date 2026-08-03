@@ -22,8 +22,9 @@ the contract is "it works on RS50 and G Pro as listed here".
   impacts, airborne and DRS have no source yet and are silent everywhere; the
   missing piece for those is a decoder field, not the effect.
 
-  No GUI yet: the layer is config-file only for now. Only the engine layer is
-  hardware-validated, so reports on how the rest feel are welcome.
+  Tunable from the app: Setup, "Simulated TrueForce", "Extra effects". Only
+  the engine layer is hardware-validated, so reports on how the rest feel are
+  welcome.
 
 - **OutGauge now decodes gear, brake, clutch, and the ABS and traction
   lamps.** These feed the effects above. The gear field also reaches the
@@ -31,6 +32,10 @@ the contract is "it works on RS50 and G Pro as listed here".
   put it.
 
 ### Fixed
+
+- **Setup page sections were drawn several times taller than their contents**,
+  with each title floating in the middle of an empty box and an open section's
+  body rendered outside its own border.
 
 - **Saving the config dropped `cylinders`.** It was read from the file but
   never written back, so any value other than the default was lost the next
