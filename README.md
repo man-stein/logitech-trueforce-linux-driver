@@ -216,23 +216,28 @@ right away, no group membership needed.
 
   Beyond the engine note there is a **haptic effects layer**: both limiters,
   gear shifts, the ABS pump, traction loss, surface texture, impacts and DRS.
-  How much of it you actually feel depends on what your game's telemetry
-  carries, since an effect with nothing feeding it stays silent rather than
-  guessing. OutGauge sources (BeamNG.drive, and anything else speaking it)
-  currently feed the most. The layer has no GUI yet; it is configured in
-  `~/.config/logi-tf-sim/tf-sim.conf`:
+  Tune it in Setup, under "Simulated TrueForce", with "Extra effects" and then
+  "Adjust individual levels".
 
-  ```ini
-  effects=1            # 0 leaves only the engine note, as before
-  effect_gear_shift=60 # 0-100 per layer; 0 silences that one alone
-  ```
+  How much of it you feel depends on what your game's telemetry carries, and
+  each slider says so rather than leaving you to find out. Only the engine
+  note and the rev limiter work in every supported game. The gear, the pedals
+  and the ABS and traction lamps come from OutGauge, which among these games
+  means BeamNG.drive, so the pit limiter, gear shifts, ABS and traction are
+  silent elsewhere. Surface texture, airborne, impacts and DRS have no source
+  at all yet: the effects are written, the missing piece is a decoder field.
 
-  The layers are `engine`, `rev_limiter`, `pit_limiter`, `gear_shift`, `abs`,
-  `traction_loss`, `road_bumps`, `airborne`, `collision` and `drs`.
-  `effect_airborne` is a depth rather than a level: it sets how far the road
-  is quieted with the wheels off the ground. Only the engine layer is
-  hardware-validated so far, so if something feels wrong, turn that one layer
-  down and please say so in an issue.
+  All of this applies only to games you switched simulated TrueForce on for.
+  Games with built-in TrueForce (ACC, Assetto Corsa EVO) get their effects
+  from the game itself and are not affected by any of it.
+
+  The same settings live in `tf-sim.conf` as `effects=0/1` and
+  `effect_<layer>=0-100`, where `<layer>` is one of `engine`, `rev_limiter`,
+  `pit_limiter`, `gear_shift`, `abs`, `traction_loss`, `road_bumps`,
+  `airborne`, `collision`, `drs`. `effect_airborne` is a depth rather than a
+  level: it sets how far the road is quieted with the wheels off the ground.
+  Only the engine layer is hardware-validated so far, so if something feels
+  wrong, turn that one layer down and please say so in an issue.
 
 ## Configuring the wheel
 

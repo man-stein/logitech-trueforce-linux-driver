@@ -16,11 +16,12 @@ the contract is "it works on RS50 and G Pro as listed here".
   (`effect_gear_shift=60` and so on, 0-100), and `effects=0` restores the
   engine-only behaviour exactly.
 
-  How much you feel depends on your game: an effect whose input the telemetry
-  does not carry stays silent rather than guessing. OutGauge sources
-  (BeamNG.drive and anything else speaking it) feed the most today. Surface,
-  impacts, airborne and DRS have no source yet and are silent everywhere; the
-  missing piece for those is a decoder field, not the effect.
+  How much you feel depends on your game, and each slider says which games
+  feed it. Only the engine note and the rev limiter work everywhere; the pit
+  limiter, gear shifts, ABS and traction need OutGauge, which here means
+  BeamNG.drive. Surface, airborne, impacts and DRS have no source at all yet.
+  None of it applies to games with built-in TrueForce, which get their effects
+  from the game itself.
 
   Tunable from the app: Setup, "Simulated TrueForce", "Extra effects". Only
   the engine layer is hardware-validated, so reports on how the rest feel are
