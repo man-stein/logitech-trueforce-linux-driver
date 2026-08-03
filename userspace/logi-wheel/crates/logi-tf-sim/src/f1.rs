@@ -138,7 +138,7 @@ impl Decoder {
         }
         self.running_max_rpm = self.running_max_rpm.max(rpm);
         let max_rpm = self.running_max_rpm.max(1.0);
-        Some((ID, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter: false }))
+        Some((ID, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter: false, ..Default::default() }))
     }
 }
 

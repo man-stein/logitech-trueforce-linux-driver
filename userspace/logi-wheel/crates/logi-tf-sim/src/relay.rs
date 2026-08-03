@@ -62,16 +62,21 @@ pub struct RelayTelemetry {
 
 impl RelayTelemetry {
     /// Convert to the normalized [`Telemetry`] the daemon's synth and LED
-    /// pipeline consumes. `gear` has no analog there (the pipeline drives
-    /// haptics and the rev display from rpm/max_rpm/throttle alone) and is
-    /// dropped; `speed` is not carried by the relay format, so it reads as
-    /// 0.0 (only used for a startup log line, never for synthesis).
+    /// pipeline consumes. `speed` is not carried by the relay format, so it
+    /// reads as 0.0 (only used for a startup log line, never for synthesis).
+    ///
+    /// Everything the relay does not carry keeps its `Default`, which is the
+    /// value each effect reads as "not happening".
     pub fn to_telemetry(&self) -> Telemetry {
         Telemetry {
             rpm: self.rpm,
             max_rpm: self.max_rpm,
             throttle: self.throttle.clamp(0.0, 1.0),
-            speed: 0.0, pit_limiter: false,
+            // The wire field is i16 for headroom; no real gearbox reaches
+            // beyond i8, and saturating keeps a corrupt packet from wrapping
+            // a high gear round to reverse.
+            gear: self.gear.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+            ..Default::default()
         }
     }
 }

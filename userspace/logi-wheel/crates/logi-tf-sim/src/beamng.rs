@@ -43,11 +43,14 @@ pub const DEFAULT_PORT: u16 = 4444;
 const LEN_NO_ID: usize = 92;
 const LEN_WITH_ID: usize = 96;
 
+const OFF_GEAR: usize = 10;
 const OFF_SPEED: usize = 12;
 const OFF_RPM: usize = 16;
 const OFF_THROTTLE: usize = 48;
+const OFF_BRAKE: usize = 52;
+const OFF_CLUTCH: usize = 56;
 /// OutGauge `showLights`: the dashboard lamps the game says are lit, as a
-/// DL_* bitfield. Only the pit-speed-limiter bit is read.
+/// DL_* bitfield.
 const OFF_SHOW_LIGHTS: usize = 44;
 /// `DL_PITSPEED` in the OutGauge DL_* set.
 ///
@@ -62,6 +65,23 @@ const OFF_SHOW_LIGHTS: usize = 44;
 /// indistinguishable from a car that has none, so if BeamNG never sets it
 /// this reports no limiter rather than a wrong one. The failure is silence.
 const DL_PITSPEED: u32 = 0x0000_0008;
+
+/// Traction-control and ABS lamps in the same DL_* set.
+///
+/// These carry the caveat the whole bitfield carries (see [`DL_PITSPEED`]):
+/// the bit positions come from the LFS specification, and what a given
+/// source does with them is its own business. There is a second caveat
+/// specific to these two. A dashboard lamp for ABS or TC can mean either
+/// "the system is intervening right now" or "the system has faulted", and
+/// the wire does not say which. LFS and the sims that copy it flash the
+/// lamp on intervention, which is the reading taken here.
+///
+/// Being wrong about that is survivable: the effects these feed are short
+/// haptic ticks, so a fault lamp would produce a buzz rather than anything
+/// dangerous. It is recorded here so that the assumption is visible if
+/// someone later reports exactly that buzz.
+const DL_TC: u32 = 0x0000_0010;
+const DL_ABS: u32 = 0x0000_0400;
 
 /// Reject engine rates above this as not a real OutGauge sample.
 const RPM_CEILING: f32 = 30_000.0;
@@ -106,10 +126,35 @@ impl Decoder {
         }
         self.running_max_rpm = self.running_max_rpm.max(rpm);
         let max_rpm = self.running_max_rpm.max(1.0);
-        let pit_limiter = u32_at(pkt, OFF_SHOW_LIGHTS).is_some_and(|l| l & DL_PITSPEED != 0);
+        let lamps = u32_at(pkt, OFF_SHOW_LIGHTS).unwrap_or(0);
+
+        // OutGauge numbers gears from reverse: 0 R, 1 N, 2 first. The
+        // normalized form counts from neutral, so shift the origin.
+        let gear = pkt
+            .get(OFF_GEAR)
+            .map_or(0, |g| (*g as i8).saturating_sub(1));
+        let brake = f32_at(pkt, OFF_BRAKE).unwrap_or(0.0).clamp(0.0, 1.0);
+        let clutch = f32_at(pkt, OFF_CLUTCH).unwrap_or(0.0).clamp(0.0, 1.0);
         Some((
             ID,
-            Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter },
+            Telemetry {
+                rpm,
+                max_rpm,
+                throttle: throttle.clamp(0.0, 1.0),
+                speed,
+                pit_limiter: lamps & DL_PITSPEED != 0,
+                gear,
+                brake,
+                clutch,
+                abs_active: lamps & DL_ABS != 0,
+                traction_control: lamps & DL_TC != 0,
+                // OutGauge carries no slip, suspension, or damage channel,
+                // so the effects that need those stay inert rather than
+                // being fed a guess. Deciding what a lit TC lamp implies
+                // about slip is the effect's job, not the decoder's: this
+                // function reports what the packet said and nothing more.
+                ..Default::default()
+            },
         ))
     }
 }
@@ -199,5 +244,63 @@ mod tests {
         assert!(d.parse(&[]).is_none(), "empty");
         // A classic-Codemasters-sized datagram must not match.
         assert!(d.parse(&vec![0u8; 264]).is_none());
+    }
+
+    #[test]
+    fn gear_is_rebased_from_outgauges_reverse_origin() {
+        // OutGauge counts 0 R, 1 N, 2 first; the normalized form counts
+        // from neutral so that 0 is neutral and the sign gives direction.
+        for (wire, want) in [(0u8, -1i8), (1, 0), (2, 1), (7, 6)] {
+            let mut pkt = packet(3000.0, 0.5, 20.0);
+            pkt[OFF_GEAR] = wire;
+            let (_, t) = Decoder::default().parse(&pkt).expect("valid packet");
+            assert_eq!(t.gear, want, "wire gear {wire}");
+        }
+    }
+
+    #[test]
+    fn the_pedals_are_read_and_clamped() {
+        let mut pkt = packet(3000.0, 0.5, 20.0);
+        pkt[OFF_BRAKE..OFF_BRAKE + 4].copy_from_slice(&0.75f32.to_le_bytes());
+        pkt[OFF_CLUTCH..OFF_CLUTCH + 4].copy_from_slice(&1.5f32.to_le_bytes());
+        let (_, t) = Decoder::default().parse(&pkt).expect("valid packet");
+        assert!((t.brake - 0.75).abs() < 1e-6);
+        assert_eq!(t.clutch, 1.0, "an out-of-range pedal clamps, it does not wrap");
+    }
+
+    #[test]
+    fn the_abs_and_tc_lamps_are_read_independently() {
+        let cases = [
+            (0u32, false, false),
+            (DL_ABS, true, false),
+            (DL_TC, false, true),
+            (DL_ABS | DL_TC, true, true),
+            // A neighbouring lamp must not read as either of ours.
+            (DL_PITSPEED | 0x0000_0100, false, false),
+        ];
+        for (lamps, want_abs, want_tc) in cases {
+            let mut pkt = packet(3000.0, 0.5, 20.0);
+            pkt[OFF_SHOW_LIGHTS..OFF_SHOW_LIGHTS + 4].copy_from_slice(&lamps.to_le_bytes());
+            let (_, t) = Decoder::default().parse(&pkt).expect("valid packet");
+            assert_eq!(t.abs_active, want_abs, "lamps {lamps:#x}");
+            assert_eq!(t.traction_control, want_tc, "lamps {lamps:#x}");
+        }
+    }
+
+    #[test]
+    fn what_outgauge_does_not_carry_stays_inert() {
+        // The guarantee that lets an effect ship before every format can
+        // feed it: an absent channel reads as "not happening", never as a
+        // guess. If a future change starts inferring these from the lamps,
+        // this test is the thing that should stop it.
+        let mut pkt = packet(7000.0, 1.0, 60.0);
+        pkt[OFF_SHOW_LIGHTS..OFF_SHOW_LIGHTS + 4]
+            .copy_from_slice(&(DL_ABS | DL_TC | DL_PITSPEED).to_le_bytes());
+        let (_, t) = Decoder::default().parse(&pkt).expect("valid packet");
+        assert_eq!(t.wheel_slip, 0.0);
+        assert_eq!(t.surface_roughness, 0.0);
+        assert_eq!(t.impact_g, 0.0);
+        assert!(!t.airborne);
+        assert!(!t.drs_active);
     }
 }

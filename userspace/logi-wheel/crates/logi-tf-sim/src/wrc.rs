@@ -62,7 +62,7 @@ pub fn parse(pkt: &[u8]) -> Option<(&'static str, Telemetry)> {
     if rpm < 0.0 || max_rpm <= 0.0 || rpm > RPM_CEILING || max_rpm > RPM_CEILING {
         return None;
     }
-    Some((ID, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter: false }))
+    Some((ID, Telemetry { rpm, max_rpm, throttle: throttle.clamp(0.0, 1.0), speed, pit_limiter: false, ..Default::default() }))
 }
 
 #[cfg(test)]

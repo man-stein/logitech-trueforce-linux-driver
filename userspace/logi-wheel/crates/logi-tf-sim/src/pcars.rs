@@ -81,7 +81,7 @@ pub fn parse(pkt: &[u8]) -> Option<(&'static str, Telemetry)> {
     if max_rpm <= 0.0 || !speed.is_finite() {
         return None;
     }
-    Some((ID_FAMILY, Telemetry { rpm, max_rpm, throttle, speed, pit_limiter: false }))
+    Some((ID_FAMILY, Telemetry { rpm, max_rpm, throttle, speed, pit_limiter: false, ..Default::default() }))
 }
 
 #[cfg(test)]
