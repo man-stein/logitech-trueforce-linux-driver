@@ -34,6 +34,7 @@ pub mod capture;
 pub mod codemasters;
 pub mod config;
 pub mod daemon;
+pub mod effects;
 pub mod error;
 pub mod f1;
 pub mod g923;

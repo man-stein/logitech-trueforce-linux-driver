@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use logi_tf_sim::config::{Config, GameConfig};
+use logi_tf_sim::effects::{EffectGains, EffectId};
 
 /// A unique fixture directory under the system temp dir, removed on drop.
 struct TempTree(PathBuf);
@@ -43,11 +44,18 @@ fn full_config() -> Config {
     let mut games = BTreeMap::new();
     games.insert("dirt-rally-2".to_string(), GameConfig { enabled: true, intensity: 80 });
     games.insert("ams2-pcars2".to_string(), GameConfig { enabled: false, intensity: 100 });
+    let mut effect_gains = EffectGains::default();
+    for (i, id) in EffectId::ALL.into_iter().enumerate() {
+        effect_gains.set(id, (i as u8) * 7 + 3);
+    }
     Config {
         enabled: false,
         intensity: 42,
-        pitch_pct: 50, cylinders: 4,
+        pitch_pct: 50,
+        cylinders: 8,
         leds: false,
+        effects: false,
+        effect_gains,
         codemasters_port: 30500,
         pcars_port: 5607,
         beamng_port: 4445,
@@ -99,6 +107,15 @@ fn frontend_edits_survive_this_crates_reader_and_keep_the_ports() {
     assert_eq!(seen.pitch_pct, 120);
     assert!(seen.leds);
     assert_eq!(seen.codemasters_port, 30500, "port keys the front-end never models survive");
+    // The effects layer is likewise not modelled by the front-end yet. Its
+    // keys must survive a front-end session untouched, or a user who tuned
+    // the mix by hand loses it the first time they move a slider.
+    assert!(!seen.effects, "the effects master switch survived");
+    let mut want = EffectGains::default();
+    for (i, id) in EffectId::ALL.into_iter().enumerate() {
+        want.set(id, (i as u8) * 7 + 3);
+    }
+    assert_eq!(seen.effect_gains, want, "per-layer gains survived");
     assert_eq!(seen.pcars_port, 5607);
     assert_eq!(seen.games["ams2-pcars2"], GameConfig { enabled: true, intensity: 100 });
     assert_eq!(seen.games["dirt-rally-2"], GameConfig { enabled: true, intensity: 65 });

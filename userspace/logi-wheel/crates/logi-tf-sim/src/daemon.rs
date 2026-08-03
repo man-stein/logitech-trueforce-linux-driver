@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::leds::RevLeds;
-use crate::synth::EngineSynth;
+use crate::effects::Mixer;
 use crate::telemetry::Telemetry;
 use crate::tf::TfStream;
 use crate::{beamng, codemasters, f1, g923, pcars, relay, wrc};
@@ -98,7 +98,7 @@ pub(crate) fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
 /// A live wheel stream plus the state that feeds it.
 struct Active {
     stream: WheelStream,
-    synth: EngineSynth,
+    mixer: Mixer,
     game: &'static str,
     tel: Telemetry,
     last_telemetry: Instant,
@@ -238,7 +238,19 @@ pub fn run(cfg: &Config) -> Result<()> {
                             }
                             active = Some(Active {
                                 stream,
-                                synth: EngineSynth::new(),
+                                mixer: if cfg.effects {
+                                    Mixer::new(
+                                        cfg.cylinders,
+                                        f32::from(cfg.pitch_pct) / 100.0,
+                                        cfg.effect_gains,
+                                    )
+                                } else {
+                                    Mixer::engine_only(
+                                        cfg.cylinders,
+                                        f32::from(cfg.pitch_pct) / 100.0,
+                                        cfg.effect_gains,
+                                    )
+                                },
                                 game: id,
                                 tel,
                                 last_telemetry: now,
@@ -273,16 +285,11 @@ pub fn run(cfg: &Config) -> Result<()> {
                         a.last_gen + Duration::from_millis(count)
                     };
                     let intensity = cfg.effective_intensity(a.game);
-                    let pitch = f32::from(cfg.pitch_pct) / 100.0;
-                    let rpm = a.tel.rpm.min(a.tel.max_rpm * 1.05);
-                    a.samples.clear();
-                    let note = crate::synth::EngineNote {
-                        rpm,
-                        throttle: a.tel.throttle,
-                        cylinders: cfg.cylinders,
-                        pitch_scale: pitch,
-                    };
-                    a.synth.generate(&note, intensity, count as usize, &mut a.samples);
+                    // The mixer owns the engine layer along with the rest,
+                    // including the over-redline cap the synth call used to
+                    // apply here: an effect's reading of the sample is the
+                    // effect's business.
+                    a.mixer.render(&a.tel, intensity, count as usize, &mut a.samples);
                     if let Err(e) = a.stream.push(&a.samples) {
                         stop_reason = Some(format!("stream push failed: {e}"));
                     }

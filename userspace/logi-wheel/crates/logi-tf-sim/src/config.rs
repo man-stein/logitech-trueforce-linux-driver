@@ -12,6 +12,15 @@
 //! - `intensity` (0-100): master intensity
 //! - `cylinders` (1-16): sets the engine note's firing rate with the RPM
 //! - `leds` (0/1): drive the wheel's rev display from telemetry RPM
+//! - `effects` (0/1): the haptic layers beyond the engine note (limiters,
+//!   shifts, ABS, traction, surface, impacts). Off leaves only the engine,
+//!   which is what this daemon emitted before they existed.
+//! - `effect_<name>` (0-100): gain for one layer, where `<name>` is one of
+//!   `engine`, `rev_limiter`, `pit_limiter`, `gear_shift`, `abs`,
+//!   `traction_loss`, `road_bumps`, `airborne`, `collision`, `drs`. 0
+//!   silences that layer alone. `effect_airborne` is a depth rather than a
+//!   level: it sets how far the road is quieted with the wheels off the
+//!   ground. See [`crate::effects`].
 //! - `port.codemasters` (also serves modern F1 and EA Sports WRC),
 //!   `port.pcars`, `port.beamng`, `port.relay`: UDP listen ports
 //! - `game.<id>.enabled` (0/1), `game.<id>.intensity` (0-100)
@@ -75,6 +84,15 @@ pub struct Config {
     /// Whether the daemon also drives the wheel's rev display
     /// (`wheel_rev_level`) from telemetry RPM while streaming.
     pub leds: bool,
+    /// Whether the haptic layers beyond the engine note are mixed in.
+    ///
+    /// Off is the pre-effects behaviour: engine only. It exists because the
+    /// effects layer changes what a wheel feels like mid-corner, and anyone
+    /// who does not want that should be able to say so in one line rather
+    /// than by zeroing ten gains.
+    pub effects: bool,
+    /// Per-layer gain; see [`crate::effects::EffectGains`].
+    pub effect_gains: crate::effects::EffectGains,
     /// Codemasters/EA family listen port (classic float array, modern F1,
     /// and EA Sports WRC all arrive here, told apart by length and header).
     pub codemasters_port: u16,
@@ -116,6 +134,8 @@ impl Default for Config {
             // 100 wants a hardware feel-test, not arithmetic.
             pitch_pct: 25,
             cylinders: crate::synth::DEFAULT_CYLINDERS,
+            effects: true,
+            effect_gains: crate::effects::EffectGains::default(),
             leds: true,
             codemasters_port: codemasters::DEFAULT_PORT,
             pcars_port: pcars::DEFAULT_PORT,
@@ -290,12 +310,26 @@ impl Config {
                         cfg.relay_port = v;
                     }
                 }
+                "effects" => {
+                    if let Some(v) = parse_bool(raw) {
+                        cfg.effects = v;
+                    }
+                }
                 "g923.ffb_invert" => {
                     if let Some(v) = parse_bool(raw) {
                         cfg.g923_ffb_invert = v;
                     }
                 }
                 _ => {
+                    // One arm serves all ten layers: `effect_<name>`.
+                    if let Some(name) = key.strip_prefix("effect_") {
+                        if let (Some(id), Some(v)) =
+                            (crate::effects::EffectId::from_key(name), parse_percent(raw))
+                        {
+                            cfg.effect_gains.set(id, v);
+                        }
+                        continue;
+                    }
                     let Some(rest) = key.strip_prefix("game.") else { continue };
                     let Some((id, field)) = rest.rsplit_once('.') else { continue };
                     if id.is_empty() {
@@ -332,11 +366,16 @@ impl Config {
         out.push_str(&format!("enabled={}\n", u8::from(self.enabled)));
         out.push_str(&format!("intensity={}\n", self.intensity));
         out.push_str(&format!("pitch={}\n", self.pitch_pct));
+        out.push_str(&format!("cylinders={}\n", self.cylinders));
         out.push_str(&format!("leds={}\n", u8::from(self.leds)));
         out.push_str(&format!("port.codemasters={}\n", self.codemasters_port));
         out.push_str(&format!("port.pcars={}\n", self.pcars_port));
         out.push_str(&format!("port.beamng={}\n", self.beamng_port));
         out.push_str(&format!("port.relay={}\n", self.relay_port));
+        out.push_str(&format!("effects={}\n", u8::from(self.effects)));
+        for id in crate::effects::EffectId::ALL {
+            out.push_str(&format!("effect_{}={}\n", id.key(), self.effect_gains.get(id)));
+        }
         out.push_str(&format!("g923.ffb_invert={}\n", u8::from(self.g923_ffb_invert)));
         for (id, game) in &self.games {
             out.push_str(&format!("game.{id}.enabled={}\n", u8::from(game.enabled)));
@@ -396,11 +435,23 @@ mod tests {
     #[test]
     fn save_load_round_trips() {
         let path = tempdir().join(FILE_NAME);
+        let mut gains = crate::effects::EffectGains::default();
+        for (i, id) in crate::effects::EffectId::ALL.into_iter().enumerate() {
+            // A distinct value per layer, so a writer that transposed two
+            // of them would not round-trip.
+            gains.set(id, (i as u8) * 7 + 3);
+        }
         let mut cfg = Config {
             enabled: false,
             intensity: 42,
-            pitch_pct: 50, cylinders: 4,
+            pitch_pct: 50,
+            // Deliberately not the default: this field was written to the
+            // parser but not to the writer, and a round-trip test that
+            // happens to pick the default value cannot see that.
+            cylinders: 8,
             leds: false,
+            effects: false,
+            effect_gains: gains,
             codemasters_port: 30500,
             pcars_port: 5607,
             beamng_port: 4445,
