@@ -2969,6 +2969,7 @@ struct hidpp_ff_private_data {
 	u8 restore_attempts;		/* capped; a persistent writer wins */
 	bool restore_gave_up;		/* so the give-up line logs once */
 	bool restore_probed;		/* so the first poll result logs once */
+	u8 restore_read_fails;		/* consecutive aperture-read failures */
 };
 
 struct hidpp_ff_work_data {
@@ -3510,6 +3511,7 @@ static ssize_t hidpp_ff_range_restore_store(struct device *dev,
 		/* And report the next poll's outcome again, so a retry
 		 * produces evidence rather than repeating the silence. */
 		data->restore_probed = false;
+		data->restore_read_fails = 0;
 	}
 	WRITE_ONCE(data->restore_enabled, on);
 	return count;
@@ -3521,6 +3523,13 @@ static DEVICE_ATTR(range_restore, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROT
 #define HIDPP_FF_RANGE_POLL_MS		2000
 /* Give up after this many restores; a persistent external writer wins. */
 #define HIDPP_FF_RANGE_MAX_ATTEMPTS	3
+/*
+ * Consecutive failed aperture reads before saying so a second time. One
+ * failure means nothing: the same read succeeds at probe on a wheel that
+ * later times out, so a miss mid-session is most likely contention with a
+ * game's force-feedback traffic rather than a wheel that cannot answer.
+ */
+#define HIDPP_FF_RANGE_READ_FAILS_MAX	10
 /*
  * How far off centre the rim may be, as a fraction of its full travel, for a
  * range write to be considered safe. A range change while the rim is
@@ -3609,21 +3618,35 @@ static void hidpp_ff_range_poll_work(struct work_struct *work)
 	ret = hidpp_ff_read_aperture(data, &live);
 	if (ret) {
 		/*
-		 * Say so, once per enable. This is an opt-in diagnostic
-		 * feature, and it used to fail here in total silence: no
-		 * line on a failed read, none on agreement either, so a
-		 * wheel where the restore cannot work looked exactly like
-		 * one where it worked and was not needed. The owner had no
-		 * way to tell those apart, and neither did we (issue #27).
+		 * Report it, but do not pronounce on it. This used to fail
+		 * in total silence, which was worse; the first fix then
+		 * overcorrected and called a single failure proof that the
+		 * restore could never work here. It is not. The same read
+		 * succeeds during probe on the very wheel that timed out
+		 * later (issue #27), so a failure mid-session is far more
+		 * likely to be contention with a game's force-feedback
+		 * traffic than a wheel that cannot answer at all.
+		 *
+		 * So: say it failed, keep trying, and only call it
+		 * persistent once it has earned that.
 		 */
+		if (data->restore_read_fails < HIDPP_FF_RANGE_READ_FAILS_MAX)
+			data->restore_read_fails++;
+
 		if (!data->restore_probed) {
 			data->restore_probed = true;
 			hid_info(hid,
-				 "range restore: cannot read the wheel's operating range (%d), so it cannot put anything back on this wheel\n",
+				 "range restore: could not read the operating range (%d); still trying\n",
 				 ret);
+		} else if (data->restore_read_fails == HIDPP_FF_RANGE_READ_FAILS_MAX) {
+			data->restore_read_fails++;	/* log this once only */
+			hid_info(hid,
+				 "range restore: the operating range has been unreadable for %u polls; if a game is running this is most likely HID++ contention, not a fault\n",
+				 HIDPP_FF_RANGE_READ_FAILS_MAX);
 		}
 		goto rearm;
 	}
+	data->restore_read_fails = 0;
 
 	/*
 	 * The first successful read after each enable, reported once. It is

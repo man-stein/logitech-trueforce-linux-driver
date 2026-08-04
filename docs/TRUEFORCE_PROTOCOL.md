@@ -196,8 +196,19 @@ Two firmware behaviours discovered while reproducing this
 | Wheel | Honours type-`0x0e`? |
 |---|---|
 | RS50 | yes, root-caused here |
-| G923 Xbox (`c26e`) | yes, an owner's ACC session locks to 90 (issue #27) |
+| G923 Xbox (`c26e`) | **no**, see below |
 | G923 PlayStation (`c266`) | **no**, tested on hardware |
+
+The Xbox edition entry above previously read "yes", inferred from an owner
+reporting a 90 degree lock in ACC. That inference was wrong, and the same
+owner disproved it: in ACC's own config screen his rim turns its full 900
+degrees and the input bar tracks the whole way, with the limit appearing
+only on track. A real operating-range change would soft-stop the rim
+everywhere, menus included. So the wheel is never reconfigured on that
+edition; the game clamps its own steering because it believes the wheel has
+90 degrees of travel, which it gets from the TrueForce SDK falling back to
+the minimum of the legal range when it cannot reach G HUB. Nothing on the
+wheel is wrong, so there is nothing for a range restore to put back.
 
 The PlayStation edition was tested directly: a live TrueForce session was
 established (full init sequence sent, silent stream running, confirmed by the
