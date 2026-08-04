@@ -5,6 +5,35 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Changed
+
+- **The G923 Xbox edition's `range_restore` is now on by default**, matching
+  `wheel_range_restore` on the direct-drive wheels. A wheel a game has
+  collapsed to 90 degrees is unusable, and leaving the cure behind a switch
+  only helps people who read the issue tracker. It still never writes unless
+  the wheel disagrees with the range this driver set, never while the rim is
+  away from centre, and never more than three times in a session. Set it to
+  `0` to stop it.
+
+### Fixed
+
+- **A single failed range read no longer reports the restore as impossible.**
+  The message shipped in 0.26.0 said the wheel could not be read at all, on
+  the strength of one timeout. The same read succeeds during probe on that
+  wheel, so a miss mid-session is most likely contention with a game's
+  force-feedback traffic. It now says the read failed and that it is still
+  trying, and only remarks on persistence after ten consecutive misses
+  (issue #27).
+
+- **`docs/TRUEFORCE_PROTOCOL.md` listed the G923 Xbox edition as honouring
+  the operating-range push.** It does not: an owner's rim keeps its full
+  travel in ACC's config screen while the limit appears only on track, which
+  a real range change could not do. The game clamps its own steering there,
+  because the TrueForce SDK falls back to the minimum of the legal range when
+  it cannot reach G HUB (issue #27).
+
 ## 0.26.0 - 2026-08-03
 
 ### Added

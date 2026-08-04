@@ -2965,7 +2965,7 @@ struct hidpp_ff_private_data {
 	 */
 	struct delayed_work range_poll;
 	struct input_dev *idev;		/* for the stillness check; not owned */
-	bool restore_enabled;		/* range_restore sysfs, default 0 */
+	bool restore_enabled;		/* range_restore sysfs, default 1 */
 	u8 restore_attempts;		/* capped; a persistent writer wins */
 	bool restore_gave_up;		/* so the give-up line logs once */
 	bool restore_probed;		/* so the first poll result logs once */
@@ -3876,10 +3876,22 @@ static int hidpp_ff_init(struct hidpp_device *hidpp,
 	/*
 	 * Operating-range restore. The input device is kept for the rim
 	 * stillness check only, and is the same one this force-feedback
-	 * device hangs off, so it outlives the poll. Off until asked for.
+	 * device hangs off, so it outlives the poll.
+	 *
+	 * On by default, matching the direct-drive wheels. A wheel that a
+	 * game has collapsed to 90 degrees is unusable, and leaving the cure
+	 * behind a switch nobody knows about helps only the people who read
+	 * the issue tracker.
+	 *
+	 * The guards are what make that safe rather than the default being
+	 * off: it never writes unless the wheel disagrees with the range this
+	 * driver set, never while the rim is away from centre, and never more
+	 * than HIDPP_FF_RANGE_MAX_ATTEMPTS times in a session, after which it
+	 * concedes to whatever is fighting it. Set range_restore to 0 to stop
+	 * it entirely.
 	 */
 	data->idev = dev;
-	data->restore_enabled = false;
+	data->restore_enabled = true;
 	data->restore_attempts = 0;
 	data->restore_gave_up = false;
 	INIT_DELAYED_WORK(&data->range_poll, hidpp_ff_range_poll_work);

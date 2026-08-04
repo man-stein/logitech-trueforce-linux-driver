@@ -1163,7 +1163,8 @@ Force feedback and TrueForce are both hardware-confirmed on this edition
 #### range_restore
 
 **Access**: Read/Write, mode 0664
-**Default**: `0`, off
+**Default**: `1`, on (matching `wheel_range_restore` on the direct-drive
+wheels)
 
 Put the rotation range back when a game moves it.
 
@@ -1174,7 +1175,15 @@ feature entirely, so nothing is notified, and a title configured for 90
 degrees silently locks the wheel to 90 with a soft stop there. The SDK sends
 it once at session start, so putting the range back sticks for that session.
 
-With this set to `1`, the driver re-reads the range the wheel is actually
+On this edition specifically, that push does not appear to reach the wheel:
+an owner's rim keeps its full travel in ACC's config screen while the limit
+shows up only on track, which means the game is clamping its own steering
+rather than the wheel being reconfigured (see `docs/TRUEFORCE_PROTOCOL.md`).
+So this is expected to find nothing to do there. It is on regardless,
+because the cost of watching is a read every two seconds and the cost of not
+watching is an unusable wheel for anyone whose game does write the range.
+
+While on, the driver re-reads the range the wheel is actually
 enforcing every two seconds and re-applies the configured one if a game has
 moved it. It gives up after three restores and logs once, so a program that
 genuinely wants a different range wins rather than being fought forever;
