@@ -99,7 +99,12 @@ static void dump(const char *tag, const unsigned char *buf, DWORD n)
 	for (i = 0; i < n; i += 16) {
 		hex[0] = txt[0] = 0;
 		for (j = 0; j < 16 && i + j < n; j++) {
-			sprintf(hex + 3 * j, "%02x ", buf[i + j]);
+			/* Bounded rather than sprintf: the arithmetic here is
+			 * in range, but a hex dumper is exactly the sort of
+			 * thing that grows a wider field later and stops
+			 * being in range quietly. */
+			snprintf(hex + 3 * j, sizeof(hex) - 3 * j, "%02x ",
+				 buf[i + j]);
 			txt[j] = (buf[i + j] >= 32 && buf[i + j] < 127)
 				 ? (char)buf[i + j] : '.';
 		}
