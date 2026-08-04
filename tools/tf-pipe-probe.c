@@ -32,9 +32,16 @@
  *
  *   x86_64-w64-mingw32-gcc -O2 -o tf-pipe-probe.exe tools/tf-pipe-probe.c
  *
- * Run it BEFORE launching the game, with the same WINEPREFIX the game uses.
- * For a Proton title that is
- * ~/.steam/steam/steamapps/compatdata/<appid>/pfx.
+ * Running it is fiddlier than it looks, and the obvious order does not work.
+ * Steam refuses to launch the game while something else already holds its
+ * prefix, so starting the probe first blocks the game (found the hard way,
+ * issue #27). Start the GAME first, then get a shell on the same prefix and
+ * start the probe there:
+ *
+ *   protontricks -c 'wine C:\\tf-pipe-probe.exe' <appid>
+ *
+ * The client polls continuously, so it finds the pipe within milliseconds of
+ * the probe appearing; being late is not a problem.
  *
  * STATUS: built and smoke-tested. It serves the pipe and waits as intended.
  * What it has NOT yet captured is a real conversation, because the SDK only
@@ -61,7 +68,9 @@
 
 #define PIPE_NAME "\\\\.\\pipe\\logi.trueforce.connect"
 /* The SDK gives up after a while; outlive a game's whole startup. */
-#define WAIT_SECONDS 180
+#define WAIT_SECONDS 60
+/* Alternating message/byte mode, so several of each get offered. */
+#define MAX_ATTEMPTS 6
 
 static FILE *logfp;
 
@@ -113,29 +122,57 @@ static void dump(const char *tag, const unsigned char *buf, DWORD n)
 	}
 }
 
-/* Read until the peer goes away, dumping everything. */
-static void pump(HANDLE h, const char *role)
+/*
+ * Read until the peer goes away, dumping everything. Returns whether any
+ * bytes actually arrived, which is what tells a rejected pipe mode apart
+ * from a client that simply had nothing to say.
+ */
+static int pump(HANDLE h, const char *role)
 {
 	unsigned char buf[4096];
 	DWORD n;
+	int got = 0;
 
-	say("%s: connected, reading (Ctrl-C to stop)", role);
+	say("%s: reading", role);
 	for (;;) {
 		if (!ReadFile(h, buf, sizeof(buf), &n, NULL)) {
-			say("%s: read ended (error %lu)", role,
-			    (unsigned long)GetLastError());
-			return;
+			DWORD e = GetLastError();
+			say("%s: read ended (error %lu%s)", role,
+			    (unsigned long)e,
+			    e == ERROR_BROKEN_PIPE ? ", peer closed" : "");
+			return got;
 		}
 		if (n == 0)
 			continue;
+		got = 1;
 		dump(role, buf, n);
 	}
+}
+
+/* Wait for a client, or give up after WAIT_SECONDS. */
+static int wait_for_client(HANDLE h)
+{
+	int i;
+
+	for (i = 0; i < WAIT_SECONDS; i++) {
+		if (ConnectNamedPipe(h, NULL) ||
+		    GetLastError() == ERROR_PIPE_CONNECTED)
+			return 1;
+		if (GetLastError() != ERROR_PIPE_LISTENING &&
+		    GetLastError() != ERROR_IO_PENDING) {
+			say("  connect wait failed (error %lu)",
+			    (unsigned long)GetLastError());
+			return 0;
+		}
+		Sleep(1000);
+	}
+	return 0;
 }
 
 int main(void)
 {
 	HANDLE h;
-	int i;
+	int attempt;
 
 	/*
 	 * Log to a fixed, findable place rather than the working directory.
@@ -168,46 +205,75 @@ int main(void)
 	    (unsigned long)GetLastError());
 
 	/*
-	 * Step 2: serve it ourselves and see whether the SDK comes to us. This
-	 * is the case that would confirm the hypothesis: the SDK is a client
-	 * looking for a G HUB that does not exist under Proton.
+	 * Step 2: serve it ourselves and see whether the SDK comes to us.
+	 *
+	 * The mode matters and we do not know it. A first run in byte mode had
+	 * the SDK connect within 54 ms and drop again immediately with
+	 * ERROR_BROKEN_PIPE, having sent nothing at all (issue #27). A client
+	 * that wants message framing calls SetNamedPipeHandleState after
+	 * connecting, which fails against a byte-mode server, and closing is
+	 * exactly what it would then do.
+	 *
+	 * So do not ask the person running this to guess. Alternate the two
+	 * modes across attempts until one of them produces bytes. The SDK
+	 * retries continuously, so it will find whichever we are offering.
 	 */
-	h = CreateNamedPipeA(PIPE_NAME,
-			     PIPE_ACCESS_DUPLEX,
-			     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-			     PIPE_UNLIMITED_INSTANCES,
-			     4096, 4096, 0, NULL);
-	if (h == INVALID_HANDLE_VALUE) {
-		say("FAILED to create the pipe (error %lu). Cannot probe.",
-		    (unsigned long)GetLastError());
-		goto done;
-	}
+	for (attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		int message_mode = (attempt % 2) == 0;
+		DWORD type = message_mode
+			   ? (PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT)
+			   : (PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT);
 
-	say("serving. NOW START THE GAME. Waiting up to %d seconds...", WAIT_SECONDS);
-	for (i = 0; i < WAIT_SECONDS; i++) {
-		if (ConnectNamedPipe(h, NULL) ||
-		    GetLastError() == ERROR_PIPE_CONNECTED) {
-			say("RESULT: the SDK CONNECTED to us.");
-			say("  Confirms it is a client looking for a peer that");
-			say("  does not exist under Proton. Whatever follows is");
-			say("  the protocol we would have to answer.");
-			pump(h, "sdk->us");
+		h = CreateNamedPipeA(PIPE_NAME, PIPE_ACCESS_DUPLEX, type,
+				     PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, NULL);
+		if (h == INVALID_HANDLE_VALUE) {
+			say("FAILED to create the pipe (error %lu). Cannot probe.",
+			    (unsigned long)GetLastError());
+			goto done;
+		}
+
+		say("attempt %d/%d: serving in %s mode, waiting up to %d s"
+		    " (start the game if it is not running)",
+		    attempt + 1, MAX_ATTEMPTS,
+		    message_mode ? "MESSAGE" : "BYTE", WAIT_SECONDS);
+
+		if (!wait_for_client(h)) {
+			say("  nothing connected; trying the other mode");
+			CloseHandle(h);
+			continue;
+		}
+
+		{
+			ULONG pid = 0;
+			if (GetNamedPipeClientProcessId(h, &pid))
+				say("  client connected (pid %lu)", (unsigned long)pid);
+			else
+				say("  client connected");
+		}
+
+		if (pump(h, message_mode ? "sdk->us (message)" : "sdk->us (byte)")) {
+			say("RESULT: captured traffic in %s mode. That hex is the"
+			    " protocol we would have to answer.",
+			    message_mode ? "MESSAGE" : "BYTE");
 			DisconnectNamedPipe(h);
 			CloseHandle(h);
 			goto done;
 		}
-		if (GetLastError() != ERROR_PIPE_LISTENING &&
-		    GetLastError() != ERROR_IO_PENDING) {
-			say("connect wait failed (error %lu)",
-			    (unsigned long)GetLastError());
-			break;
-		}
-		Sleep(1000);
+
+		/*
+		 * Connected but said nothing. That is the signature of a
+		 * rejected pipe mode rather than an idle client, so the other
+		 * mode is the next thing worth offering.
+		 */
+		say("  connected then dropped without sending anything:"
+		    " %s mode looks wrong, switching",
+		    message_mode ? "MESSAGE" : "BYTE");
+		DisconnectNamedPipe(h);
+		CloseHandle(h);
 	}
-	say("RESULT: nothing connected in %d seconds.", WAIT_SECONDS);
-	say("  Either the SDK never tries this pipe under Proton, or it gave");
-	say("  up before the game started. Start the probe first, then the game.");
-	CloseHandle(h);
+	say("RESULT: the SDK connected but never sent anything in either mode.");
+	say("  Worth reporting as-is: it narrows what the peer must do before");
+	say("  the client will talk, and that is still progress.");
 
 done:
 	say("done; transcript in tf-pipe-probe.log");
