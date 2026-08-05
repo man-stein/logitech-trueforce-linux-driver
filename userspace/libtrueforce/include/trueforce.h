@@ -76,6 +76,15 @@ int     logiWheelSetForceMode(int index, int mode);
  * one-argument calls, which no caller written against the real SDK could
  * have used.
  */
+/*
+ * WARNING: the signatures in this header are not all verified against the
+ * real library. Three that were checked turned out to be wrong, including
+ * the two rotation getters below and logiTrueForceAvailable, whose first
+ * argument is a pointer rather than an index. Anything not listed as
+ * verified in docs/SDK_ABI_NOTES.md should be treated as unconfirmed, and
+ * checked against the shipped DLL's machine code before being relied on.
+ */
+
 int     logiWheelGetOperatingRangeDegrees(int index, double *out);
 int     logiWheelGetOperatingRangeRadians(int index, double *out);
 int     logiWheelGetOperatingRangeBoundsDegrees(int index, double *lo, double *hi);
