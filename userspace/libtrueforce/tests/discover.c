@@ -27,13 +27,19 @@ int main(void)
 		extern struct logitf_device *logitf_table(void);
 		struct logitf_device *t;
 
-		if (!logiTrueForceAvailable(i))
+		bool avail = false, supported = false, paused = false;
+
+		/*
+		 * These report through an out parameter and return a status,
+		 * matching the real SDK; see docs/SDK_ABI_NOTES.md.
+		 */
+		if (logiTrueForceAvailable(&avail) != LOGITF_OK || !avail)
 			continue;
 		t = logitf_table() + i;
+		logiTrueForceSupported(i, &supported);
+		logiTrueForceIsPaused(i, &paused);
 		printf("  [%d] supported=%s, paused=%s\n",
-		       i,
-		       logiTrueForceSupported(i) ? "yes" : "no",
-		       logiTrueForceIsPaused(i) ? "yes" : "no");
+		       i, supported ? "yes" : "no", paused ? "yes" : "no");
 		printf("      hidraw: %s\n", t->hidraw_path[0] ? t->hidraw_path : "(none)");
 		printf("      evdev:  %s\n", t->evdev_path[0] ? t->evdev_path : "(none)");
 		printf("      by-id:  %s\n", t->by_id[0] ? t->by_id : "(none)");

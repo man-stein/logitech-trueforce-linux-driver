@@ -19,7 +19,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "dllOpen failed\n");
 		return 1;
 	}
-	if (!logiTrueForceAvailable(index)) {
+	if (!({ bool _a = false; logiTrueForceAvailable(&_a); _a; })) {
 		fprintf(stderr, "no wheel at index %d\n", index);
 		return 1;
 	}

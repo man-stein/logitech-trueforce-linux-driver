@@ -57,16 +57,26 @@ int DllUnregisterServer(void)
 
 /* ---- Discovery / availability ---- */
 
-bool logiTrueForceAvailable(int index)
+int logiTrueForceAvailable(bool *out)
 {
 	struct logitf_device *dev;
 
-	return logitf_find_by_index(index, &dev) == LOGITF_OK;
+	/*
+	 * One argument, not an index: the real library null-checks its first
+	 * argument and returns a bad-parameter status, so it is the out
+	 * pointer (see docs/SDK_ABI_NOTES.md).
+	 */
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	*out = logitf_find_by_index(0, &dev) == LOGITF_OK;
+	return LOGITF_OK;
 }
 
-bool logiTrueForceSupported(int index)
+int logiTrueForceSupported(int index, bool *out)
 {
-	return logiTrueForceAvailable(index);
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	{ (void)index; return logiTrueForceAvailable(out); }
 }
 
 bool logiTrueForceSupportedByDirectInputA(const void *di_device)
@@ -122,10 +132,12 @@ int logiWheelClose(int index)
 	return LOGITF_OK;
 }
 
-bool logiWheelSdkHasControl(int index)
+int logiWheelSdkHasControl(int index, bool *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	(void)index;
-	return false;
+	{ if (out) *out = false; return LOGITF_OK; }
 }
 
 /* ---- Versioning ---- */
@@ -138,10 +150,10 @@ int logiWheelGetCoreLibraryVersion(int *major, int *minor, int *build)
 	return LOGITF_OK;
 }
 
-int logiWheelGetVersion(int index, int *major, int *minor, int *build)
+int logiWheelGetVersion(int *major, int *minor, int *build)
 {
 	struct logitf_device *dev;
-	int rc = logitf_find_by_index(index, &dev);
+	int rc = logitf_find_by_index(0, &dev);
 
 	if (rc)
 		return rc;
@@ -280,28 +292,48 @@ static struct logitf_device *angle_dev(int index)
 	return dev;
 }
 
-double logiTrueForceGetAngleDegrees(int index)
+int logiTrueForceGetAngleDegrees(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev = angle_dev(index);
 
-	return dev ? logitf_status_angle_deg(dev) : 0.0;
+	{ if (out) *out = dev ? logitf_status_angle_deg(dev) : 0.0; return LOGITF_OK; }
 }
 
-double logiTrueForceGetAngleRadians(int index)
+int logiTrueForceGetAngleRadians(int index, double *out)
 {
-	return logiTrueForceGetAngleDegrees(index) * (M_PI / 180.0);
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	{
+		double d;
+		int st = logiTrueForceGetAngleDegrees(index, &d);
+		if (st == LOGITF_OK && out)
+			*out = d * (M_PI / 180.0);
+		return st;
+	}
 }
 
-double logiTrueForceGetAngularVelocityDegrees(int index)
+int logiTrueForceGetAngularVelocityDegrees(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev = angle_dev(index);
 
-	return dev ? logitf_status_velocity_deg_s(dev) : 0.0;
+	{ if (out) *out = dev ? logitf_status_velocity_deg_s(dev) : 0.0; return LOGITF_OK; }
 }
 
-double logiTrueForceGetAngularVelocityRadians(int index)
+int logiTrueForceGetAngularVelocityRadians(int index, double *out)
 {
-	return logiTrueForceGetAngularVelocityDegrees(index) * (M_PI / 180.0);
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	{
+		double d;
+		int st = logiTrueForceGetAngularVelocityDegrees(index, &d);
+		if (st == LOGITF_OK && out)
+			*out = d * (M_PI / 180.0);
+		return st;
+	}
 }
 
 /* ---- Kinetic force ---- */
@@ -316,13 +348,16 @@ int logiTrueForceSetTorqueKF(int index, double torque_nm)
 	return logitf_kf_set_torque_nm(dev, torque_nm);
 }
 
-double logiTrueForceGetTorqueKF(int index)
+int logiTrueForceGetTorqueKF(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
 	if (logitf_find_by_index(index, &dev))
-		return 0.0;
-	return logitf_kf_get_torque_nm(dev);
+		return LOGITF_ERR_NOT_FOUND;
+	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
+	{ if (out) *out = logitf_kf_get_torque_nm(dev); return LOGITF_OK; }
 }
 
 int logiTrueForceClearKF(int index)
@@ -335,22 +370,28 @@ int logiTrueForceClearKF(int index)
 	return logitf_kf_clear(dev);
 }
 
-double logiTrueForceGetMaxContinuousTorqueKF(int index)
+int logiTrueForceGetMaxContinuousTorqueKF(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
 	if (logitf_find_by_index(index, &dev))
-		return 0.0;
-	return logitf_kf_max_continuous_nm(dev);
+		return LOGITF_ERR_NOT_FOUND;
+	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
+	{ if (out) *out = logitf_kf_max_continuous_nm(dev); return LOGITF_OK; }
 }
 
-double logiTrueForceGetMaxPeakTorqueKF(int index)
+int logiTrueForceGetMaxPeakTorqueKF(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
 	if (logitf_find_by_index(index, &dev))
-		return 0.0;
-	return logitf_kf_max_peak_nm(dev);
+		return LOGITF_ERR_NOT_FOUND;
+	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
+	{ if (out) *out = logitf_kf_max_peak_nm(dev); return LOGITF_OK; }
 }
 
 /*
@@ -360,7 +401,8 @@ double logiTrueForceGetMaxPeakTorqueKF(int index)
  */
 int    logiTrueForceSetTorqueKFPiecewise(int index, const double *s, int n) { (void)index; (void)s; (void)n; return LOGITF_ERR_NOT_SUPPORTED; }
 int    logiTrueForceSetGainKF(int index, double g) { (void)index; (void)g; return LOGITF_OK; }
-double logiTrueForceGetGainKF(int index) { (void)index; return 1.0; }
+int    logiTrueForceGetGainKF(int index, double *out)
+	{ (void)index; if (!out) return LOGITF_ERR_INVALID_ARG; *out = 1.0; return LOGITF_OK; }
 int    logiTrueForceSetReconstructionFilterKF(int index, int level) { (void)index; (void)level; return LOGITF_OK; }
 int    logiTrueForceGetReconstructionFilterKF(int index) { (void)index; return 0; }
 
@@ -557,16 +599,19 @@ int logiTrueForceSetGainTF(int index, double g)
 	return LOGITF_OK;
 }
 
-double logiTrueForceGetGainTF(int index)
+int logiTrueForceGetGainTF(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 	int v;
 
 	if (logitf_find_by_index(index, &dev))
-		return 1.0;
+		return LOGITF_ERR_NOT_FOUND;
+	if (0) { if (out) *out = 1.0; return LOGITF_OK; }
 	if (logitf_sysfs_read_int(dev, "wheel_trueforce", &v) < 0)
-		return 1.0;
-	return (double)v / 100.0;
+		{ if (out) *out = 1.0; return LOGITF_OK; }
+	{ if (out) *out = (double)v / 100.0; return LOGITF_OK; }
 }
 
 /* ---- Damping ---- */
@@ -587,23 +632,28 @@ int logiTrueForceSetDamping(int index, double d)
 	return LOGITF_OK;
 }
 
-double logiTrueForceGetDamping(int index)
+int logiTrueForceGetDamping(int index, double *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 	int v;
 
 	if (logitf_find_by_index(index, &dev))
-		return 0.0;
+		return LOGITF_ERR_NOT_FOUND;
+	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
 	if (logitf_sysfs_read_int(dev, "wheel_damping", &v) < 0)
-		return 0.0;
-	return (double)v / 100.0;
+		{ if (out) *out = 0.0; return LOGITF_OK; }
+	{ if (out) *out = (double)v / 100.0; return LOGITF_OK; }
 }
 
-double logiTrueForceGetDampingMax(int index) { (void)index; return 1.0; }
+int    logiTrueForceGetDampingMax(int index, double *out)
+	{ (void)index; if (!out) return LOGITF_ERR_INVALID_ARG; *out = 1.0; return LOGITF_OK; }
 
 /* ---- Haptic thread (stubs) ---- */
 
-double logiTrueForceGetHapticRate(int index) { (void)index; return 1000.0; }
+int    logiTrueForceGetHapticRate(int index, double *out)
+	{ (void)index; if (!out) return LOGITF_ERR_INVALID_ARG; *out = 1000.0; return LOGITF_OK; }
 int    logiTrueForceGetHapticThreadStatus(int index) { (void)index; return 0; }
 
 /* ---- Pause / resume ---- */
@@ -630,13 +680,16 @@ int logiTrueForceResume(int index)
 	return LOGITF_OK;
 }
 
-bool logiTrueForceIsPaused(int index)
+int logiTrueForceIsPaused(int index, bool *out)
 {
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
 	if (logitf_find_by_index(index, &dev))
-		return false;
-	return dev->tf_paused;
+		return LOGITF_ERR_NOT_FOUND;
+	if (0) { if (out) *out = false; return LOGITF_OK; }
+	{ if (out) *out = dev->tf_paused; return LOGITF_OK; }
 }
 
 int logiTrueForceSync(int index)

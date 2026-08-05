@@ -44,8 +44,8 @@ int  DllUnregisterServer(void);
 
 /* ---- Discovery ---- */
 
-bool logiTrueForceAvailable(int index);
-bool logiTrueForceSupported(int index);
+int     logiTrueForceAvailable(bool *out);
+int     logiTrueForceSupported(int index, bool *out);
 bool logiTrueForceSupportedByDirectInputA(const void *di_device);
 bool logiTrueForceSupportedByDirectInputW(const void *di_device);
 
@@ -57,12 +57,16 @@ bool logiWheelSupportedByDirectInputW(const void *di_device);
 int  logiWheelOpenByDirectInputA(const void *di_device);
 int  logiWheelOpenByDirectInputW(const void *di_device);
 int  logiWheelClose(int index);
-bool logiWheelSdkHasControl(int index);
+int     logiWheelSdkHasControl(int index, bool *out);
 
 /* ---- Versioning ---- */
 
 int  logiWheelGetCoreLibraryVersion(int *major, int *minor, int *build);
-int  logiWheelGetVersion(int index, int *major, int *minor, int *build);
+/*
+ * No index: the real library null-checks all three arguments, so all three
+ * are pointers, exactly like logiWheelGetCoreLibraryVersion.
+ */
+int  logiWheelGetVersion(int *major, int *minor, int *build);
 
 /* ---- Wheel operating range ---- */
 
@@ -100,21 +104,21 @@ int  logiWheelPlayLeds(int index, double current_rpm, double rpm_first_led, doub
 
 /* ---- Angle & angular velocity ---- */
 
-double logiTrueForceGetAngleDegrees(int index);
-double logiTrueForceGetAngleRadians(int index);
-double logiTrueForceGetAngularVelocityDegrees(int index);
-double logiTrueForceGetAngularVelocityRadians(int index);
+int     logiTrueForceGetAngleDegrees(int index, double *out);
+int     logiTrueForceGetAngleRadians(int index, double *out);
+int     logiTrueForceGetAngularVelocityDegrees(int index, double *out);
+int     logiTrueForceGetAngularVelocityRadians(int index, double *out);
 
 /* ---- Kinetic-force (classic constant torque) ---- */
 
 int    logiTrueForceSetTorqueKF(int index, double torque_nm);
-double logiTrueForceGetTorqueKF(int index);
+int     logiTrueForceGetTorqueKF(int index, double *out);
 int    logiTrueForceSetTorqueKFPiecewise(int index, const double *samples, int count);
 int    logiTrueForceClearKF(int index);
 int    logiTrueForceSetGainKF(int index, double gain);
-double logiTrueForceGetGainKF(int index);
-double logiTrueForceGetMaxContinuousTorqueKF(int index);
-double logiTrueForceGetMaxPeakTorqueKF(int index);
+int     logiTrueForceGetGainKF(int index, double *out);
+int     logiTrueForceGetMaxContinuousTorqueKF(int index, double *out);
+int     logiTrueForceGetMaxPeakTorqueKF(int index, double *out);
 int    logiTrueForceSetReconstructionFilterKF(int index, int level);
 int    logiTrueForceGetReconstructionFilterKF(int index);
 
@@ -138,24 +142,24 @@ double logiTrueForceGetTorqueTF(int index);
 int    logiTrueForceGetTorqueTFRateBounds(int index, double *rate_min_hz, double *rate_max_hz);
 int    logiTrueForceClearTF(int index);
 int    logiTrueForceSetGainTF(int index, double gain);
-double logiTrueForceGetGainTF(int index);
+int     logiTrueForceGetGainTF(int index, double *out);
 
 /* ---- Damping ---- */
 
 int    logiTrueForceSetDamping(int index, double damping);
-double logiTrueForceGetDamping(int index);
-double logiTrueForceGetDampingMax(int index);
+int     logiTrueForceGetDamping(int index, double *out);
+int     logiTrueForceGetDampingMax(int index, double *out);
 
 /* ---- Haptic thread ---- */
 
-double logiTrueForceGetHapticRate(int index);
+int     logiTrueForceGetHapticRate(int index, double *out);
 int    logiTrueForceGetHapticThreadStatus(int index);
 
 /* ---- Pause/resume/sync ---- */
 
 int  logiTrueForcePause(int index);
 int  logiTrueForceResume(int index);
-bool logiTrueForceIsPaused(int index);
+int     logiTrueForceIsPaused(int index, bool *out);
 int  logiTrueForceSync(int index);
 
 /* ---- Advanced ---- */
