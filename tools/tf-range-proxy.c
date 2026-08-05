@@ -57,6 +57,7 @@ static void say(const char *fmt, ...)
 	if (!log_ready)
 		return;
 	EnterCriticalSection(&loglock);
+	OutputDebugStringA("tf-range-proxy: entered");
 	if (logfp) {
 		SYSTEMTIME t;
 		GetLocalTime(&t);
@@ -67,6 +68,19 @@ static void say(const char *fmt, ...)
 		va_end(ap);
 		fprintf(logfp, "\n");
 		fflush(logfp);
+	}
+	/*
+	 * Also to the debug channel, always. A file needs somewhere writable
+	 * and a person who knows where to look; this shows up in a Proton log
+	 * with no cooperation from either, and is the difference between "the
+	 * library did not load" and "the library loaded and could not say so".
+	 */
+	{
+		char line[512];
+		va_start(ap, fmt);
+		vsnprintf(line, sizeof(line), fmt, ap);
+		va_end(ap);
+		OutputDebugStringA(line);
 	}
 	LeaveCriticalSection(&loglock);
 }
@@ -194,8 +208,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 		char path[MAX_PATH + 32], *slash;
 
 		InitializeCriticalSection(&loglock);
-		logfp = fopen("C:\\tf-range-proxy.log", "a");
 		log_ready = 1;
+		OutputDebugStringA("tf-range-proxy: DllMain PROCESS_ATTACH");
 
 		/*
 		 * Load Logitech's library by absolute path, now, before anything
@@ -219,6 +233,16 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 		slash = strrchr(path, '\\');
 		if (!slash)
 			return FALSE;
+		/*
+		 * The log goes beside the DLL rather than at C:\\. The prefix
+		 * root is not always writable by the game, and a log that
+		 * silently fails to appear is indistinguishable from a library
+		 * that never loaded, which cost a whole test round (issue #27).
+		 */
+		strcpy(slash + 1, "tf-range-proxy.log");
+		logfp = fopen(path, "a");
+		say("--- attach ---");
+
 		strcpy(slash + 1, "trueforce_real.dll");
 		if (!LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)) {
 			/*
