@@ -28,7 +28,14 @@ UDEV_G923_DST="/etc/udev/rules.d/72-logitech-g923-rebind.rules"
 UDEV_G923_XBOX_DST="/etc/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
 MODPROBE_DST="/etc/modprobe.d/hid-logitech-dd.conf"
 MODESWITCH_DST="/usr/bin/logi-g923-modeswitch"
-WHEEL_PIDS="c276 c272 c268"
+# Direct-drive wheels, then the G923 editions. doctor was written before the
+# G923 was supported and checked only the first three, so every G923 owner was
+# told "no wheel detected" with the wheel plugged in and working, and the
+# driver-health section was skipped as a consequence (issue #27).
+WHEEL_PIDS_DD="c276 c272 c268"
+WHEEL_PIDS_G923="c266 c267 c26e"
+WHEEL_PID_G923_CONSOLE="c26d"
+WHEEL_PIDS="$WHEEL_PIDS_DD $WHEEL_PIDS_G923"
 # Steam appids of the Logitech-SDK sims for launch-option checks:
 #   ACC, AC EVO, AC, AMS2, Le Mans Ultimate, rFactor 2
 SDK_SIM_APPIDS="805550 3058630 244210 1066890 2399420 365960"
@@ -39,8 +46,22 @@ wrn()  { printf '  \033[33mWARN\033[0m %s\n' "$1"; warn=$((warn+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 say()  { printf '\033[1m%s\033[0m\n' "$1"; }
 
+# The direct-drive wheels expose wheel_*; the G923 exposes the classic set
+# (range, gain, autocenter) and no wheel_* at all. Look for either.
 find_wheel_sysfs() {
 	ls -d /sys/class/hidraw/*/device/wheel_range 2>/dev/null | head -1 | xargs -r dirname
+}
+
+find_g923_sysfs() {
+	local d
+	for d in /sys/class/hidraw/*/device/range; do
+		[ -e "$d" ] || continue
+		# wheel_range means a direct-drive wheel, which the caller above
+		# already handles; this is only for the classic-only wheels.
+		[ -e "$(dirname "$d")/wheel_range" ] && continue
+		dirname "$d"
+		return
+	done
 }
 
 steam_roots() {
@@ -87,20 +108,35 @@ doctor() {
 	echo
 	say "[2/7] Wheel"
 	local usbline
-	usbline="$(lsusb 2>/dev/null | grep -iE "046d:(c276|c272|c268)")"
+	local pid_re console_line
+	pid_re="$(echo "$WHEEL_PIDS" | tr ' ' '|')"
+	usbline="$(lsusb 2>/dev/null | grep -iE "046d:($pid_re)")"
+	console_line="$(lsusb 2>/dev/null | grep -iE "046d:$WHEEL_PID_G923_CONSOLE")"
 	if [ -n "$usbline" ]; then
-		ok "wheel on USB: ${usbline#*ID }"
+		# One line per wheel. More than one is normal here (a G923 and a
+		# direct-drive base together), and printing the list as a single
+		# value left every wheel after the first unlabelled.
+		while IFS= read -r l; do
+			[ -n "$l" ] && ok "wheel on USB: ${l#*ID }"
+		done <<< "$usbline"
+	elif [ -n "$console_line" ]; then
+		# Not "no wheel": a G923 Xbox that never left console mode. Saying
+		# nothing was found sends the owner looking for the wrong fault.
+		bad "G923 Xbox edition is in console mode ($WHEEL_PID_G923_CONSOLE) and unusable until it switches to $WHEEL_PIDS_G923; install usb_modeswitch and replug (see [4] for the rule and helper)"
 	else
 		wrn "no wheel detected on USB (plug it in and re-run doctor; everything below that needs the wheel is skipped)"
 	fi
 
 	local bound_generic=0 bound_ours=0
-	for d in /sys/bus/hid/devices/0003:046D:C2{76,72,68}.*; do
+	local pid_up
+	for pid_up in $(echo "$WHEEL_PIDS" | tr 'a-z ' 'A-Z\n'); do
+	for d in /sys/bus/hid/devices/0003:046D:${pid_up}.*; do
 		[ -e "$d" ] || continue
 		case "$(basename "$(readlink -f "$d/driver" 2>/dev/null)")" in
 			logitech-dd) bound_ours=$((bound_ours+1));;
 			hid-generic) bound_generic=$((bound_generic+1));;
 		esac
+	done
 	done
 	if [ "$bound_ours" -gt 0 ] && [ "$bound_generic" -eq 0 ]; then
 		ok "all $bound_ours wheel interfaces bound to our driver"
@@ -110,16 +146,33 @@ doctor() {
 
 	echo
 	say "[3/7] Driver health"
-	local W
+	local W G
 	W="$(find_wheel_sysfs)"
+	G="$(find_g923_sysfs)"
 	if [ -n "$W" ]; then
 		ok "wheel_* sysfs present ($W)"
 		local fw
 		fw="$(cat "$W/wheel_firmware" 2>/dev/null | tr '\n' ' ')"
 		[ -n "$fw" ] && ok "firmware: $fw" || wrn "wheel_firmware unreadable"
 		ok "range=$(cat "$W/wheel_range" 2>/dev/null) strength=$(cat "$W/wheel_strength" 2>/dev/null)% mode=$(cat "$W/wheel_mode" 2>/dev/null)"
-	else
-		[ -n "$usbline" ] && bad "wheel on USB but no wheel_* sysfs - driver not bound (see [2])" \
+	fi
+	if [ -n "$G" ]; then
+		# A G923 has no wheel_* files at all. Reporting their absence as a
+		# fault told owners their driver was not bound when it was. Checked
+		# independently of the block above so a rig with both wheels gets
+		# both reported rather than whichever was found first.
+		ok "G923 classic sysfs present ($G)"
+		local g_range g_restore
+		g_range="$(cat "$G/range" 2>/dev/null)"
+		[ -n "$g_range" ] && ok "range=$g_range" || wrn "range unreadable"
+		g_restore="$(cat "$G/range_restore" 2>/dev/null)"
+		case "$g_restore" in
+			1) ok "range_restore on (puts the range back if a game moves it)";;
+			0) wrn "range_restore off (echo 1 > $G/range_restore to re-enable)";;
+		esac
+	fi
+	if [ -z "$W" ] && [ -z "$G" ]; then
+		[ -n "$usbline" ] && bad "wheel on USB but no sysfs attributes - driver not bound (see [2])" \
 			|| wrn "skipped (no wheel)"
 	fi
 

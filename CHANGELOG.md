@@ -9,6 +9,16 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Fixed
 
+- **`doctor` told every G923 owner their wheel was not plugged in.** It
+  looked for the three direct-drive USB ids only, so a G923 was invisible to
+  it however well the wheel was working, and the driver-health section was
+  skipped as a knock-on. It also read `wheel_*` attributes that a G923 does
+  not have, so even once found it would have called a healthy wheel unbound.
+  It now knows both wheel families and both attribute sets, reports a rig
+  with more than one wheel properly instead of leaving all but the first
+  unlabelled, and recognises a G923 Xbox still sitting in console mode
+  (`c26d`) as exactly that rather than as no wheel at all (issue #27).
+
 - **`doctor` told people to set a launch option they had already set.** It
   read `PROTON_ENABLE_HIDRAW=1` by finding the first line mentioning a
   game's app id anywhere in Steam's config and then taking the next
