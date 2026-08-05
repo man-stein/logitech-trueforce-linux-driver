@@ -8,6 +8,13 @@
 #   tf-pipe-probe.exe   listens on the pipe the SDK looks for, for diagnosis
 #
 # Requires: mingw-w64-gcc (Arch: pacman -S mingw-w64-gcc)
+#
+# tf-range-proxy.dll is COMMITTED to the repository, unlike everything else
+# built here. It has to be: it is installed into a prefix by
+# install-tf-shim.sh --range-proxy, and the people who need it are running
+# Linux without a Windows cross compiler. If you change tf-range-proxy.c,
+# run make here and commit the rebuilt DLL with it, or the shipped binary
+# and the source it claims to be drift apart.
 
 CC_WIN := x86_64-w64-mingw32-gcc
 CFLAGS_WIN := -O2 -Wall

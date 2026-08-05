@@ -207,6 +207,9 @@ __pycache__/
 # Internal planning/design scratch (not user docs)
 /docs/superpowers/
 
-# Built by tools/Makefile with a mingw cross compiler, not checked in.
-tools/*.dll
+# Built by tools/Makefile with a mingw cross compiler. The probe is a
+# diagnostic and stays out of the tree; the range proxy is committed, because
+# it is part of the install path and almost nobody running this has a mingw
+# cross compiler to build a Windows DLL with. Rebuild and commit it whenever
+# tools/tf-range-proxy.c changes: make -C tools
 tools/*.exe
