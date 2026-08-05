@@ -411,28 +411,10 @@ fn open_in_browser(url: &str) {
 }
 
 /// The exact launch-options string the Setup page's "Copy" button copies.
-const FFB_LAUNCH_OPTIONS: &str = "logi-ffb %command%";
-
-/// Copy `text` to the clipboard, best-effort: try `wl-copy` (Wayland), then
-/// `xclip -selection clipboard` (X11). Ignores every failure (no clipboard
-/// tool installed, no display server, ...) since the Setup page's launch-
-/// options field is itself selectable as a fallback. Meant to be called off
-/// the UI thread (`std::thread::spawn`) since a missing/hanging clipboard
-/// tool should never stall the window.
-fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    if Command::new("wl-copy").arg(text).status().is_ok_and(|s| s.success()) {
-        return;
-    }
-    if let Ok(mut child) = Command::new("xclip").args(["-selection", "clipboard"]).stdin(Stdio::piped()).spawn() {
-        if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-    }
-}
+// The logi-ffb launch options, from the registry that also resolves
+// them per game, so the standalone FFB panel cannot drift from the
+// per-game rows.
+const FFB_LAUNCH_OPTIONS: &str = logi_wheel_core::games::LAUNCH_LOGI_FFB;
 
 /// The SDK folder field's prefill: `$LOGITECH_TRUEFORCE_SDK_DIR` when set,
 /// else `~/.local/share/logitech-trueforce/sdk` (the installer script's
@@ -480,10 +462,23 @@ type GamesCache = Arc<Mutex<Vec<logi_wheel_core::launchers::DiscoveredGame>>>;
 /// fresh tf-sim.conf, and push it into `setup-games`. Called on the UI
 /// thread after every per-game simulated-TrueForce edit so both titles
 /// sharing a daemon id show the new value at once.
+/// What the attached wheel can do, for resolving each game's setup recipe.
+///
+/// Resolved fresh on every games rebuild rather than cached, so plugging a
+/// different wheel in and hitting Rescan re-answers the question. With no
+/// wheel found the general case is described (see
+/// [`games::WheelCaps::assumed`]) rather than a specific owner advised.
+fn wheel_caps() -> logi_wheel_core::games::WheelCaps {
+    match logi_wheel_core::Device::discover() {
+        Ok(d) => d.wheel_caps(),
+        Err(_) => logi_wheel_core::games::WheelCaps::assumed(),
+    }
+}
+
 fn refresh_games(app: &App, cache: &GamesCache) {
     let cfg = logi_wheel_core::tfsim::Config::load();
     let games = cache.lock().unwrap();
-    let items = bridge::setup_games(&games, &cfg);
+    let items = bridge::setup_games(&games, &cfg, wheel_caps());
     app.set_setup_games_summary(bridge::games_summary(&items).into());
     app.set_setup_games(slint::ModelRc::new(slint::VecModel::from(items)));
     app.set_addable_games(slint::ModelRc::new(slint::VecModel::from(bridge::addable_games(&games))));
@@ -508,7 +503,7 @@ fn scan_games(app_weak: slint::Weak<App>, cache: GamesCache) {
         *cache.lock().unwrap() = games.clone();
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = app_weak.upgrade() else { return };
-            let items = bridge::setup_games(&games, &cfg);
+            let items = bridge::setup_games(&games, &cfg, wheel_caps());
             app.set_setup_games_summary(bridge::games_summary(&items).into());
             app.set_setup_games(slint::ModelRc::new(slint::VecModel::from(items)));
             app.set_addable_games(slint::ModelRc::new(slint::VecModel::from(bridge::addable_games(&games))));
@@ -1042,6 +1037,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let dir = sdk_dir.lock().unwrap().clone();
         let (resolved, message) = sdk_status(&dir, installer_path.as_deref());
+        app.set_setup_ffb_launch_options(FFB_LAUNCH_OPTIONS.into());
         app.set_setup_sdk_dir(dir.into());
         app.set_setup_sdk_valid(resolved.is_some());
         app.set_setup_sdk_status(message.into());
@@ -2142,8 +2138,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // so both run off the UI thread (a plain `std::thread::spawn`, not the
     // category worker) rather than risk a slow `--all-steam` Proton-prefix
     // scan freezing the window.
-    app.on_setup_copy_launch(move || {
-        std::thread::spawn(|| copy_to_clipboard(FFB_LAUNCH_OPTIONS));
+    app.on_setup_copy_launch(move |text| {
+        let text = text.to_string();
+        std::thread::spawn(move || logi_wheel_core::clipboard::copy(&text));
     });
     // The Info page's Serial/Firmware Copy buttons: same best-effort
     // clipboard mechanism, same off-the-UI-thread rule. The firmware
@@ -2151,7 +2148,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // the clipboard as two lines.
     app.on_info_copy(move |text| {
         let text = text.to_string();
-        std::thread::spawn(move || copy_to_clipboard(&text));
+        std::thread::spawn(move || logi_wheel_core::clipboard::copy(&text));
     });
     {
         let sdk_dir = sdk_dir.clone();

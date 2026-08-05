@@ -1382,7 +1382,34 @@ impl<S: SysfsIo> App<S> {
     /// [`games::GameCompat::setup_action`]), or `None` when no game is
     /// selected or the registry does not know it.
     pub fn selected_game_action(&self) -> Option<SetupAction> {
-        self.selected_game().and_then(|g| games::match_title(&g.name)).map(|c| c.setup_action())
+        let caps = self.wheel_caps();
+        self.selected_game().and_then(|g| games::match_title(&g.name)).map(|c| c.setup_action(caps))
+    }
+
+    /// What the attached wheel can do, for resolving a game's setup recipe
+    /// (see [`games::WheelCaps`]). The recipe differs by wheel, and on the
+    /// G923 the direct-drive advice is actively harmful, so every call that
+    /// asks the registry what a game needs goes through this.
+    pub fn wheel_caps(&self) -> games::WheelCaps {
+        // With nothing plugged in the page is describing the general case,
+        // not advising a specific owner, so it keeps offering the setup a
+        // direct-drive wheel wants rather than narrowing to the wheel it
+        // cannot see. Plug one in and the recipe re-resolves to it.
+        if self.no_wheel {
+            games::WheelCaps::assumed()
+        } else {
+            self.device.wheel_caps()
+        }
+    }
+
+    /// The Steam launch options the selected game wants on this wheel, or
+    /// `None` when it needs none. Shown and copied, never written: see
+    /// [`games::GameCompat::launch_options`].
+    pub fn selected_game_launch_options(&self) -> Option<&'static str> {
+        let caps = self.wheel_caps();
+        self.selected_game()
+            .and_then(|g| games::match_title(&g.name))
+            .and_then(|c| c.launch_options(caps))
     }
 
     /// Take the shim run the last key press queued, if any; see
@@ -2567,6 +2594,25 @@ impl<S: SysfsIo> App<S> {
                         None => self.status = "remove: no game selected".to_string(),
                     }
                 }
+                // Copy the selected game's launch options. Shown and
+                // copied, never written: Steam rewrites localconfig.vdf
+                // wholesale when it exits, so an edit made underneath a
+                // running Steam is lost and a bad one takes the user's
+                // other launch options with it.
+                Char('c') if inside && section == SetupSection::Games => {
+                    self.status = match self.selected_game_launch_options() {
+                        Some(opts) if logi_wheel_core::clipboard::copy(opts) => {
+                            format!("copied to the clipboard: {opts}")
+                        }
+                        // Say which of the two happened. "Copy failed" with
+                        // no string leaves nothing to fall back on, and the
+                        // point of the line is the string.
+                        Some(opts) => {
+                            format!("no clipboard tool (install wl-clipboard or xclip); launch options: {opts}")
+                        }
+                        None => "this game needs no launch options".to_string(),
+                    };
+                }
                 Char('g') if inside && section == SetupSection::Games => {
                     self.tf_toggle_selected_game()
                 }
@@ -2755,6 +2801,53 @@ mod tests {
         a.focus = Focus::Content;
         a.reload();
         a
+    }
+
+    /// A G923 owner with an SDK-TrueForce sim installed must not be handed
+    /// the direct-drive recipe. Pressing `i` used to queue a shim install
+    /// that cannot help that wheel, alongside advice to set
+    /// PROTON_ENABLE_HIDRAW=1, which costs it the force feedback it has.
+    #[test]
+    fn g923_is_not_offered_the_shim_or_the_hidraw_variable() {
+        use crossterm::event::KeyCode;
+        let mut a = g923_app();
+        a.set_cat(SETUP_INDEX);
+        a.games =
+            vec![wine_game("Assetto Corsa Competizione", "/lib/steamapps/compatdata/100/pfx", false)];
+        a.games_scanned = true;
+        a.focus = Focus::Content;
+        a.setup_section_idx =
+            SetupSection::ALL.iter().position(|s| *s == SetupSection::Games).unwrap();
+        a.on_key(KeyCode::Enter);
+
+        assert_eq!(a.selected_game_action(), Some(SetupAction::WorksOutOfBox));
+        assert_eq!(a.selected_game_launch_options(), None);
+
+        a.on_key(KeyCode::Char('i'));
+        assert_eq!(a.take_pending_shim(), None, "no shim run queued: {}", a.status);
+
+        a.on_key(KeyCode::Char('c'));
+        assert!(
+            a.status.contains("no launch options"),
+            "c must say there are none rather than copy the DD recipe: {}",
+            a.status
+        );
+    }
+
+    /// The same page on a direct-drive wheel still offers both, so the
+    /// guard above cannot quietly become "nobody gets TrueForce".
+    #[test]
+    fn a_direct_drive_wheel_still_gets_the_shim_and_the_launch_options() {
+        use crossterm::event::KeyCode;
+        let mut a = setup_app();
+        enter_setup(&mut a, SetupSection::Games);
+        assert_eq!(a.selected_game_action(), Some(SetupAction::InstallShim));
+        assert_eq!(
+            a.selected_game_launch_options(),
+            Some(logi_wheel_core::games::LAUNCH_HIDRAW)
+        );
+        a.on_key(KeyCode::Char('i'));
+        assert!(a.take_pending_shim().is_some(), "status: {}", a.status);
     }
 
     #[test]

@@ -795,7 +795,7 @@ fn setup_sections<S: SysfsIo>(
             }
             SetupSection::Games => {
                 let hint = if inside {
-                    "[i/u install/remove  g sim TF  a add  Esc back]"
+                    "[i/u install/remove  c copy launch  g sim TF  a add  Esc back]"
                 } else {
                     "[Enter opens the list]"
                 };
@@ -826,7 +826,7 @@ fn setup_sections<S: SysfsIo>(
                         // show only the status its enablement action needs
                         // (shared with the GUI's "Your games" list).
                         let compat = logi_wheel_core::games::match_title(&g.name);
-                        let status = match compat.map(|c| c.setup_action()) {
+                        let status = match compat.map(|c| c.setup_action(app.wheel_caps())) {
                             Some(logi_wheel_core::games::SetupAction::InstallShim) => {
                                 if g.shim_installed {
                                     Span::styled("TrueForce on", Style::default().fg(Color::Green))
@@ -878,7 +878,21 @@ fn setup_sections<S: SysfsIo>(
                         // the registry, dimmed under the game; an added-by-
                         // hand title gets its own short explainer instead.
                         if let Some(c) = compat {
-                            lines.push(Line::from(Span::styled(format!("    {}", c.setup), dim)));
+                            lines.push(Line::from(Span::styled(
+                                format!("    {}", c.setup_line(app.wheel_caps())),
+                                dim,
+                            )));
+                            // The launch options this title needs on this
+                            // wheel, spelled out so they can be copied (c)
+                            // or read off the screen. Nothing is written to
+                            // the user's Steam config.
+                            if let Some(opts) = c.launch_options(app.wheel_caps()) {
+                                lines.push(Line::from(vec![
+                                    Span::styled("    launch options: ", dim),
+                                    Span::styled(opts, Style::default().fg(Color::Yellow)),
+                                    Span::styled("  [c copies]", dim),
+                                ]));
+                            }
                         } else {
                             lines.push(Line::from(Span::styled(
                                 "    Added by you; remove if this game does not use TrueForce.",

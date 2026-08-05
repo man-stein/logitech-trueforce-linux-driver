@@ -5,6 +5,35 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Fixed
+
+- **The Setup page gave G923 owners advice that costs them force feedback.**
+  Both front-ends resolved a game's setup recipe from the title alone, so a
+  G923 owner with Assetto Corsa Competizione installed was told to install the
+  TrueForce shim and set `PROTON_ENABLE_HIDRAW=1`. That wheel does not answer
+  the TrueForce SDK, and the variable diverts the game to raw HID reports it
+  cannot drive feedback through, so following the advice lost them the force
+  feedback they already had. A recipe now resolves from the (game, wheel)
+  pair: the SDK titles degrade to "nothing to do" on a wheel that cannot use
+  the SDK, and say to leave the variable unset.
+- **The G923 PlayStation/PC edition (`046d:c267`) was not recognized by the
+  settings app.** The kernel driver binds all three G923 product ids; the app
+  knew only two, so that wheel showed up as a generic "Logitech Racing Wheel".
+
+### Added
+
+- **`docs/GAME_SETUP.md`**: every known game against every supported wheel,
+  with the exact Steam launch options each pair needs. Generated from the same
+  registry the app reads, by a test that fails if the file drifts from it, so
+  the doc and the app cannot disagree.
+- **Launch options are shown and copied, per game.** The Setup page spells out
+  the exact string a game needs on your wheel: `c` copies it in the terminal
+  app, a Copy button in the desktop one. Nothing is written to your Steam
+  configuration, because Steam rewrites `localconfig.vdf` when it exits and an
+  edit made underneath a running Steam is lost.
+
 ## 0.27.1 - 2026-08-05
 
 ### Added

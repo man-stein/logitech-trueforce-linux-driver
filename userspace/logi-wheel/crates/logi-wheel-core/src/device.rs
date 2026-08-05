@@ -186,7 +186,11 @@ fn model_from_pid(pid: u16) -> WheelModel {
     match pid {
         0xc276 => WheelModel::Rs50,
         0xc272 | 0xc268 => WheelModel::GPro,
-        0xc266 | 0xc26e => WheelModel::G923,
+        // c266 G923, c267 the PlayStation/PC edition, c26e the Xbox one.
+        // c267 was missing here while the kernel driver bound all three, so
+        // that wheel came out `Unknown` and was shown as a generic
+        // "Logitech Racing Wheel".
+        0xc266 | 0xc267 | 0xc26e => WheelModel::G923,
         _ => WheelModel::Unknown,
     }
 }
@@ -346,6 +350,27 @@ impl<S: SysfsIo> Device<S> {
 
     pub fn model(&self) -> WheelModel {
         self.model
+    }
+
+    /// What this wheel can do, for resolving a game's setup recipe (see
+    /// [`crate::games::WheelCaps`]).
+    ///
+    /// The model answers it whenever the model is known. When it is not,
+    /// the attribute set still does: the direct-drive `wheel_*` namespace
+    /// and the classic G923 one never overlap, so a device carrying
+    /// `wheel_range` is a direct-drive wheel whatever its product id said.
+    /// That case is not hypothetical, it is every device built without PID
+    /// sniffing: the `LOGI_WHEEL_SYSFS_DIR` development override and
+    /// [`Device::with_io`] both produce a direct-drive device modeled as
+    /// `Unknown`, and going by the model alone would have told a developer
+    /// running against a DD fixture that their wheel has no TrueForce.
+    pub fn wheel_caps(&self) -> crate::games::WheelCaps {
+        match self.model {
+            WheelModel::Unknown if self.io.exists("wheel_range") => {
+                crate::games::WheelCaps { sdk_trueforce: true }
+            }
+            model => crate::games::WheelCaps::of(model),
+        }
     }
 
     /// The registry this device's settings live in: [`CLASSIC_REGISTRY`] for

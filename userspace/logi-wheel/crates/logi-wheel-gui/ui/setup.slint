@@ -24,6 +24,10 @@ export struct SetupGame {
     sim-id: string,
     sim-enabled: bool,
     sim-intensity: int,
+    // The Steam launch options this title wants ON THIS WHEEL, or ""
+    // when it needs none. Resolved per (game, wheel) pair on the Rust
+    // side; the row shows and copies it, and never writes it.
+    launch: string,
 }
 
 // One haptic layer of the simulated-TrueForce effects engine, built on the
@@ -253,9 +257,14 @@ export component Setup inherits Rectangle {
     // page links there instead of carrying a static table.
     private property <string> wiki-url: "https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games";
 
-    // Copies "logi-ffb %command%" to the clipboard (best-effort, wl-copy
-    // then xclip; the field next to the button is selectable as a fallback).
-    callback copy-launch();
+    // Copies the given launch options to the clipboard (best-effort,
+    // wl-copy then xclip; the field next to the button is selectable as
+    // a fallback). Takes the string because it differs per game and per
+    // wheel, so there is no one value the page could assume.
+    callback copy-launch(string);
+    // The logi-ffb launch options, pushed in from the Rust side
+    // (`games::LAUNCH_LOGI_FFB`) so this page never spells them out.
+    in property <string> ffb-launch-options;
     // The SDK folder field's edit-accept: re-runs the full resolution and
     // pushes the fresh outcome back into `sdk-status`/`sdk-valid`.
     // Installs pass the RESOLVED directory explicitly (--sdk-dir), so what
@@ -454,9 +463,13 @@ export component Setup inherits Rectangle {
                                 }
                             }
 
-                            // Older DirectInput game: launch it with
-                            // logi-ffb.
-                            if game.action == root.action-logi-ffb: HorizontalLayout {
+                            // Whatever launch options this title needs on
+                            // this wheel. Keyed on the resolved string rather
+                            // than on the action, because a shim title wants
+                            // PROTON_ENABLE_HIDRAW=1 and a DirectInput one
+                            // wants logi-ffb, and on a wheel with no SDK
+                            // TrueForce the shim title wants neither.
+                            if game.launch != "": HorizontalLayout {
                                 spacing: 8px;
                                 Text {
                                     text: "Steam launch options:";
@@ -466,12 +479,12 @@ export component Setup inherits Rectangle {
                                 }
                                 LineEdit {
                                     horizontal-stretch: 1;
-                                    text: "logi-ffb %command%";
+                                    text: game.launch;
                                     read-only: true;
                                 }
                                 Button {
                                     text: "Copy";
-                                    clicked => { root.copy-launch(); }
+                                    clicked => { root.copy-launch(game.launch); }
                                 }
                             }
 
@@ -548,12 +561,12 @@ export component Setup inherits Rectangle {
                         spacing: 8px;
                         LineEdit {
                             horizontal-stretch: 1;
-                            text: "logi-ffb %command%";
+                            text: root.ffb-launch-options;
                             read-only: true;
                         }
                         Button {
                             text: "Copy";
-                            clicked => { root.copy-launch(); }
+                            clicked => { root.copy-launch(root.ffb-launch-options); }
                         }
                     }
                 }

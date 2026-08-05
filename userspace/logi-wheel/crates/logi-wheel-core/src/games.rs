@@ -7,6 +7,11 @@
 //! setup. The authoritative content is the project's game-compatibility
 //! dataset; this is a faithful transcription, never a place to claim more
 //! support than has actually been established.
+//!
+//! A row states what a title needs; what the *user* needs also depends on
+//! which wheel is attached, so the recipe accessors take a [`WheelCaps`].
+
+use crate::device::WheelModel;
 
 /// Whether a title runs on Linux, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +164,66 @@ pub enum SetupAction {
     WorksOutOfBox,
 }
 
+/// The Steam launch options a DirectInput title needs: the logi-ffb
+/// helper wraps the game and gives it force feedback at all.
+pub const LAUNCH_LOGI_FFB: &str = "logi-ffb %command%";
+
+/// The Steam launch options an SDK-TrueForce title needs on a wheel
+/// that answers the SDK, so Proton exposes the raw HID device the
+/// staged SDK DLLs drive.
+pub const LAUNCH_HIDRAW: &str = "PROTON_ENABLE_HIDRAW=1 %command%";
+
+/// The wheel-side half of a setup recipe.
+///
+/// A recipe is not a property of the game alone, and treating it as one was
+/// a real bug: every front-end resolved Assetto Corsa Competizione to
+/// "install the shim, set `PROTON_ENABLE_HIDRAW=1`" no matter what was
+/// plugged in. On a G923 that advice is not merely useless, it costs the
+/// owner force feedback, because that wheel does not answer the TrueForce
+/// SDK and the variable diverts the game to raw HID reports it cannot drive
+/// feedback through.
+///
+/// So the smallest honest unit of support is the (game, wheel) pair. This
+/// carries the wheel half of it, as capabilities rather than a model name,
+/// so adding a wheel means teaching [`WheelCaps::of`] about it and nothing
+/// in the registry has to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelCaps {
+    /// Whether the wheel answers Logitech's TrueForce SDK, so a game's own
+    /// TrueForce can reach it through the shim. True on the direct-drive
+    /// family (RS50, G PRO), false on the G923, whose force feedback is the
+    /// older classic protocol and whose SDK path has never worked.
+    pub sdk_trueforce: bool,
+}
+
+impl WheelCaps {
+    /// The capabilities of `model`.
+    pub fn of(model: WheelModel) -> Self {
+        WheelCaps {
+            sdk_trueforce: match model {
+                WheelModel::Rs50 | WheelModel::GPro => true,
+                WheelModel::G923 => false,
+                // A wheel is attached and we could not name it from either
+                // its product id or its input name. The two ways of being
+                // wrong here do not cost the same: recommending the SDK
+                // path to a wheel that cannot take it loses that owner
+                // force feedback, while withholding it from one that could
+                // loses only an enhancement they can still turn on by
+                // hand. So an unidentified wheel gets the answer that
+                // cannot make things worse.
+                WheelModel::Unknown => false,
+            },
+        }
+    }
+
+    /// What to assume with no wheel detected: the direct-drive family, the
+    /// wheels this driver was written for. A front-end with nothing plugged
+    /// in is describing the general case, not advising a specific owner.
+    pub const fn assumed() -> Self {
+        WheelCaps { sdk_trueforce: true }
+    }
+}
+
 /// One title's compatibility facts.
 #[derive(Debug, Clone, Copy)]
 pub struct GameCompat {
@@ -189,15 +254,60 @@ impl GameCompat {
     /// title logi-tf-sim can drive today wants its simulated-TrueForce
     /// switch; a DirectInput title wants the logi-ffb helper; everything
     /// else already works with plain force feedback.
-    pub fn setup_action(&self) -> SetupAction {
+    pub fn setup_action(&self, caps: WheelCaps) -> SetupAction {
         if self.ffb == Ffb::TrueForceShim {
-            SetupAction::InstallShim
+            // The shim is only worth installing on a wheel that answers the
+            // SDK. Everywhere else this title still has ordinary force
+            // feedback, so it degrades to "nothing to do" rather than to an
+            // action that cannot help.
+            if caps.sdk_trueforce {
+                SetupAction::InstallShim
+            } else {
+                SetupAction::WorksOutOfBox
+            }
         } else if self.simulated_tf.live_id().is_some() {
             SetupAction::SimulatedTrueForce
         } else if self.ffb == Ffb::DirectInput {
             SetupAction::UseLogiFfb
         } else {
             SetupAction::WorksOutOfBox
+        }
+    }
+
+    /// The one-line recommended setup for this title on `caps`' wheel.
+    ///
+    /// The stored [`setup`](GameCompat::setup) line describes the
+    /// direct-drive case. A wheel with no SDK TrueForce needs its own line
+    /// for the SDK titles, and the difference is not a detail: it is the
+    /// one case where following the direct-drive advice makes things worse
+    /// rather than merely not better.
+    pub fn setup_line(&self, caps: WheelCaps) -> &'static str {
+        if self.ffb == Ffb::TrueForceShim && !caps.sdk_trueforce {
+            // Worded as "not available on this wheel" rather than "this
+            // wheel has no SDK TrueForce", because it also covers the
+            // unidentified wheel, about which we know only that we cannot
+            // deliver it.
+            "Force feedback works as it is. SDK TrueForce is not available \
+             on this wheel, so skip the shim and leave PROTON_ENABLE_HIDRAW \
+             unset; setting it costs you force feedback. Turn Steam Input off."
+        } else {
+            self.setup
+        }
+    }
+
+    /// The Steam launch options this title wants on `caps`' wheel, or
+    /// `None` when it needs none.
+    ///
+    /// Returned rather than written: this is the string a front-end shows
+    /// and offers to copy. Steam keeps launch options in `localconfig.vdf`
+    /// and rewrites that file wholesale when it exits, so editing it under
+    /// a running Steam loses the edit, and editing it badly loses whatever
+    /// else the user had set there.
+    pub fn launch_options(&self, caps: WheelCaps) -> Option<&'static str> {
+        match self.setup_action(caps) {
+            SetupAction::InstallShim => Some(LAUNCH_HIDRAW),
+            SetupAction::UseLogiFfb => Some(LAUNCH_LOGI_FFB),
+            SetupAction::SimulatedTrueForce | SetupAction::WorksOutOfBox => None,
         }
     }
 }
@@ -652,7 +762,8 @@ mod tests {
 
     #[test]
     fn setup_action_classifies_each_ffb_and_sim_combination() {
-        let action = |name: &str| GAMES.iter().find(|g| g.name == name).unwrap().setup_action();
+        let dd = WheelCaps { sdk_trueforce: true };
+        let action = |name: &str| GAMES.iter().find(|g| g.name == name).unwrap().setup_action(dd);
         // Native-TrueForce sims want the shim.
         assert_eq!(action("Assetto Corsa Competizione"), SetupAction::InstallShim);
         // Live simulated-TF titles want their per-game switch, even when
@@ -663,6 +774,80 @@ mod tests {
         assert_eq!(action("Le Mans Ultimate"), SetupAction::UseLogiFfb);
         // Plain native force feedback needs nothing.
         assert_eq!(action("Wreckfest"), SetupAction::WorksOutOfBox);
+    }
+
+    /// The bug this whole wheel dimension exists for. Before it, every
+    /// front-end told a G923 owner with ACC installed to install the shim
+    /// and set PROTON_ENABLE_HIDRAW=1. That wheel does not answer the
+    /// TrueForce SDK, and the variable diverts the game to raw HID reports
+    /// it cannot drive force feedback through, so the advice cost them the
+    /// force feedback they already had.
+    #[test]
+    fn a_wheel_without_sdk_trueforce_is_never_told_to_set_hidraw() {
+        let g923 = WheelCaps::of(WheelModel::G923);
+        assert!(!g923.sdk_trueforce);
+        for g in GAMES.iter().filter(|g| g.ffb == Ffb::TrueForceShim) {
+            assert_eq!(
+                g.setup_action(g923),
+                SetupAction::WorksOutOfBox,
+                "{}: the shim cannot help this wheel",
+                g.name
+            );
+            assert_eq!(g.launch_options(g923), None, "{}: no launch options", g.name);
+            assert!(
+                !g.setup_line(g923).contains("PROTON_ENABLE_HIDRAW=1"),
+                "{}: must not ask for the variable that costs this wheel its force feedback",
+                g.name
+            );
+        }
+    }
+
+    /// The same titles on a wheel that does answer the SDK: unchanged, so
+    /// the fix above cannot be mistaken for switching TrueForce off for
+    /// everyone.
+    #[test]
+    fn a_wheel_with_sdk_trueforce_still_gets_the_shim_recipe() {
+        for model in [WheelModel::Rs50, WheelModel::GPro] {
+            let caps = WheelCaps::of(model);
+            assert!(caps.sdk_trueforce, "{model:?}");
+            let acc = match_title("Assetto Corsa Competizione").unwrap();
+            assert_eq!(acc.setup_action(caps), SetupAction::InstallShim);
+            assert_eq!(acc.launch_options(caps), Some(LAUNCH_HIDRAW));
+            assert_eq!(acc.setup_line(caps), acc.setup);
+        }
+    }
+
+    /// An unidentified wheel takes the answer that cannot make things
+    /// worse, while no wheel at all describes the general case.
+    #[test]
+    fn unknown_wheel_is_cautious_and_no_wheel_is_general() {
+        assert!(!WheelCaps::of(WheelModel::Unknown).sdk_trueforce);
+        assert!(WheelCaps::assumed().sdk_trueforce);
+    }
+
+    /// DirectInput titles are wheel-independent: logi-ffb presents its own
+    /// virtual wheel, so the recipe does not change with the hardware.
+    #[test]
+    fn directinput_recipe_does_not_vary_by_wheel() {
+        let lmu = match_title("Le Mans Ultimate").unwrap();
+        for caps in [WheelCaps { sdk_trueforce: true }, WheelCaps { sdk_trueforce: false }] {
+            assert_eq!(lmu.setup_action(caps), SetupAction::UseLogiFfb);
+            assert_eq!(lmu.launch_options(caps), Some(LAUNCH_LOGI_FFB));
+        }
+    }
+
+    /// Every title that offers launch options offers a string a user can
+    /// paste into Steam unaltered: the `%command%` placeholder is what
+    /// makes it a wrapper rather than a replacement for the game.
+    #[test]
+    fn every_offered_launch_option_is_pasteable() {
+        for g in GAMES {
+            for caps in [WheelCaps { sdk_trueforce: true }, WheelCaps { sdk_trueforce: false }] {
+                if let Some(opts) = g.launch_options(caps) {
+                    assert!(opts.contains("%command%"), "{}: {opts}", g.name);
+                }
+            }
+        }
     }
 
     #[test]

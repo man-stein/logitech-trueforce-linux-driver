@@ -928,13 +928,17 @@ pub fn setup_effects(cfg: &tfsim::Config) -> Vec<SetupEffect> {
 /// recognised works out of the box, and an unrecognised game with the shim
 /// already installed (added manually) gets the same shim action so it stays
 /// manageable.
-pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config) -> Vec<SetupGame> {
+///
+/// `caps` is what the attached wheel can do; a title's recipe depends on
+/// it, and on a wheel with no SDK TrueForce the direct-drive advice is
+/// worse than none (see [`games::WheelCaps`]).
+pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config, caps: games::WheelCaps) -> Vec<SetupGame> {
     let prefix_of = |g: &DiscoveredGame| g.prefix().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     games
         .iter()
         .filter_map(|g| match games::match_title(&g.name) {
             Some(compat) => {
-                let action = compat.setup_action();
+                let action = compat.setup_action(caps);
                 let sim_id = if action == SetupAction::SimulatedTrueForce {
                     compat.simulated_tf.live_id().unwrap_or("")
                 } else {
@@ -944,8 +948,9 @@ pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config) -> Vec<SetupGa
                 Some(SetupGame {
                     name: g.name.as_str().into(),
                     prefix: prefix_of(g).into(),
-                    summary: compat.setup.into(),
+                    summary: compat.setup_line(caps).into(),
                     action: action_tag(action),
+                    launch: compat.launch_options(caps).unwrap_or_default().into(),
                     installed: g.shim_installed,
                     sim_id: sim_id.into(),
                     sim_enabled: sim.enabled,
@@ -958,6 +963,10 @@ pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config) -> Vec<SetupGa
                 prefix: prefix_of(g).into(),
                 summary: "Added by you. TrueForce files are installed; remove them if this game does not use TrueForce.".into(),
                 action: ACTION_SHIM,
+                // Not in the registry, so nothing is known about what
+                // it wants; offering a guess would be worse than
+                // offering nothing.
+                launch: String::new().into(),
                 installed: true,
                 sim_id: String::new().into(),
                 sim_enabled: false,
@@ -1078,7 +1087,7 @@ mod tests {
             wine_game("DiRT Rally 2.0", Source::Steam, false),
             wine_game("Wreckfest", Source::Steam, false),
         ];
-        let rows = setup_games(&games, &cfg);
+        let rows = setup_games(&games, &cfg, games::WheelCaps::assumed());
         assert_eq!(rows.len(), games.len(), "one row per recognised game, order preserved");
 
         // Built-in TrueForce -> shim action, its installed flag carried.
@@ -1091,6 +1100,7 @@ mod tests {
 
         // DirectInput -> logi-ffb action.
         assert_eq!(rows[1].action, ACTION_LOGI_FFB);
+        assert_eq!(rows[1].launch, games::LAUNCH_LOGI_FFB, "the row carries its own launch options");
 
         // Live simulated-TF -> the game's own switch, from tf-sim.conf.
         let dr2 = &rows[2];
@@ -1112,7 +1122,7 @@ mod tests {
             wine_game("TEKKEN 8", Source::Steam, false),
             wine_game("Some Unknown Sim", Source::Steam, true),
         ];
-        let rows = setup_games(&games, &cfg);
+        let rows = setup_games(&games, &cfg, games::WheelCaps::assumed());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1162,7 +1172,7 @@ mod tests {
         // instead of running the installer with `--prefix ""`.
         let cfg = tfsim::Config::default();
         let games = vec![native_game("Assetto Corsa Competizione", Source::Steam)];
-        let rows = setup_games(&games, &cfg);
+        let rows = setup_games(&games, &cfg, games::WheelCaps::assumed());
         assert_eq!(rows.len(), 1);
         let acc = &rows[0];
         assert_eq!(acc.action, ACTION_SHIM);
@@ -1172,7 +1182,7 @@ mod tests {
         // Same title, but launched at least once: a normal Wine game with
         // a prefix still gets the enabled install path.
         let launched = vec![wine_game("Assetto Corsa Competizione", Source::Steam, false)];
-        let rows2 = setup_games(&launched, &cfg);
+        let rows2 = setup_games(&launched, &cfg, games::WheelCaps::assumed());
         let acc2 = &rows2[0];
         assert_eq!(acc2.action, ACTION_SHIM);
         assert!(!acc2.prefix.is_empty());
@@ -1188,10 +1198,34 @@ mod tests {
             wine_game("Automobilista 2", Source::Steam, false),
             wine_game("Project CARS 2", Source::Steam, false),
         ];
-        let rows = setup_games(&games, &cfg);
+        let rows = setup_games(&games, &cfg, games::WheelCaps::assumed());
         assert!(rows.iter().all(|r| r.action == ACTION_SIM_TF && r.sim_id == "ams2-pcars2"));
         assert!(rows.iter().all(|r| r.sim_enabled));
         assert!(rows.iter().all(|r| r.sim_intensity == 100));
+    }
+
+    /// The Setup page must not hand a G923 owner the direct-drive recipe:
+    /// on that wheel the shim cannot help and PROTON_ENABLE_HIDRAW=1 costs
+    /// them the force feedback they have.
+    #[test]
+    fn a_wheel_without_sdk_trueforce_gets_no_shim_row_and_no_launch_options() {
+        let cfg = tfsim::Config::default();
+        let games_list = vec![wine_game("Assetto Corsa Competizione", Source::Steam, false)];
+        let g923 = games::WheelCaps { sdk_trueforce: false };
+
+        let rows = setup_games(&games_list, &cfg, g923);
+        assert_eq!(rows[0].action, ACTION_OUT_OF_BOX);
+        assert!(rows[0].launch.is_empty(), "nothing to paste: {}", rows[0].launch);
+        assert!(
+            !rows[0].summary.contains("PROTON_ENABLE_HIDRAW=1"),
+            "summary must not ask for it: {}",
+            rows[0].summary
+        );
+
+        // The same game on a direct-drive wheel is unchanged.
+        let dd = setup_games(&games_list, &cfg, games::WheelCaps { sdk_trueforce: true });
+        assert_eq!(dd[0].action, ACTION_SHIM);
+        assert_eq!(dd[0].launch, games::LAUNCH_HIDRAW);
     }
 
     #[test]
@@ -1211,12 +1245,12 @@ mod tests {
             wine_game("Wreckfest", Source::Steam, false),                  // out of the box
             wine_game("Assetto Corsa EVO", Source::Steam, true),           // shim, installed
         ];
-        let rows = setup_games(&games, &cfg);
+        let rows = setup_games(&games, &cfg, games::WheelCaps::assumed());
         assert_eq!(games_summary(&rows), "3 installed, 1 need setup");
 
         // Nothing outstanding reads as "all set".
         let done = vec![wine_game("Wreckfest", Source::Steam, false), wine_game("Assetto Corsa EVO", Source::Steam, true)];
-        assert_eq!(games_summary(&setup_games(&done, &cfg)), "2 installed, all set");
+        assert_eq!(games_summary(&setup_games(&done, &cfg, games::WheelCaps::assumed())), "2 installed, all set");
     }
 
     #[test]

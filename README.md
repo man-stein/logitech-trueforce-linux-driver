@@ -185,6 +185,11 @@ right away, no group membership needed.
 
 ## Force feedback in games
 
+Every game and wheel this project knows about, and exactly what each pair
+needs, is in **[docs/GAME_SETUP.md](docs/GAME_SETUP.md)**. It is generated
+from the same registry the settings app uses, so the two cannot disagree.
+The summary below is the shape of it.
+
 - **Native and most Proton sims:** force feedback works out of the box; games see
   a standard Linux wheel. No setup beyond binding controls in game.
 
@@ -292,7 +297,8 @@ attribute names it expects are exposed as well.
 under Proton: steering, full force feedback, and TrueForce at once (with
 `PROTON_ENABLE_HIDRAW=1` and Steam Input disabled). Most other sims work out
 of the box with standard force feedback, or need `logi-ffb` in their launch
-options; the full per-game table, and which needs what, is on the
+options; the full per-game table, and which needs what, is in
+[docs/GAME_SETUP.md](docs/GAME_SETUP.md) and on the
 [Force feedback in games](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games)
 wiki page.
 

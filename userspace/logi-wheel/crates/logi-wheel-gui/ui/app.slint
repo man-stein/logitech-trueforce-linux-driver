@@ -101,7 +101,10 @@ export component App inherits Window {
     in property <[SetupEffect]> setup-tf-effect-rows: [];
     in property <bool> setup-tf-sweep-running: false;
     in property <string> setup-tf-output: "";
-    callback setup-copy-launch();
+    callback setup-copy-launch(string);
+    // The logi-ffb launch options, set once at startup from
+    // `games::LAUNCH_LOGI_FFB`.
+    in property <string> setup-ffb-launch-options;
     callback setup-sdk-dir-edited(string);
     // Per-game shim install/remove; the argument is the row's wine prefix.
     callback setup-install-game(string);
@@ -521,7 +524,8 @@ export component App inherits Window {
                     tf-effect-rows: root.setup-tf-effect-rows;
                     tf-sweep-running: root.setup-tf-sweep-running;
                     tf-output: root.setup-tf-output;
-                    copy-launch() => { root.setup-copy-launch(); }
+                    copy-launch(text) => { root.setup-copy-launch(text); }
+                    ffb-launch-options: root.setup-ffb-launch-options;
                     sdk-dir-edited(dir) => { root.setup-sdk-dir-edited(dir); }
                     install-game(pfx) => { root.setup-install-game(pfx); }
                     remove-game(pfx) => { root.setup-remove-game(pfx); }

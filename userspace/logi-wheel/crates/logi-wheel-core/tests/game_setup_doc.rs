@@ -1,0 +1,205 @@
+//! Renders `docs/GAME_SETUP.md` from the compatibility registry and checks
+//! the committed file still matches.
+//!
+//! The doc is generated rather than written because the project has already
+//! shipped documentation that contradicted the code: the README told people
+//! to set `PROTON_ENABLE_HIDRAW=1` for DirectInput sims when the truth was
+//! the reverse. A hand-maintained per-game matrix would go stale the first
+//! time a row changed and nobody would find out. This way the test fails.
+//!
+//! To regenerate after changing the registry:
+//!
+//! ```text
+//! UPDATE_GAME_SETUP=1 cargo test -p logi-wheel-core --test game_setup_doc
+//! ```
+
+use logi_wheel_core::games::{
+    self, Confidence, Ffb, GameCompat, Linux, SetupAction, SimTf, WheelCaps,
+};
+use std::path::PathBuf;
+
+/// The two wheel classes the recipes differ between. There is no third:
+/// what changes a recipe is whether the wheel answers Logitech's TrueForce
+/// SDK, and that splits the supported wheels exactly here.
+const CLASSES: [(&str, WheelCaps); 2] = [
+    ("RS50 / G PRO", WheelCaps { sdk_trueforce: true }),
+    ("G923", WheelCaps { sdk_trueforce: false }),
+];
+
+fn doc_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../docs/GAME_SETUP.md")
+        .canonicalize()
+        .expect("docs/GAME_SETUP.md must exist; create it empty and regenerate")
+}
+
+/// The short recipe tag for a table cell: what to do, and the launch
+/// options to paste, if any.
+fn recipe_cell(g: &GameCompat, caps: WheelCaps) -> String {
+    if g.linux == Linux::Unsupported {
+        return "-".to_string();
+    }
+    // An SDK title on a wheel that cannot use the SDK is the one cell where
+    // "nothing to do" is true but insufficient: the reader arrived here
+    // having seen the other column say to set a variable, and needs telling
+    // that doing so on their wheel is not merely pointless.
+    if g.ffb == Ffb::TrueForceShim && !caps.sdk_trueforce {
+        return "Nothing to do<br>no TrueForce on this wheel; \
+                leave `PROTON_ENABLE_HIDRAW` unset"
+            .to_string();
+    }
+    let action = match g.setup_action(caps) {
+        SetupAction::InstallShim => "Install the shim",
+        SetupAction::UseLogiFfb => "Launch via logi-ffb",
+        SetupAction::SimulatedTrueForce => "Turn on simulated TrueForce",
+        SetupAction::WorksOutOfBox => "Nothing to do",
+    };
+    match g.launch_options(caps) {
+        Some(opts) => format!("{action}<br>`{opts}`"),
+        None => action.to_string(),
+    }
+}
+
+fn render() -> String {
+    let mut out = String::new();
+    out.push_str("# Game setup, per game and per wheel\n\n");
+    out.push_str(
+        "**Generated file. Do not edit.** It is rendered from the\n\
+         compatibility registry in\n\
+         `userspace/logi-wheel/crates/logi-wheel-core/src/games.rs` by\n\
+         `tests/game_setup_doc.rs`, which fails if this file drifts from it.\n\
+         The settings app resolves your own installed games against that same\n\
+         registry, so what you read here is what the app will tell you.\n\n",
+    );
+    out.push_str(
+        "What a game needs depends on the wheel as well as the game. The\n\
+         direct-drive wheels answer Logitech's TrueForce SDK, so a sim with\n\
+         built-in TrueForce can reach them through the staged SDK DLLs. The\n\
+         G923 does not: its force feedback is the older classic protocol,\n\
+         and `PROTON_ENABLE_HIDRAW=1` on that wheel diverts the game to raw\n\
+         HID reports it cannot drive feedback through, costing you the force\n\
+         feedback you already had. That is why the columns differ.\n\n",
+    );
+    out.push_str(
+        "Launch options go in Steam under the game's Properties. Paste them\n\
+         exactly, `%command%` included: it is the placeholder Steam replaces\n\
+         with the game itself, so without it the line replaces the game\n\
+         instead of wrapping it.\n\n",
+    );
+
+    out.push_str("## Recipes\n\n");
+    out.push_str("| Game | Runs on Linux | Force feedback");
+    for (name, _) in CLASSES {
+        out.push_str(&format!(" | On {name}"));
+    }
+    out.push_str(" |\n|---|---|---");
+    for _ in CLASSES {
+        out.push_str("|---");
+    }
+    out.push_str("|\n");
+    for g in games::sorted_by_name() {
+        let provisional = if g.confidence.is_provisional() { " *" } else { "" };
+        out.push_str(&format!(
+            "| {}{} | {} | {}",
+            g.name,
+            provisional,
+            g.linux.label(),
+            g.ffb_cell()
+        ));
+        for (_, caps) in CLASSES {
+            out.push_str(&format!(" | {}", recipe_cell(g, caps)));
+        }
+        out.push_str(" |\n");
+    }
+    out.push_str(
+        "\nRows marked `*` are not confirmed on this driver yet: expected or\n\
+         documented rather than tested end to end.\n\n",
+    );
+
+    out.push_str("## Simulated TrueForce\n\n");
+    out.push_str(
+        "Games with no TrueForce of their own can still have engine haptics\n\
+         and rev lights, synthesized by `logi-tf-sim` from the game's own UDP\n\
+         telemetry. This works on every supported wheel, including the G923:\n\
+         it is ordinary force feedback driven from telemetry, not the SDK.\n\
+         Turn the game's telemetry output on in its own settings, then enable\n\
+         the game in the app's Setup page.\n\n",
+    );
+    out.push_str("| Game | Simulated TrueForce |\n|---|---|\n");
+    for g in games::sorted_by_name().iter().filter(|g| g.linux != Linux::Unsupported) {
+        let cell = match g.simulated_tf {
+            SimTf::LiveNow(_) => "supported today",
+            SimTf::PossibleWithParser => "possible, needs a telemetry parser first",
+            SimTf::No => "no usable telemetry",
+            SimTf::NotApplicableNative => "not needed: the game has real TrueForce",
+        };
+        out.push_str(&format!("| {} | {} |\n", g.name, cell));
+    }
+
+    out.push_str("\n## What each recipe means\n\n");
+    let acc = games::match_title("Assetto Corsa Competizione").expect("registry has ACC");
+    out.push_str(&format!(
+        "- **Install the shim.** Stage Logitech's signed SDK DLLs into the \
+         game's Proton prefix, from the app's Setup page or \
+         `tools/install-tf-shim.sh`. {}\n",
+        acc.setup_line(WheelCaps { sdk_trueforce: true })
+    ));
+    out.push_str(&format!(
+        "- **On a wheel with no SDK TrueForce.** {}\n",
+        acc.setup_line(WheelCaps { sdk_trueforce: false })
+    ));
+    let lmu = games::match_title("Le Mans Ultimate").expect("registry has Le Mans Ultimate");
+    out.push_str(&format!(
+        "- **Launch via logi-ffb.** {}\n",
+        lmu.setup_line(WheelCaps { sdk_trueforce: true })
+    ));
+    out.push_str(
+        "- **Nothing to do.** The wheel is an ordinary Linux force feedback \
+         device and the game drives it directly.\n",
+    );
+
+    out.push_str("\n## Confidence\n\n");
+    for c in [Confidence::Verified, Confidence::Documented, Confidence::Expected, Confidence::Unknown] {
+        let meaning = match c {
+            Confidence::Verified => "confirmed end to end by this project",
+            Confidence::Documented => "documented by the vendor or a reliable community source",
+            Confidence::Expected => "expected to work, not confirmed",
+            Confidence::Unknown => "genuinely unknown",
+        };
+        let n = games::GAMES.iter().filter(|g| g.confidence == c).count();
+        out.push_str(&format!("- **{}** ({n} titles): {meaning}\n", c.label()));
+    }
+    out
+}
+
+#[test]
+fn game_setup_doc_matches_the_registry() {
+    let rendered = render();
+    let path = doc_path();
+    if std::env::var_os("UPDATE_GAME_SETUP").is_some() {
+        std::fs::write(&path, &rendered).expect("write docs/GAME_SETUP.md");
+        return;
+    }
+    let committed = std::fs::read_to_string(&path).expect("read docs/GAME_SETUP.md");
+    assert_eq!(
+        committed, rendered,
+        "docs/GAME_SETUP.md is stale. Regenerate it:\n\
+         \n    UPDATE_GAME_SETUP=1 cargo test -p logi-wheel-core --test game_setup_doc\n"
+    );
+}
+
+/// The doc's whole purpose is that the two wheel columns say different
+/// things for the SDK titles. If they ever render identically the file is
+/// no longer carrying the distinction it exists for, whatever else it says.
+#[test]
+fn the_two_wheel_columns_actually_differ_for_sdk_titles() {
+    let acc = games::match_title("Assetto Corsa Competizione").unwrap();
+    let dd = recipe_cell(acc, WheelCaps { sdk_trueforce: true });
+    let classic = recipe_cell(acc, WheelCaps { sdk_trueforce: false });
+    assert_ne!(dd, classic);
+    assert!(dd.contains("PROTON_ENABLE_HIDRAW=1"), "{dd}");
+    // The hazard is the assignment, not the name: this cell mentions the
+    // variable precisely in order to say to leave it alone.
+    assert!(!classic.contains("PROTON_ENABLE_HIDRAW=1"), "{classic}");
+    assert!(classic.contains("unset"), "{classic}");
+}
