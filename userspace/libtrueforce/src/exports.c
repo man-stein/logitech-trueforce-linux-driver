@@ -74,9 +74,8 @@ int logiTrueForceAvailable(bool *out)
 
 int logiTrueForceSupported(int index, bool *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
-	{ (void)index; return logiTrueForceAvailable(out); }
+	(void)index;
+	return logiTrueForceAvailable(out);
 }
 
 bool logiTrueForceSupportedByDirectInputA(const void *di_device)
@@ -134,10 +133,11 @@ int logiWheelClose(int index)
 
 int logiWheelSdkHasControl(int index, bool *out)
 {
+	(void)index;
 	if (!out)
 		return LOGITF_ERR_INVALID_ARG;
-	(void)index;
-	{ if (out) *out = false; return LOGITF_OK; }
+	*out = false;
+	return LOGITF_OK;
 }
 
 /* ---- Versioning ---- */
@@ -209,11 +209,14 @@ int logiWheelGetOperatingRangeDegrees(int index, double *out)
 int logiWheelGetOperatingRangeRadians(int index, double *out)
 {
 	double deg;
-	int r = logiWheelGetOperatingRangeDegrees(index, &deg);
+	int st;
 
-	if (r == 0 && out)
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	st = logiWheelGetOperatingRangeDegrees(index, &deg);
+	if (st == LOGITF_OK)
 		*out = deg * (M_PI / 180.0);
-	return r;
+	return st;
 }
 
 int logiWheelGetOperatingRangeBoundsDegrees(int index, double *lo, double *hi)
@@ -294,46 +297,52 @@ static struct logitf_device *angle_dev(int index)
 
 int logiTrueForceGetAngleDegrees(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev = angle_dev(index);
 
-	{ if (out) *out = dev ? logitf_status_angle_deg(dev) : 0.0; return LOGITF_OK; }
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	if (!dev)
+		return LOGITF_ERR_NOT_FOUND;
+	*out = logitf_status_angle_deg(dev);
+	return LOGITF_OK;
 }
 
 int logiTrueForceGetAngleRadians(int index, double *out)
 {
+	double deg;
+	int st;
+
 	if (!out)
 		return LOGITF_ERR_INVALID_ARG;
-	{
-		double d;
-		int st = logiTrueForceGetAngleDegrees(index, &d);
-		if (st == LOGITF_OK && out)
-			*out = d * (M_PI / 180.0);
-		return st;
-	}
+	st = logiTrueForceGetAngleDegrees(index, &deg);
+	if (st == LOGITF_OK)
+		*out = deg * (M_PI / 180.0);
+	return st;
 }
 
 int logiTrueForceGetAngularVelocityDegrees(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev = angle_dev(index);
 
-	{ if (out) *out = dev ? logitf_status_velocity_deg_s(dev) : 0.0; return LOGITF_OK; }
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
+	if (!dev)
+		return LOGITF_ERR_NOT_FOUND;
+	*out = logitf_status_velocity_deg_s(dev);
+	return LOGITF_OK;
 }
 
 int logiTrueForceGetAngularVelocityRadians(int index, double *out)
 {
+	double deg;
+	int st;
+
 	if (!out)
 		return LOGITF_ERR_INVALID_ARG;
-	{
-		double d;
-		int st = logiTrueForceGetAngularVelocityDegrees(index, &d);
-		if (st == LOGITF_OK && out)
-			*out = d * (M_PI / 180.0);
-		return st;
-	}
+	st = logiTrueForceGetAngularVelocityDegrees(index, &deg);
+	if (st == LOGITF_OK)
+		*out = deg * (M_PI / 180.0);
+	return st;
 }
 
 /* ---- Kinetic force ---- */
@@ -350,14 +359,14 @@ int logiTrueForceSetTorqueKF(int index, double torque_nm)
 
 int logiTrueForceGetTorqueKF(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
 		return LOGITF_ERR_NOT_FOUND;
-	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
-	{ if (out) *out = logitf_kf_get_torque_nm(dev); return LOGITF_OK; }
+	*out = logitf_kf_get_torque_nm(dev);
+	return LOGITF_OK;
 }
 
 int logiTrueForceClearKF(int index)
@@ -372,26 +381,26 @@ int logiTrueForceClearKF(int index)
 
 int logiTrueForceGetMaxContinuousTorqueKF(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
 		return LOGITF_ERR_NOT_FOUND;
-	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
-	{ if (out) *out = logitf_kf_max_continuous_nm(dev); return LOGITF_OK; }
+	*out = logitf_kf_max_continuous_nm(dev);
+	return LOGITF_OK;
 }
 
 int logiTrueForceGetMaxPeakTorqueKF(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
 		return LOGITF_ERR_NOT_FOUND;
-	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
-	{ if (out) *out = logitf_kf_max_peak_nm(dev); return LOGITF_OK; }
+	*out = logitf_kf_max_peak_nm(dev);
+	return LOGITF_OK;
 }
 
 /*
@@ -601,17 +610,17 @@ int logiTrueForceSetGainTF(int index, double g)
 
 int logiTrueForceGetGainTF(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 	int v;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
 		return LOGITF_ERR_NOT_FOUND;
-	if (0) { if (out) *out = 1.0; return LOGITF_OK; }
-	if (logitf_sysfs_read_int(dev, "wheel_trueforce", &v) < 0)
-		{ if (out) *out = 1.0; return LOGITF_OK; }
-	{ if (out) *out = (double)v / 100.0; return LOGITF_OK; }
+	/* Unreadable is not an error here: full gain is the wheel's default. */
+	*out = logitf_sysfs_read_int(dev, "wheel_trueforce", &v) < 0
+	     ? 1.0 : (double)v / 100.0;
+	return LOGITF_OK;
 }
 
 /* ---- Damping ---- */
@@ -634,17 +643,16 @@ int logiTrueForceSetDamping(int index, double d)
 
 int logiTrueForceGetDamping(int index, double *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 	int v;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
 		return LOGITF_ERR_NOT_FOUND;
-	if (0) { if (out) *out = 0.0; return LOGITF_OK; }
-	if (logitf_sysfs_read_int(dev, "wheel_damping", &v) < 0)
-		{ if (out) *out = 0.0; return LOGITF_OK; }
-	{ if (out) *out = (double)v / 100.0; return LOGITF_OK; }
+	*out = logitf_sysfs_read_int(dev, "wheel_damping", &v) < 0
+	     ? 0.0 : (double)v / 100.0;
+	return LOGITF_OK;
 }
 
 int    logiTrueForceGetDampingMax(int index, double *out)
@@ -682,14 +690,14 @@ int logiTrueForceResume(int index)
 
 int logiTrueForceIsPaused(int index, bool *out)
 {
-	if (!out)
-		return LOGITF_ERR_INVALID_ARG;
 	struct logitf_device *dev;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
 		return LOGITF_ERR_NOT_FOUND;
-	if (0) { if (out) *out = false; return LOGITF_OK; }
-	{ if (out) *out = dev->tf_paused; return LOGITF_OK; }
+	*out = dev->tf_paused;
+	return LOGITF_OK;
 }
 
 int logiTrueForceSync(int index)

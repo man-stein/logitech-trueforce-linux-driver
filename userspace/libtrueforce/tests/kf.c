@@ -15,6 +15,15 @@
 
 #include <trueforce.h>
 
+/* Small readers: the SDK reports through an out parameter and returns a
+ * status, so a test that wants the value still has to check the status. */
+static bool tf_available(void)
+{
+	bool a = false;
+
+	return logiTrueForceAvailable(&a) == LOGITF_OK && a;
+}
+
 int main(int argc, char **argv)
 {
 	double nm  = argc > 1 ? atof(argv[1]) : 0.5;
@@ -25,7 +34,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "dllOpen failed\n");
 		return 1;
 	}
-	if (!({ bool _a = false; logiTrueForceAvailable(&_a); _a; })) {
+	if (!tf_available()) {
 		fprintf(stderr, "no wheel at index %d\n", index);
 		return 1;
 	}

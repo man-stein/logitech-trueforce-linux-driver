@@ -10,6 +10,24 @@
 
 #include <trueforce.h>
 
+/* Small readers: the SDK reports through an out parameter and returns a
+ * status, so a test that wants the value still has to check the status. */
+/* Read a degrees-valued getter, or 0 if it fails; a sampling loop wants a
+ * number, and the status is checked once before the loop starts. */
+static double read_deg(int (*fn)(int, double *), int index)
+{
+	double v = 0.0;
+
+	return fn(index, &v) == LOGITF_OK ? v : 0.0;
+}
+
+static bool tf_available(void)
+{
+	bool a = false;
+
+	return logiTrueForceAvailable(&a) == LOGITF_OK && a;
+}
+
 int main(int argc, char **argv)
 {
 	int secs = argc > 1 ? atoi(argv[1]) : 10;
@@ -19,18 +37,21 @@ int main(int argc, char **argv)
 		fprintf(stderr, "dllOpen failed\n");
 		return 1;
 	}
-	if (!({ bool _a = false; logiTrueForceAvailable(&_a); _a; })) {
+	if (!tf_available()) {
 		fprintf(stderr, "no wheel at index %d\n", index);
 		return 1;
 	}
 
 	/* First call starts the status thread. */
-	(void)({ double _v = 0; logiTrueForceGetAngleDegrees(index, &_v); _v; });
+	if (logiTrueForceGetAngleDegrees(index, &(double){0}) != LOGITF_OK) {
+		fprintf(stderr, "cannot read the wheel angle at index %d\n", index);
+		return 1;
+	}
 
 	printf("turn the wheel; sampling every 100 ms for %d s...\n", secs);
 	for (int i = 0; i < secs * 10; i++) {
-		double a  = ({ double _v = 0; logiTrueForceGetAngleDegrees(index, &_v); _v; });
-		double v  = ({ double _v = 0; logiTrueForceGetAngularVelocityDegrees(index, &_v); _v; });
+		double a  = read_deg(logiTrueForceGetAngleDegrees, index);
+		double v  = read_deg(logiTrueForceGetAngularVelocityDegrees, index);
 
 		printf("\rangle = %+8.2f deg   velocity = %+8.1f deg/s   ", a, v);
 		fflush(stdout);

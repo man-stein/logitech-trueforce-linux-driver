@@ -20,6 +20,15 @@
 #include <trueforce.h>
 #include "internal.h"
 
+/* Small readers: the SDK reports through an out parameter and returns a
+ * status, so a test that wants the value still has to check the status. */
+static bool tf_available(void)
+{
+	bool a = false;
+
+	return logiTrueForceAvailable(&a) == LOGITF_OK && a;
+}
+
 static void dump_hex(const char *label, const uint8_t *buf, size_t n)
 {
 	printf("%s ", label);
@@ -40,7 +49,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "dllOpen failed\n");
 		return 1;
 	}
-	if (!({ bool _a=false; logiTrueForceAvailable(&_a); _a; })) {
+	if (!tf_available()) {
 		fprintf(stderr, "no wheel at index %d\n", index);
 		return 1;
 	}
