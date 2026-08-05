@@ -173,37 +173,43 @@ static int unit_to_percent(double v)
 	return (int)(v * 100.0 + 0.5);
 }
 
-double logiWheelGetOperatingRangeDegrees(int index)
+int logiWheelGetOperatingRangeDegrees(int index, double *out)
 {
 	struct logitf_device *dev;
 	int v;
 
+	if (!out)
+		return LOGITF_ERR_INVALID_ARG;
 	if (logitf_find_by_index(index, &dev))
-		return 0.0;
+		return LOGITF_ERR_NOT_FOUND;
 	/*
 	 * The direct-drive wheels expose wheel_range; the G923 has no wheel_*
-	 * attributes at all and calls the same setting "range". Reading only
-	 * the first meant this returned 0 for every G923, which a caller is
-	 * entitled to read as "no wheel" rather than "wheel present, range
-	 * unknown".
+	 * attributes at all and calls the same setting "range".
 	 */
-	if (logitf_sysfs_read_int(dev, "wheel_range", &v) == 0)
-		return (double)v;
-	if (logitf_sysfs_read_int(dev, "range", &v) == 0)
-		return (double)v;
-	return 0.0;
+	if (logitf_sysfs_read_int(dev, "wheel_range", &v) == 0 ||
+	    logitf_sysfs_read_int(dev, "range", &v) == 0) {
+		*out = (double)v;
+		return 0;
+	}
+	return LOGITF_ERR_NOT_SUPPORTED;
 }
 
-double logiWheelGetOperatingRangeRadians(int index)
+int logiWheelGetOperatingRangeRadians(int index, double *out)
 {
-	return logiWheelGetOperatingRangeDegrees(index) * (M_PI / 180.0);
+	double deg;
+	int r = logiWheelGetOperatingRangeDegrees(index, &deg);
+
+	if (r == 0 && out)
+		*out = deg * (M_PI / 180.0);
+	return r;
 }
 
 int logiWheelGetOperatingRangeBoundsDegrees(int index, double *lo, double *hi)
 {
-	double r = logiWheelGetOperatingRangeDegrees(index);
+	double r;
+	int st = logiWheelGetOperatingRangeDegrees(index, &r);
 
-	if (r <= 0.0) {
+	if (st != LOGITF_OK || r <= 0.0) {
 		if (lo) *lo = 0;
 		if (hi) *hi = 0;
 		return LOGITF_ERR_NOT_SUPPORTED;

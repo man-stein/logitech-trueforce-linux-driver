@@ -21,6 +21,13 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Fixed
 
+- **`libtrueforce`'s rotation getters had the wrong signature.** They were
+  declared as `double f(int)`; the real SDK reports through an out parameter
+  and returns a status, `int f(int, double *)`. Verified against the shipped
+  library's own code, where the index arrives in RCX, the out pointer in RDX
+  is null-checked, and `0x80000001` comes back when it is null. No program
+  written against the real SDK could have called ours.
+
 - **`libtrueforce` reported no rotation range for a G923.** Its range getter
   read `wheel_range`, which only the direct-drive wheels have; a G923 calls
   the same setting `range`. It returned 0, which a caller may reasonably read

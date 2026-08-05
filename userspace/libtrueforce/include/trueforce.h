@@ -68,8 +68,16 @@ int  logiWheelGetVersion(int index, int *major, int *minor, int *build);
 
 int     logiWheelGetForceMode(int index);
 int     logiWheelSetForceMode(int index, int mode);
-double  logiWheelGetOperatingRangeDegrees(int index);
-double  logiWheelGetOperatingRangeRadians(int index);
+/*
+ * Report through an out parameter and return a status, matching the real
+ * library. Verified against its own code: RCX carries the index, RDX is
+ * null-checked as the out pointer, and 0x80000001 comes back in EAX when
+ * that pointer is null. These were declared as double-returning
+ * one-argument calls, which no caller written against the real SDK could
+ * have used.
+ */
+int     logiWheelGetOperatingRangeDegrees(int index, double *out);
+int     logiWheelGetOperatingRangeRadians(int index, double *out);
 int     logiWheelGetOperatingRangeBoundsDegrees(int index, double *lo, double *hi);
 int     logiWheelGetOperatingRangeBoundsRadians(int index, double *lo, double *hi);
 int     logiWheelSetOperatingRangeDegrees(int index, double degrees);

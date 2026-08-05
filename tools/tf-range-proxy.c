@@ -146,32 +146,42 @@ static int wheel_range_degrees(void)
 	return -1;
 }
 
-__declspec(dllexport) double logiWheelGetOperatingRangeDegrees(int index)
-{
-	int v = wheel_range_degrees();
+/*
+ * Signature taken from the real library's own code, not from a guess.
+ * Disassembling logiWheelGetOperatingRangeDegrees shows RCX holding the
+ * index, RDX null-checked as an out pointer, and 0x80000001 returned in EAX
+ * when that pointer is null. So it reports through a parameter and returns a
+ * status, and an earlier version of this file had it as a double-returning
+ * one-argument call, which would have written nothing the caller could read
+ * while returning a status it never set.
+ */
+#define LOGI_OK			0
+#define LOGI_ERR_BAD_PARAM	0x80000001
 
-	/*
-	 * Deliberately does NOT ask the real library what it would have said.
-	 * That was worth knowing and cost a page fault: its getter dereferences
-	 * device state that does not exist until a wheel has been opened, so
-	 * calling it cold takes the game down with it. A log line is not worth
-	 * a crash.
-	 */
-	if (v > 0) {
-		say("GetOperatingRangeDegrees(%d) -> %d (from sysfs)", index, v);
-		return (double)v;
+__declspec(dllexport) int logiWheelGetOperatingRangeDegrees(int index, double *out)
+{
+	int v;
+
+	if (!out)
+		return LOGI_ERR_BAD_PARAM;
+	v = wheel_range_degrees();
+	if (v <= 0) {
+		say("GetOperatingRangeDegrees(%d): no range in sysfs", index);
+		return LOGI_ERR_BAD_PARAM;
 	}
-	/*
-	 * No wheel of ours present. Answering 0 would be a lie of a different
-	 * kind, so report the failure and let the caller's own fallback run.
-	 */
-	say("GetOperatingRangeDegrees(%d): no range in sysfs", index);
-	return 0.0;
+	*out = (double)v;
+	say("GetOperatingRangeDegrees(%d) -> %d (from sysfs)", index, v);
+	return LOGI_OK;
 }
 
-__declspec(dllexport) double logiWheelGetOperatingRangeRadians(int index)
+__declspec(dllexport) int logiWheelGetOperatingRangeRadians(int index, double *out)
 {
-	return logiWheelGetOperatingRangeDegrees(index) * (M_PI / 180.0);
+	double deg;
+	int r = logiWheelGetOperatingRangeDegrees(index, &deg);
+
+	if (r == LOGI_OK && out)
+		*out = deg * (M_PI / 180.0);
+	return r;
 }
 
 __declspec(dllexport) int logiWheelGetOperatingRangeBoundsDegrees(int index,
@@ -182,21 +192,25 @@ __declspec(dllexport) int logiWheelGetOperatingRangeBoundsDegrees(int index,
 	 * The wheel's own limits, not the current setting. A game that asks
 	 * for the bounds and is told 90 to 90 has nowhere to put a range.
 	 */
-	if (lo) *lo = 90.0;
-	if (hi) *hi = 2700.0;
+	if (!lo || !hi)
+		return LOGI_ERR_BAD_PARAM;
+	*lo = 90.0;
+	*hi = 2700.0;
 	say("GetOperatingRangeBoundsDegrees(%d): answering 90..2700", index);
-	return 0;
+	return LOGI_OK;
 }
 
 __declspec(dllexport) int logiWheelGetOperatingRangeBoundsRadians(int index,
 								 double *lo,
 								 double *hi)
 {
-	double a, b;
+	double a = 0, b = 0;
 	int r = logiWheelGetOperatingRangeBoundsDegrees(index, &a, &b);
 
-	if (lo) *lo = a * (M_PI / 180.0);
-	if (hi) *hi = b * (M_PI / 180.0);
+	if (r == LOGI_OK && lo && hi) {
+		*lo = a * (M_PI / 180.0);
+		*hi = b * (M_PI / 180.0);
+	}
 	return r;
 }
 
