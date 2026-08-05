@@ -206,3 +206,7 @@ __pycache__/
 
 # Internal planning/design scratch (not user docs)
 /docs/superpowers/
+
+# Built by tools/Makefile with a mingw cross compiler, not checked in.
+tools/*.dll
+tools/*.exe

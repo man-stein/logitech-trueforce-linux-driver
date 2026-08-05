@@ -81,6 +81,8 @@ resolve_sdk_dir() {
 	SRC_WHEEL_X86="$SDK_DIR/Logi/wheel_sdk/9_1_0/logi_steering_wheel_x86.dll"
 }
 
+RANGE_PROXY=${RANGE_PROXY:-0}
+
 usage() {
 	cat <<EOF
 Usage:
@@ -92,6 +94,9 @@ Usage:
 
 Options:
   --sdk-dir <path>             Directory holding your Logitech SDK DLLs
+  --range-proxy                Also install the rotation shim, so games ask
+                               this driver how far the wheel turns instead of
+                               falling back to 90 degrees (see #27)
                                (default: \$LOGITECH_TRUEFORCE_SDK_DIR, the repo
                                sdk/ tree, or $(default_sdk_dir))
 EOF
@@ -145,6 +150,21 @@ install_in_prefix() {
 	local wheel_dir="$prefix/$WHEEL_PFX_DIR"
 	mkdir -p "$tf_dir" "$wheel_dir"
 	install -m 0644 "$SRC_TF_X64" "$tf_dir/trueforce_sdk_x64.dll"
+	if [ "$RANGE_PROXY" = "1" ]; then
+		# Logitech's library keeps working and keeps every call that
+		# matters; it just moves aside so ours can answer the one
+		# question it cannot answer here. Ours forwards the rest to it
+		# by name, which is why the name it moves to is fixed.
+		local proxy="$REPO_ROOT/tools/tf-range-proxy.dll"
+		if [ -f "$proxy" ]; then
+			mv -f "$tf_dir/trueforce_sdk_x64.dll" "$tf_dir/trueforce_real.dll"
+			install -m 0644 "$proxy" "$tf_dir/trueforce_sdk_x64.dll"
+			echo "  rotation shim installed in $prefix"
+		else
+			echo "  WARNING: --range-proxy asked for but tools/tf-range-proxy.dll is missing;" >&2
+			echo "           build it with: make -C tools tf-range-proxy.dll" >&2
+		fi
+	fi
 	install -m 0644 "$SRC_TF_X86" "$tf_dir/trueforce_sdk_x86.dll"
 	install -m 0644 "$SRC_WHEEL_X64" "$wheel_dir/logi_steering_wheel_x64.dll"
 	install -m 0644 "$SRC_WHEEL_X86" "$wheel_dir/logi_steering_wheel_x86.dll"
@@ -306,6 +326,9 @@ while [ $# -gt 0 ]; do
 		PREFIX_ARG="${2:-}"
 		[ -n "$PREFIX_ARG" ] || usage
 		shift
+		;;
+	--range-proxy)
+		RANGE_PROXY=1
 		;;
 	--sdk-dir)
 		SDK_DIR_OVERRIDE="${2:-}"
