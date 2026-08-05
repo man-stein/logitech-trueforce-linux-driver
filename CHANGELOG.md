@@ -9,6 +9,17 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Added
 
+- **`libtrueforce` now matches the real SDK's calling convention.** Seventeen
+  of its fifty-four entry points were declared to return a value where the
+  real library reports through an out parameter and returns a status, so no
+  program written against Logitech's SDK could call them. All fifty-four now
+  agree with the shipped library, checked against its own machine code rather
+  than a header. `logiWheelGetVersion` had also invented a leading index
+  argument it does not have. This changes the library's ABI, which costs
+  nothing, because the old shape could never have been linked against
+  successfully. See `docs/SDK_ABI_NOTES.md`.
+
+
 - **A rotation shim for sims that ask the SDK how far the wheel turns**
   (`./tools/install-tf-shim.sh --all-steam --range-proxy`). Under Proton the
   TrueForce SDK cannot reach G HUB, so it falls back to 90 degrees, the
