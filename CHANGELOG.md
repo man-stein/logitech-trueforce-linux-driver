@@ -5,6 +5,22 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.27.3 - 2026-08-05
+
+### Fixed
+
+- **`setup.sh doctor` told every owner about G923 udev rules.** Three checks
+  in the permissions section printed regardless of what was plugged in, so an
+  RS50 owner saw "G923 (c266/c267/c26e) rebind rule installed" in a report
+  about his own machine and reasonably concluded doctor had misidentified his
+  wheel. They now appear only on a machine that has a G923, keyed on USB so
+  they still show when the in-tree driver grabbed the wheel and it has none
+  of our sysfs attributes.
+- **The openSUSE publish job could fail before doing anything**, with zypper
+  reporting no provider for any package including ones already installed. It
+  refreshes the repository metadata explicitly now instead of relying on
+  zypper's implicit auto-refresh.
+
 ## 0.27.2 - 2026-08-05
 
 ### Fixed
