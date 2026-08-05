@@ -166,7 +166,22 @@ jobs:
         # cargo + zstd: the spec builds the Rust workspace offline (OBS
         # builders have no network), so this job vendors the crate
         # dependencies into a zstd tarball shipped as Source1.
-        run: zypper --non-interactive --gpg-auto-import-keys install -y osc git tar gzip sed cargo zstd
+        #
+        # Refreshed explicitly rather than leaning on zypper's implicit
+        # auto-refresh. A fresh Tumbleweed container can arrive with repo
+        # metadata it cannot use, and zypper then reports every package as
+        # missing including ones already present: the v0.27.2 run failed
+        # with "No provider of 'osc' found" alongside "'sed' is already
+        # installed. Package 'sed' is not available in your repositories."
+        # Tumbleweed rolls daily, so the retry is for a mirror caught
+        # mid-sync rather than for a permanent error.
+        run: |
+          for attempt in 1 2 3; do
+            zypper --non-interactive --gpg-auto-import-keys refresh && break
+            echo "zypper refresh failed (attempt $attempt), retrying"
+            sleep 15
+          done
+          zypper --non-interactive --gpg-auto-import-keys install -y osc git tar gzip sed cargo zstd
       - name: Configure osc
         env:
           OSC_CONFIG: ${{ secrets.OSC_CONFIG }}

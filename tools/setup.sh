@@ -56,6 +56,16 @@ find_wheel_sysfs() {
 	ls -d /sys/class/hidraw/*/device/wheel_range 2>/dev/null | head -1 | xargs -r dirname
 }
 
+# Whether a G923 of any edition is on USB, including the Xbox one still in
+# console mode. Keyed on USB rather than on our sysfs, because the case the
+# rebind rule exists for is precisely the one where the in-tree driver won
+# and the wheel has none of our attributes to find.
+g923_on_usb() {
+	local re
+	re="$(echo "$WHEEL_PIDS_G923 $WHEEL_PID_G923_CONSOLE" | tr ' ' '|')"
+	lsusb 2>/dev/null | grep -qiE "046d:($re)"
+}
+
 find_g923_sysfs() {
 	local d
 	for d in /sys/class/hidraw/*/device/range; do
@@ -215,24 +225,31 @@ doctor() {
 	else
 		wrn "logi-ffb uhid udev rule missing - logi-ffb needs sudo for /dev/uhid (run: sudo ./tools/setup.sh)"
 	fi
-	if [ -f "$UDEV_G923_DST" ] || [ -f "/usr/lib/udev/rules.d/72-logitech-g923-rebind.rules" ]; then
-		ok "G923 (c266/c267/c26e) rebind rule installed"
-	else
-		wrn "G923 rebind rule missing - the in-tree driver may keep winning the bind race on c266/c267/c26e (run: sudo ./tools/setup.sh)"
-	fi
-	if [ -f "$UDEV_G923_XBOX_DST" ] || [ -f "/usr/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules" ]; then
-		ok "G923 Xbox edition (c26d) mode-switch rule installed"
-	else
-		wrn "G923 Xbox mode-switch rule missing - the Xbox edition will not switch out of console mode (run: sudo ./tools/setup.sh)"
-	fi
-	# Checked separately from the rule above: the rule dispatches this
-	# through systemd-run with the output discarded, so a missing helper
-	# leaves no trace anywhere and simply looks like a wheel that never
-	# enumerates (issue #27).
-	if [ -x "$MODESWITCH_DST" ]; then
-		ok "G923 Xbox mode-switch helper installed"
-	else
-		wrn "G923 Xbox mode-switch helper missing ($MODESWITCH_DST) - the rule above cannot do anything without it, and the Xbox edition will look like a dead wheel (run: sudo ./tools/setup.sh)"
+	# Only reported on a machine that has a G923. Printed unconditionally
+	# these read as claims about the reader's hardware: an RS50 owner saw
+	# "G923 (c266/c267/c26e) rebind rule installed" in a report about his
+	# own wheel and reasonably concluded doctor had misidentified it (#54).
+	if g923_on_usb; then
+		if [ -f "$UDEV_G923_DST" ] || [ -f "/usr/lib/udev/rules.d/72-logitech-g923-rebind.rules" ]; then
+			ok "G923 (c266/c267/c26e) rebind rule installed"
+		else
+			wrn "G923 rebind rule missing - the in-tree driver may keep winning the bind race on c266/c267/c26e (run: sudo ./tools/setup.sh)"
+		fi
+		if [ -f "$UDEV_G923_XBOX_DST" ] || [ -f "/usr/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules" ]; then
+			ok "G923 Xbox edition (c26d) mode-switch rule installed"
+		else
+			wrn "G923 Xbox mode-switch rule missing - the Xbox edition will not switch out of console mode (run: sudo ./tools/setup.sh)"
+		fi
+		# Checked separately from the rule above: the rule dispatches this
+		# through systemd-run with the output discarded, so a missing helper
+		# leaves no trace anywhere and simply looks like a wheel that never
+		# enumerates (issue #27). Inside this guard because its warning
+		# refers to "the rule above", which is only printed here.
+		if [ -x "$MODESWITCH_DST" ]; then
+			ok "G923 Xbox mode-switch helper installed"
+		else
+			wrn "G923 Xbox mode-switch helper missing ($MODESWITCH_DST) - the rule above cannot do anything without it, and the Xbox edition will look like a dead wheel (run: sudo ./tools/setup.sh)"
+		fi
 	fi
 	if [ -f "$MODPROBE_DST" ]; then
 		ok "hid-logitech-dd modprobe.d config installed"
