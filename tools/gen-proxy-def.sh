@@ -16,9 +16,16 @@ OVERRIDE="logiWheelGetOperatingRangeDegrees logiWheelGetOperatingRangeRadians
 	echo "; Generated from the real DLL's Ordinal/Name Pointer table."
 	echo "; All but the four rotation getters forward to Logitech's library."
 	echo "; Regenerate with: tools/gen-proxy-def.sh"
+	# The WHOLE export table, not just the logi* names. Filtering to those
+	# dropped eighteen exports including dllOpen and dllClose, which is how
+	# a game brings the SDK up: a proxy without them loads and does nothing,
+	# leaving no TrueForce, no force feedback, and no rotation push either.
+	# Two rounds of testing were spent on the symptoms of that omission.
 	x86_64-w64-mingw32-objdump -p "$DLL" \
-		| awk '/\[Ordinal\/Name Pointer\] Table/{f=1;next} f' \
-		| grep -oE "logi[A-Za-z0-9]+" | sort -u \
+		| grep -E "^[[:space:]]+\[[[:space:]]*[0-9]+\] \+base\[" \
+		| awk '{print $NF}' \
+		| grep -vx "RVA" \
+		| sort -u \
 		| while read -r fn; do
 			if echo "$OVERRIDE" | grep -qw "$fn"; then echo "$fn"
 			else echo "$fn=trueforce_real.$fn"; fi
