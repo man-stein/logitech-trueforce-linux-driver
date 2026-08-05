@@ -9,6 +9,21 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Fixed
 
+- **`doctor` told people to set a launch option they had already set.** It
+  read `PROTON_ENABLE_HIDRAW=1` by finding the first line mentioning a
+  game's app id anywhere in Steam's config and then taking the next
+  `LaunchOptions` it saw. An app id appears several times in a real
+  `localconfig.vdf` (six, in the one measured), and if the block it landed on
+  had no launch options the scan ran on and reported a different game's. On a
+  real config it got two of three wrong, both false negatives. It now reads
+  each game's own block.
+
+- **`doctor` counted every Proton prefix when checking for the TrueForce
+  shim**, so the warning scaled with the size of a Steam library rather than
+  with anything being wrong: one report read "shim in 50 of 52 prefixes",
+  which is 50 more shims than that person needed. Only the sims that load
+  Logitech's SDK need it, and only those are counted now.
+
 - **Corrected the explanation shipped in 0.27.0 for a failed range read.**
   Those notes said a mid-session failure was most likely contention with a
   game's force-feedback traffic. An owner's log disproves it: the read

@@ -191,19 +191,26 @@ doctor() {
 	if [ -z "$roots" ]; then
 		wrn "no Steam installation found for $USER"
 	else
+		# Only the sims that actually load Logitech's SDK need the shim.
+		# Counting every Proton prefix meant a warning that scaled with a
+		# person's library rather than with anything wrong: one real report
+		# read "shim in 50 of 52 prefixes", which reads like a fault and is
+		# in fact 50 shims more than that person needed. A missing shim in
+		# some unrelated game's prefix is not a problem to solve.
 		while IFS= read -r root; do
-			for pfx in "$root"/steamapps/compatdata/*/pfx; do
+			for appid in $SDK_SIM_APPIDS; do
+				pfx="$root/steamapps/compatdata/$appid/pfx"
 				[ -d "$pfx" ] || continue
 				found_pfx=$((found_pfx+1))
 				[ -f "$pfx/drive_c/Program Files/Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll" ] && shimmed=$((shimmed+1))
 			done
 		done <<< "$roots"
 		if [ "$found_pfx" -gt 0 ] && [ "$shimmed" -eq "$found_pfx" ]; then
-			ok "TrueForce shim present in all $found_pfx Proton prefixes"
+			ok "TrueForce shim present in all $found_pfx installed SDK sim(s)"
 		elif [ "$shimmed" -gt 0 ]; then
-			wrn "shim in $shimmed of $found_pfx Proton prefixes (run: ./tools/setup.sh shim)"
+			wrn "shim in $shimmed of $found_pfx installed SDK sim(s) (run: ./tools/setup.sh shim)"
 		elif [ "$found_pfx" -gt 0 ]; then
-			wrn "shim not installed in any of the $found_pfx Proton prefixes (run: ./tools/setup.sh shim)"
+			wrn "shim not installed in any of the $found_pfx installed SDK sim(s) (run: ./tools/setup.sh shim)"
 		fi
 	fi
 
@@ -217,7 +224,23 @@ doctor() {
 			[ -d "$root/steamapps/compatdata/$appid" ] && installed=1
 			for cfg in "$root"/userdata/*/config/localconfig.vdf; do
 				[ -f "$cfg" ] || continue
-				if awk -v id="\"$appid\"" '$0 ~ id {inapp=1} inapp && /LaunchOptions/ {print; exit}' "$cfg" | grep -q 'PROTON_ENABLE_HIDRAW=1'; then
+				# Read LaunchOptions from the app's OWN block. Anchoring
+				# on the first line mentioning the id anywhere was wrong
+				# twice over: an appid appears several times in a
+				# localconfig (six, in one real file), and if the block
+				# it lands on has no LaunchOptions the scan runs on and
+				# reports the NEXT app's. Measured against a real config
+				# that got two of three wrong, both false negatives, so
+				# it told owners to set a variable they had already set.
+				if awk -v id="\"$appid\"" '
+					$0 ~ "^[ \t]*" id "[ \t]*$" { cand = 1; depth = 0; seen = 0; next }
+					cand {
+						o = gsub(/\{/, "{"); c = gsub(/\}/, "}")
+						if (o) seen = 1
+						depth += o - c
+						if (/"LaunchOptions"/) { print; exit }
+						if (seen && depth <= 0) cand = 0
+					}' "$cfg" | grep -q 'PROTON_ENABLE_HIDRAW=1'; then
 					has_opt=1
 				fi
 			done
