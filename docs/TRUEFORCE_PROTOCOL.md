@@ -299,3 +299,47 @@ Used for constant force values with extended precision.
 - libtrueforce consumes type-`0x02` device responses while a stream is active and exposes them via `logitf_get_stream_feedback()` (2026-07-02). The motor field (bytes 6-7), status byte (8), and byte 17 checksum-like field are still undecoded; correlating the motor field against commanded torque on a live wheel would pin it down.
 - The constant flag word at byte 11 (`0x0d`) is passed through verbatim; its exact meaning is still not decoded. Value `0x05` has been seen instead of `0x04` in byte 10 in some captures, corresponding to 5 new samples; libtrueforce uses the 4-new-samples variant exclusively.
 - Per-title parameter variation (are the 48 init floats game-specific or universal?) is unconfirmed. So far the same data produces audible TRUEFORCE across BeamNG and ACC.
+
+
+## The SDK's own IPC, and where 90 degrees comes from
+
+The type-`0x0e` section above explains how a range reaches the wheel. This
+explains why the number is so often 90, which was open for a long time and is
+now settled.
+
+`trueforce_sdk_x64.dll` contains a local IPC layer, `logi::local_connection`,
+with a client, a server, and the pipe name `logi.trueforce.connect` compiled
+in. On Windows the peer is G HUB. Under Proton nothing serves that pipe. From
+a reporter's Wine log, repeating for as long as the game runs:
+
+```
+CreateFileW L"\\.\pipe\logi.trueforce.connect" ... creation 3
+CreateFileW Unable to create file ... (status c0000034)
+```
+
+`creation 3` is OPEN_EXISTING and `c0000034` is STATUS_OBJECT_NAME_NOT_FOUND,
+so the SDK is the client, nothing answers, and it retries forever, which
+matches the library's own string `Client failed to connect: polling again in
+%ld ms`.
+
+With no peer, a game asking how far the wheel turns gets 90: not a value
+anybody chose but the minimum of the legal 90-2700 range, which is why the
+symptom is always exactly 45 degrees each way.
+
+**Answering that pipe ourselves is not possible.** On connect the SDK calls
+`GetNamedPipeServerProcessId`, resolves the server to an executable with
+`K32GetModuleFileNameExA`, runs `WinVerifyTrust` on it and reads the signer
+with `CertGetNameStringW`. The string `Logitech Inc` is compiled in. A probe
+serving that pipe is dropped in about a millisecond, in both message and byte
+mode, which is what a rejected peer looks like rather than a rejected framing.
+
+What is possible is answering the question the SDK cannot. A game loads the
+SDK through a CLSID this project's shim installer writes, so the library it
+loads is ours to choose: see `tools/tf-range-proxy.c`, which forwards every
+other call to Logitech's own library and answers only the rotation getters.
+Signatures for those are in `docs/SDK_ABI_NOTES.md`, taken from the library's
+machine code rather than from any header.
+
+Assetto Corsa Competizione resolves 56 symbols from this SDK, including all
+four rotation getters, and none at all from the older Steering Wheel SDK, so
+for that title this is the right library to answer through.

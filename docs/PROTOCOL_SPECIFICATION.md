@@ -526,6 +526,12 @@ Set: 10 FF 18 2D [Degrees_Hi] [Degrees_Lo] 00
 
 **Range**: 90° to 2700° in 10° increments
 
+> The 90° minimum is not a curiosity. When Logitech's TrueForce SDK cannot
+> reach G HUB, which is its normal state under Proton, a game asking how far
+> the wheel turns receives this floor rather than the real range, and clamps
+> its steering to 45° each way. See `docs/TRUEFORCE_PROTOCOL.md`, "The SDK's
+> own IPC, and where 90 degrees comes from".
+
 #### TRUEFORCE (Feature 0x8139, Index 0x19)
 ```
 Set: 10 FF 19 3D [Value_Hi] [Value_Lo] 00

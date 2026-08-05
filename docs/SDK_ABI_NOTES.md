@@ -1,5 +1,9 @@
 # TrueForce SDK: verified ABI notes
 
+Companion to `TRUEFORCE_PROTOCOL.md`, which covers the wire protocol to the
+wheel and why the SDK reports 90 degrees under Proton. This one is about
+calling the SDK itself.
+
 What the shipped `trueforce_sdk_x64.dll` actually expects, taken from its own
 machine code rather than from any header. Written after three signatures in
 `userspace/libtrueforce/include/trueforce.h` turned out to be wrong, one of

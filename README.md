@@ -153,7 +153,8 @@ One known limitation: some sims lock the steering to 90 degrees (45 each
 way). That is not the wheel or this driver. Logitech's TrueForce SDK asks
 G HUB for your wheel's rotation over a local pipe, nothing answers that under
 Proton, and the game falls back to 90, which is the minimum of the wheel's
-legal range. Tracked in #27.
+legal range. The troubleshooting section below has the workaround, and the
+shim that aims to remove the need for one. Tracked in #27.
 
 Two notes for the curious: the wheel plugs in as `c267` (PlayStation) or `c26d`
 (Xbox) and the driver switches it to its PC mode automatically, and the G923's
@@ -310,9 +311,27 @@ keeping hands clear during AC EVO map loads) are covered under
   (the `wheel_ffb_constant_sign` attribute).
 - **A game stops seeing the wheel after a driver reload:** restart Steam fully;
   its device list goes stale across reloads.
-- **Rotation snaps to 90° at session start:** some sims reset it via their own SDK
-  path; the driver restores your range automatically within 20 seconds. Re-apply
-  the game's own steering-lock setting so it stops pushing 90°.
+- **Rotation snaps to 90° (45° each way) when a sim starts:** not your setup,
+  and not the wheel. Logitech's TrueForce SDK asks G HUB how far your wheel
+  turns; under Proton nothing answers, and it falls back to 90, the minimum of
+  the wheel's legal 90-2700 range.
+
+  On the **direct-drive wheels** the range really is written, and the driver
+  puts it back by itself (`wheel_range_restore`, on by default). On the
+  **G923** the wheel is never actually changed: the rim keeps its full travel,
+  visible in a game's own config screen, and the game clamps its own steering
+  instead.
+
+  There is also a shim that answers the question the SDK cannot, so a game
+  gets your real rotation rather than the fallback:
+
+  ```bash
+  ./tools/install-tf-shim.sh --all-steam --range-proxy
+  ```
+
+  It passes every other SDK call straight through to Logitech's own library
+  and answers only the rotation query. Still being validated on hardware
+  (issue #27); `--uninstall` puts the original back.
 - **Force feedback feels vague, or unrelated to what the car is doing, on
   Debian 13 / MX Linux 25:** check your kernel. Debian's **6.12 series from
   about 6.12.90 onward** produces exactly this, and it is not the driver:
@@ -359,6 +378,22 @@ Open an issue with your kernel version, distribution, and relevant `dmesg` outpu
 
 Logitech's TrueForce SDK DLLs are not part of this project and are not
 redistributed here; you supply them from your own G HUB installation.
+
+## Protocol and SDK notes
+
+What this project has worked out about the hardware and Logitech's own
+software, kept current as things are proven or disproven:
+
+- [**docs/PROTOCOL_SPECIFICATION.md**](docs/PROTOCOL_SPECIFICATION.md) - the
+  wheel's HID++ surface: features, settings, LEDs, force feedback.
+- [**docs/TRUEFORCE_PROTOCOL.md**](docs/TRUEFORCE_PROTOCOL.md) - the haptic
+  stream, the operating-range packet, and why a sim under Proton is told the
+  wheel turns 90 degrees.
+- [**docs/SDK_ABI_NOTES.md**](docs/SDK_ABI_NOTES.md) - how to call Logitech's
+  SDK correctly, taken from its machine code, with what is verified and what
+  is still assumed marked as such.
+- [**docs/SYSFS_API.md**](docs/SYSFS_API.md) - every attribute this driver
+  exposes.
 
 ## Acknowledgments
 
