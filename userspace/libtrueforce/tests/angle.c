@@ -25,12 +25,12 @@ int main(int argc, char **argv)
 	}
 
 	/* First call starts the status thread. */
-	(void)logiTrueForceGetAngleDegrees(index);
+	(void)({ double _v = 0; logiTrueForceGetAngleDegrees(index, &_v); _v; });
 
 	printf("turn the wheel; sampling every 100 ms for %d s...\n", secs);
 	for (int i = 0; i < secs * 10; i++) {
-		double a  = logiTrueForceGetAngleDegrees(index);
-		double v  = logiTrueForceGetAngularVelocityDegrees(index);
+		double a  = ({ double _v = 0; logiTrueForceGetAngleDegrees(index, &_v); _v; });
+		double v  = ({ double _v = 0; logiTrueForceGetAngularVelocityDegrees(index, &_v); _v; });
 
 		printf("\rangle = %+8.2f deg   velocity = %+8.1f deg/s   ", a, v);
 		fflush(stdout);
