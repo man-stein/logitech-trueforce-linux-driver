@@ -214,20 +214,36 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 		 * name the forwards resolve through, so they find it already in
 		 * memory rather than going looking.
 		 */
-		if (GetModuleFileNameA(inst, path, MAX_PATH)) {
-			slash = strrchr(path, '\\');
-			if (slash) {
-				strcpy(slash + 1, "trueforce_real.dll");
-				if (LoadLibraryExA(path, NULL,
-						   LOAD_WITH_ALTERED_SEARCH_PATH))
-					say("loaded Logitech's library from %s", path);
-				else
-					say("COULD NOT load %s (error %lu): the "
-					    "forwarded calls will fail and the "
-					    "wheel will feel dead",
-					    path, (unsigned long)GetLastError());
-			}
+		if (!GetModuleFileNameA(inst, path, MAX_PATH))
+			return FALSE;
+		slash = strrchr(path, '\\');
+		if (!slash)
+			return FALSE;
+		strcpy(slash + 1, "trueforce_real.dll");
+		if (!LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)) {
+			/*
+			 * Refuse to load rather than load usefully-crippled.
+			 *
+			 * Without Logitech's library the fifty-four forwarded
+			 * entry points cannot resolve, but the four answered
+			 * here still can. A game then gets correct rotation and
+			 * no force of any kind, which is a wheel that steers
+			 * and does nothing, and that is how this was first
+			 * reported (issue #27).
+			 *
+			 * Failing here instead leaves the game with no SDK at
+			 * all: no TrueForce, but ordinary force feedback and a
+			 * wheel that behaves. That is a state games already
+			 * handle, because it is what everyone who has not
+			 * installed the shim has.
+			 */
+			say("could not load %s (error %lu); refusing to load so "
+			    "the game falls back to no SDK rather than to a "
+			    "wheel with no forces",
+			    path, (unsigned long)GetLastError());
+			return FALSE;
 		}
+		say("loaded Logitech's library from %s", path);
 		say("wheel range from sysfs = %d", wheel_range_degrees());
 	} else if (reason == DLL_PROCESS_DETACH) {
 		if (logfp)

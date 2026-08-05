@@ -38,6 +38,7 @@ WHEEL_PID_G923_CONSOLE="c26d"
 WHEEL_PIDS="$WHEEL_PIDS_DD $WHEEL_PIDS_G923"
 # Steam appids of the Logitech-SDK sims for launch-option checks:
 #   ACC, AC EVO, AC, AMS2, Le Mans Ultimate, rFactor 2
+TF_PFX_REL="drive_c/Program Files/Logi/Trueforce/1_3_11"
 SDK_SIM_APPIDS="805550 3058630 244210 1066890 2399420 365960"
 
 pass=0; warn=0; fail=0
@@ -264,6 +265,30 @@ doctor() {
 			wrn "shim in $shimmed of $found_pfx installed SDK sim(s) (run: ./tools/setup.sh shim)"
 		elif [ "$found_pfx" -gt 0 ]; then
 			wrn "shim not installed in any of the $found_pfx installed SDK sim(s) (run: ./tools/setup.sh shim)"
+		fi
+
+		# If the rotation shim is installed, Logitech's library has to be
+		# beside it under the name its forwards resolve through. Without
+		# that, the four calls the shim answers itself keep working and
+		# the fifty-four it forwards do not, which is a wheel that steers
+		# to full lock and produces no force at all (issue #27).
+		local proxied=0 orphaned=0
+		while IFS= read -r root; do
+			for appid in $SDK_SIM_APPIDS; do
+				local d="$root/steamapps/compatdata/$appid/pfx/$TF_PFX_REL"
+				[ -f "$d/trueforce_sdk_x64.dll" ] || continue
+				# -a: it is a binary, and without it grep declines to match.
+				# The string only appears in our proxy (it is the forward
+				# target); Logitech's own library has no mention of it.
+				grep -aq "trueforce_real" "$d/trueforce_sdk_x64.dll" 2>/dev/null || continue
+				proxied=$((proxied+1))
+				[ -f "$d/trueforce_real.dll" ] || orphaned=$((orphaned+1))
+			done
+		done <<< "$roots"
+		if [ "$orphaned" -gt 0 ]; then
+			bad "rotation shim installed in $orphaned prefix(es) without Logitech's library beside it - those games get no force feedback (re-run: ./tools/install-tf-shim.sh --all-steam --range-proxy)"
+		elif [ "$proxied" -gt 0 ]; then
+			ok "rotation shim installed in $proxied SDK sim(s), with Logitech's library beside it"
 		fi
 	fi
 

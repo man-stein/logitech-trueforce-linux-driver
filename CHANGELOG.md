@@ -7,6 +7,18 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ## Unreleased
 
+### Added
+
+- **A rotation shim for sims that ask the SDK how far the wheel turns**
+  (`./tools/install-tf-shim.sh --all-steam --range-proxy`). Under Proton the
+  TrueForce SDK cannot reach G HUB, so it falls back to 90 degrees, the
+  minimum of the wheel's legal range, and the game clamps steering at 45 each
+  way. The shim forwards every other SDK call to Logitech's own library
+  untouched and answers only the rotation question, from this driver. If
+  Logitech's library is not beside it, it refuses to load rather than leave a
+  wheel that steers correctly and produces no force at all. Not yet confirmed
+  in a game (issue #27).
+
 ### Fixed
 
 - **`libtrueforce` reported no rotation range for a G923.** Its range getter
