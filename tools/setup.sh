@@ -83,7 +83,21 @@ doctor() {
 
 	say "[1/7] Kernel module"
 	if [ -d /sys/module/hid_logitech_dd ]; then
-		ok "hid_logitech_dd is loaded (version: $(cat /sys/module/hid_logitech_dd/version 2>/dev/null || echo unknown))"
+		local loaded_ver repo_ver
+		loaded_ver="$(cat /sys/module/hid_logitech_dd/version 2>/dev/null || echo unknown)"
+		ok "hid_logitech_dd is loaded (version: $loaded_ver)"
+		# Running module vs the source it came from. Pulling without
+		# rebuilding leaves an old driver in memory and every symptom
+		# belongs to code nobody is reading any more, which is a
+		# spectacularly good way to waste an afternoon.
+		if [ -d "$REPO_ROOT/.git" ]; then
+			repo_ver="$(git -C "$REPO_ROOT" describe --tags --always 2>/dev/null)"
+			if [ -n "$repo_ver" ] && [ "$loaded_ver" != "$repo_ver" ]; then
+				wrn "the loaded module is $loaded_ver but this checkout is $repo_ver - rebuild so you are testing the code you have (run: sudo ./tools/setup.sh)"
+			elif [ -n "$repo_ver" ]; then
+				ok "module matches this checkout ($repo_ver)"
+			fi
+		fi
 	else
 		bad "hid_logitech_dd is not loaded (run: sudo ./tools/setup.sh)"
 	fi
@@ -159,6 +173,13 @@ doctor() {
 		fw="$(cat "$W/wheel_firmware" 2>/dev/null | tr '\n' ' ')"
 		[ -n "$fw" ] && ok "firmware: $fw" || wrn "wheel_firmware unreadable"
 		ok "range=$(cat "$W/wheel_range" 2>/dev/null) strength=$(cat "$W/wheel_strength" 2>/dev/null)% mode=$(cat "$W/wheel_mode" 2>/dev/null)"
+		# The G923's equivalent was reported here and this one was not,
+		# which left direct-drive owners with no way to see whether the
+		# 90-degree healing was on.
+		case "$(cat "$W/wheel_range_restore" 2>/dev/null)" in
+			1) ok "wheel_range_restore on (puts the range back if a game moves it)";;
+			0) wrn "wheel_range_restore off - a game that collapses your rotation to 90 degrees will stay that way (echo 1 > $W/wheel_range_restore)";;
+		esac
 	fi
 	if [ -n "$G" ]; then
 		# A G923 has no wheel_* files at all. Reporting their absence as a
@@ -236,7 +257,9 @@ doctor() {
 		ls "$REPO_ROOT"/$f >/dev/null 2>&1 || dll_missing=$((dll_missing+1))
 	done
 	if [ "$dll_missing" -eq 0 ]; then
-		ok "all four SDK DLLs staged in the repo"
+		local tf_ver
+		tf_ver="$(ls -1 "$REPO_ROOT"/sdk/Logi/Trueforce 2>/dev/null | grep -E '^[0-9_]+$' | sort -V | tail -1)"
+		ok "all four SDK DLLs staged in the repo${tf_ver:+ (Trueforce $tf_ver)}"
 	else
 		wrn "$dll_missing of 4 SDK DLLs not staged (see the wiki's Force-feedback-in-games page; standard FFB works without them)"
 	fi
