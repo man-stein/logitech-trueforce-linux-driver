@@ -38,7 +38,10 @@ WHEEL_PID_G923_CONSOLE="c26d"
 WHEEL_PIDS="$WHEEL_PIDS_DD $WHEEL_PIDS_G923"
 # Steam appids of the Logitech-SDK sims for launch-option checks:
 #   ACC, AC EVO, AC, AMS2, Le Mans Ultimate, rFactor 2
-TF_PFX_REL="drive_c/Program Files/Logi/Trueforce/1_3_11"
+# G HUB revises the SDK and the version is a directory name, so never assume
+# one: a current install ships 1_3_12 and 9_1_1, and hardcoding the older
+# pair made those invisible with no explanation (issue #54).
+TF_PFX_GLOB="drive_c/Program Files/Logi/Trueforce/*"
 SDK_SIM_APPIDS="805550 3058630 244210 1066890 2399420 365960"
 
 pass=0; warn=0; fail=0
@@ -226,11 +229,11 @@ doctor() {
 	echo
 	say "[5/7] TrueForce SDK DLLs (only needed for TrueForce in Proton sims)"
 	local dll_missing=0
-	for f in "sdk/Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll" \
-		 "sdk/Logi/Trueforce/1_3_11/trueforce_sdk_x86.dll" \
-		 "sdk/Logi/wheel_sdk/9_1_0/logi_steering_wheel_x64.dll" \
-		 "sdk/Logi/wheel_sdk/9_1_0/logi_steering_wheel_x86.dll"; do
-		[ -f "$REPO_ROOT/$f" ] || dll_missing=$((dll_missing+1))
+	for f in "sdk/Logi/Trueforce/*/trueforce_sdk_x64.dll" \
+		 "sdk/Logi/Trueforce/*/trueforce_sdk_x86.dll" \
+		 "sdk/Logi/wheel_sdk/*/logi_steering_wheel_x64.dll" \
+		 "sdk/Logi/wheel_sdk/*/logi_steering_wheel_x86.dll"; do
+		ls "$REPO_ROOT"/$f >/dev/null 2>&1 || dll_missing=$((dll_missing+1))
 	done
 	if [ "$dll_missing" -eq 0 ]; then
 		ok "all four SDK DLLs staged in the repo"
@@ -256,7 +259,7 @@ doctor() {
 				pfx="$root/steamapps/compatdata/$appid/pfx"
 				[ -d "$pfx" ] || continue
 				found_pfx=$((found_pfx+1))
-				[ -f "$pfx/drive_c/Program Files/Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll" ] && shimmed=$((shimmed+1))
+				ls "$pfx"/drive_c/Program\ Files/Logi/Trueforce/*/trueforce_sdk_x64.dll >/dev/null 2>&1 && shimmed=$((shimmed+1))
 			done
 		done <<< "$roots"
 		if [ "$found_pfx" -gt 0 ] && [ "$shimmed" -eq "$found_pfx" ]; then
@@ -275,8 +278,8 @@ doctor() {
 		local proxied=0 orphaned=0
 		while IFS= read -r root; do
 			for appid in $SDK_SIM_APPIDS; do
-				local d="$root/steamapps/compatdata/$appid/pfx/$TF_PFX_REL"
-				[ -f "$d/trueforce_sdk_x64.dll" ] || continue
+				local d; d=$(ls -d "$root/steamapps/compatdata/$appid/pfx/"$TF_PFX_GLOB 2>/dev/null | tail -1)
+				[ -n "$d" ] && [ -f "$d/trueforce_sdk_x64.dll" ] || continue
 				# -a: it is a binary, and without it grep declines to match.
 				# The string only appears in our proxy (it is the forward
 				# target); Logitech's own library has no mention of it.
@@ -427,7 +430,7 @@ setup() {
 	"$REPO_ROOT/tools/rebind-wheel.sh" >/dev/null 2>&1 || true
 
 	say "[4/5] TrueForce shim (Steam prefixes)"
-	if [ -f "$REPO_ROOT/sdk/Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll" ]; then
+	if ls "$REPO_ROOT"/sdk/Logi/Trueforce/*/trueforce_sdk_x64.dll >/dev/null 2>&1; then
 		do_shim || true
 	else
 		echo "  SDK DLLs not staged - skipped (standard FFB works without them;"

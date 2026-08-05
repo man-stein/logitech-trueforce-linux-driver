@@ -60,7 +60,17 @@ default_sdk_dir() {
 }
 
 # Relative path of the marker DLL used to detect a populated SDK tree.
-SDK_MARKER='Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll'
+SDK_MARKER='Logi/Trueforce/*/trueforce_sdk_x64.dll'
+
+# G HUB revises these SDKs, and the version is a directory name. Hardcoding
+# 1_3_11 and 9_1_0 meant a current G HUB install (1_3_12, 9_1_1) was simply
+# not seen, with no hint as to why (issue #54). Discover whatever is there
+# and prefer the newest.
+newest_sdk_version() {
+	# $1 = parent directory holding version-named subdirectories
+	[ -d "$1" ] || return 1
+	ls -1 "$1" 2>/dev/null | grep -E '^[0-9]+(_[0-9]+)*$' | sort -V | tail -1
+}
 
 resolve_sdk_dir() {
 	if [ -n "$SDK_DIR_OVERRIDE" ]; then
@@ -75,10 +85,20 @@ resolve_sdk_dir() {
 		# below always points at a path that exists.
 		mkdir -p "$SDK_DIR" 2>/dev/null || true
 	fi
-	SRC_TF_X64="$SDK_DIR/Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll"
-	SRC_TF_X86="$SDK_DIR/Logi/Trueforce/1_3_11/trueforce_sdk_x86.dll"
-	SRC_WHEEL_X64="$SDK_DIR/Logi/wheel_sdk/9_1_0/logi_steering_wheel_x64.dll"
-	SRC_WHEEL_X86="$SDK_DIR/Logi/wheel_sdk/9_1_0/logi_steering_wheel_x86.dll"
+	TF_VER="$(newest_sdk_version "$SDK_DIR/Logi/Trueforce")"
+	WHEEL_VER="$(newest_sdk_version "$SDK_DIR/Logi/wheel_sdk")"
+	: "${TF_VER:=1_3_11}"
+	: "${WHEEL_VER:=9_1_0}"
+	SRC_TF_X64="$SDK_DIR/Logi/Trueforce/$TF_VER/trueforce_sdk_x64.dll"
+	SRC_TF_X86="$SDK_DIR/Logi/Trueforce/$TF_VER/trueforce_sdk_x86.dll"
+	SRC_WHEEL_X64="$SDK_DIR/Logi/wheel_sdk/$WHEEL_VER/logi_steering_wheel_x64.dll"
+	SRC_WHEEL_X86="$SDK_DIR/Logi/wheel_sdk/$WHEEL_VER/logi_steering_wheel_x86.dll"
+	# The prefix keeps the same version directory the files came from, so a
+	# game reading the registered path finds the version it was given.
+	TF_PFX_DIR="drive_c/Program Files/Logi/Trueforce/$TF_VER"
+	WHEEL_PFX_DIR="drive_c/Program Files/Logi/wheel_sdk/$WHEEL_VER"
+	TF_WINE_PATH="C:\\Program Files\\Logi\\Trueforce\\$TF_VER\\trueforce_sdk_x64.dll"
+	WHEEL_WINE_PATH="C:\\Program Files\\Logi\\wheel_sdk\\$WHEEL_VER\\logi_steering_wheel_x64.dll"
 }
 
 RANGE_PROXY=${RANGE_PROXY:-0}
