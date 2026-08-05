@@ -1,6 +1,7 @@
 EXPORTS
-; Generated from the real DLL export table; all but the four rotation
-; getters forward straight through to Logitech's library.
+; Generated from the real DLL's Ordinal/Name Pointer table.
+; All but the four rotation getters forward to Logitech's library.
+; Regenerate with: tools/gen-proxy-def.sh
 logiAdvancedGetThreadHandles=trueforce_real.logiAdvancedGetThreadHandles
 logiTrueForceAvailable=trueforce_real.logiTrueForceAvailable
 logiTrueForceClearKF=trueforce_real.logiTrueForceClearKF
@@ -33,7 +34,9 @@ logiTrueForceSetTorqueKF=trueforce_real.logiTrueForceSetTorqueKF
 logiTrueForceSetTorqueKFPiecewise=trueforce_real.logiTrueForceSetTorqueKFPiecewise
 logiTrueForceSetTorqueTFdouble=trueforce_real.logiTrueForceSetTorqueTFdouble
 logiTrueForceSetTorqueTFfloat=trueforce_real.logiTrueForceSetTorqueTFfloat
-logiTrueForceSetTorqueTFint=trueforce_real.logiTrueForceSetTorqueTFint
+logiTrueForceSetTorqueTFint16=trueforce_real.logiTrueForceSetTorqueTFint16
+logiTrueForceSetTorqueTFint32=trueforce_real.logiTrueForceSetTorqueTFint32
+logiTrueForceSetTorqueTFint8=trueforce_real.logiTrueForceSetTorqueTFint8
 logiTrueForceSupported=trueforce_real.logiTrueForceSupported
 logiTrueForceSupportedByDirectInputA=trueforce_real.logiTrueForceSupportedByDirectInputA
 logiTrueForceSupportedByDirectInputW=trueforce_real.logiTrueForceSupportedByDirectInputW

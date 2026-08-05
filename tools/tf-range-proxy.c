@@ -191,10 +191,44 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 	(void)inst;
 	(void)reserved;
 	if (reason == DLL_PROCESS_ATTACH) {
+		char path[MAX_PATH + 32], *slash;
+
 		InitializeCriticalSection(&loglock);
 		logfp = fopen("C:\\tf-range-proxy.log", "a");
 		log_ready = 1;
-		say("loaded; wheel range from sysfs = %d", wheel_range_degrees());
+
+		/*
+		 * Load Logitech's library by absolute path, now, before anything
+		 * asks for one of the fifty-two entry points that forward to it.
+		 *
+		 * A PE forward names its target by module name, and the loader
+		 * resolves that through the ordinary search path. That path does
+		 * not include this DLL's own directory, so with the game's
+		 * working directory somewhere else every forwarded export failed
+		 * with ERROR_PROC_NOT_FOUND while the four implemented here kept
+		 * working. From the driver's seat that is the worst possible
+		 * shape of failure: the rotation is fixed and the wheel goes
+		 * completely dead (issue #27).
+		 *
+		 * Loading it here registers it under its base name, which is the
+		 * name the forwards resolve through, so they find it already in
+		 * memory rather than going looking.
+		 */
+		if (GetModuleFileNameA(inst, path, MAX_PATH)) {
+			slash = strrchr(path, '\\');
+			if (slash) {
+				strcpy(slash + 1, "trueforce_real.dll");
+				if (LoadLibraryExA(path, NULL,
+						   LOAD_WITH_ALTERED_SEARCH_PATH))
+					say("loaded Logitech's library from %s", path);
+				else
+					say("COULD NOT load %s (error %lu): the "
+					    "forwarded calls will fail and the "
+					    "wheel will feel dead",
+					    path, (unsigned long)GetLastError());
+			}
+		}
+		say("wheel range from sysfs = %d", wheel_range_degrees());
 	} else if (reason == DLL_PROCESS_DETACH) {
 		if (logfp)
 			fclose(logfp);
