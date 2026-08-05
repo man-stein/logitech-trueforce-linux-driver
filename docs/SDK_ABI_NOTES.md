@@ -81,11 +81,45 @@ conventions, and its equivalent writes an `int`, not a `double`:
 |---|---|
 | `LogiGetOperatingRange` (`logi_steering_wheel_x64.dll`) | `bool f(int index, int *range)` |
 
+## Audit of `libtrueforce`, 2026-08-05
+
+All 54 declarations checked against the real library's prologues. **Seventeen
+are wrong**, and they fail the same way: the real library reports through an
+out parameter and returns a status, while the header declares a value return
+and no out parameter. Nothing written against the real SDK can call these.
+
+```
+bool   logiTrueForceAvailable(int)          bool   logiTrueForceIsPaused(int)
+bool   logiTrueForceSupported(int)          bool   logiWheelSdkHasControl(int)
+double logiTrueForceGetAngleDegrees(int)    double logiTrueForceGetAngleRadians(int)
+double logiTrueForceGetAngularVelocityDegrees(int)
+double logiTrueForceGetAngularVelocityRadians(int)
+double logiTrueForceGetDamping(int)         double logiTrueForceGetDampingMax(int)
+double logiTrueForceGetGainKF(int)          double logiTrueForceGetGainTF(int)
+double logiTrueForceGetHapticRate(int)      double logiTrueForceGetTorqueKF(int)
+double logiTrueForceGetMaxContinuousTorqueKF(int)
+double logiTrueForceGetMaxPeakTorqueKF(int)
+int    logiWheelGetVersion(int index, ...)  -- first argument is a pointer
+```
+
+Each should become `int f(..., T *out)` returning 0 or `0x80000001`, the shape
+already applied to the rotation getters. The setters, which pass values in
+rather than out, check out clean: `logiTrueForceSetGainTF(int, double)` and
+the `SetTorqueTF*` family match.
+
+This is an ABI break for `libtrueforce`, and deliberately not rushed in
+alongside a release. It costs nothing to defer, because no caller written
+against the real SDK could ever have linked against the current shape.
+
+Reproduce with the method above, or the throwaway script in the commit that
+added this section.
+
 ## Not established
 
-- Every signature in `libtrueforce` not listed above. Three of the three
-  checked were wrong, so the rest should be assumed unverified rather than
-  assumed correct.
+- Whether the out parameter of each getter above is a `double`, an `int` or a
+  `bool`. The status-return shape is certain; the width is not, and the safe
+  way to settle each is the write instruction in the body rather than the
+  prologue.
 
 ## Which SDK a game uses
 
