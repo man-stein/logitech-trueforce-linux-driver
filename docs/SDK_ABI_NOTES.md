@@ -44,6 +44,31 @@ null context. Verified by trying it.
 | `logiWheelGetOperatingRangeBoundsDegrees` | `int f(int index, double *lo, double *hi)` | RCX, RDX, R8; RDX null-checked |
 | `logiTrueForceSetGainTF` | `int f(int index, double gain)` | `movsd %xmm1` = second argument is a double |
 | `logiTrueForceAvailable` | first argument is a **pointer**, not an index | `test %rcx,%rcx` then `0x80000001` |
+| `GetOperatingRangeBounds*` | the least and greatest range that can be **set** (90 and 2700), not the rim's angular extremes | see below |
+
+### Why bounds means the settable limits
+
+Worth writing down, because the other reading is plausible and was in this
+tree for a while. Five things agree:
+
+- the name: bounds *of the operating range*, and the operating range is a
+  single total-degrees number, which Logitech's own documentation states
+  (`LogiGetOperatingRange` "fills the range parameter with the current
+  controller operating range")
+- the library's own strings, `ANGULAR_RANGE_MIN` and `ANGULAR_RANGE_MAX`
+- `docs/PROTOCOL_SPECIFICATION.md`: settable range is 90 to 2700 in 10
+  degree steps, and 90 being the minimum is exactly why a failed lookup
+  produces a 90 degree wheel
+- the function reads its answer from the device through a vtable rather than
+  from constants, which is what a capability query looks like
+- a game asking is most plausibly validating a rotation setting, and both
+  ACC and the SDK pair the getter with a setter
+
+The competing reading, `-range/2 .. +range/2`, rested on `450.0` appearing
+four times in the binary. Those are all in `.text`: coincidental bytes inside
+instructions, not double constants, which would live in `.rdata`. There is no
+evidence for it at all.
+
 
 The legacy Steering Wheel SDK is a different library with different
 conventions, and its equivalent writes an `int`, not a `double`:
@@ -54,12 +79,6 @@ conventions, and its equivalent writes an `int`, not a `double`:
 
 ## Not established
 
-- What `GetOperatingRangeBounds` means. The proxy answers `90..2700`, the
-  wheel's minimum and maximum settable range, which matches the protocol
-  documentation and the library's own `ANGULAR_RANGE_MIN`/`MAX` strings.
-  `libtrueforce` instead answered `-range/2 .. +range/2`. Both are
-  self-consistent and only one can be right; it cannot be resolved by
-  disassembly alone because the function needs an initialised session.
 - Every signature in `libtrueforce` not listed above. Three of the three
   checked were wrong, so the rest should be assumed unverified rather than
   assumed correct.

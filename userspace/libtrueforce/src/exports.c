@@ -209,13 +209,20 @@ int logiWheelGetOperatingRangeBoundsDegrees(int index, double *lo, double *hi)
 	double r;
 	int st = logiWheelGetOperatingRangeDegrees(index, &r);
 
-	if (st != LOGITF_OK || r <= 0.0) {
+	/*
+	 * The bounds of the operating range, meaning the least and greatest
+	 * range that can be set, not the rim's angular extremes. This returned
+	 * -range/2 to +range/2 on the strength of nothing; see
+	 * docs/SDK_ABI_NOTES.md for why the other reading is the right one.
+	 */
+	(void)r;
+	if (st != LOGITF_OK) {
 		if (lo) *lo = 0;
 		if (hi) *hi = 0;
 		return LOGITF_ERR_NOT_SUPPORTED;
 	}
-	if (lo) *lo = -r / 2.0;
-	if (hi) *hi =  r / 2.0;
+	if (lo) *lo = 90.0;
+	if (hi) *hi = 2700.0;
 	return LOGITF_OK;
 }
 
