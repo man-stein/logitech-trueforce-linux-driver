@@ -5,6 +5,18 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Fixed
+
+- **Corrected the explanation shipped in 0.27.0 for a failed range read.**
+  Those notes said a mid-session failure was most likely contention with a
+  game's force-feedback traffic. An owner's log disproves it: the read
+  succeeds at probe and fails seven seconds later with no game running at
+  all. The cause is not established, and the driver no longer guesses at one.
+  It has no practical effect, since on that wheel the range is never moved
+  and so there is nothing to restore either way (issue #27).
+
 ## 0.27.0 - 2026-08-04
 
 ### Changed

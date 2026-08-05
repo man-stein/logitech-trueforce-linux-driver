@@ -3471,11 +3471,12 @@ static DEVICE_ATTR(range, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH, hidpp
  * range_restore: opt in to putting the operating range back after a game's
  * SDK session has moved it (see hidpp_ff_range_poll_work).
  *
- * Off by default, and it should stay that way until someone has watched it
- * on the wheel in question. Enabling it means this driver writes a range
- * while a game holds the wheel; the direct-drive equivalent had to learn
- * that doing so at the wrong moment desynchronises the centre violently,
- * which is why the write here is gated on the rim being near centre.
+ * On by default, matching the direct-drive wheels, after an owner ran it on
+ * the hardware and reported no effect at the rim. It means this driver may
+ * write a range while a game holds the wheel; the direct-drive equivalent
+ * had to learn that doing so at the wrong moment desynchronises the centre
+ * violently, which is why the write here is gated on the rim being near
+ * centre. Set it to 0 to stop it.
  */
 static ssize_t hidpp_ff_range_restore_show(struct device *dev,
 					   struct device_attribute *attr,
@@ -3526,8 +3527,14 @@ static DEVICE_ATTR(range_restore, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROT
 /*
  * Consecutive failed aperture reads before saying so a second time. One
  * failure means nothing: the same read succeeds at probe on a wheel that
- * later times out, so a miss mid-session is most likely contention with a
- * game's force-feedback traffic rather than a wheel that cannot answer.
+ * later times out.
+ *
+ * Why it then stops answering is not established. Contention with a game's
+ * force-feedback traffic was the first guess and the evidence does not
+ * support it: an owner saw the read succeed at probe and fail seven seconds
+ * later with no game running at all (issue #27). Since the feature has
+ * nothing to restore on that wheel anyway, this is a wrong log line rather
+ * than a wrong wheel, and it is recorded here rather than guessed at again.
  */
 #define HIDPP_FF_RANGE_READ_FAILS_MAX	10
 /*
@@ -3641,7 +3648,7 @@ static void hidpp_ff_range_poll_work(struct work_struct *work)
 		} else if (data->restore_read_fails == HIDPP_FF_RANGE_READ_FAILS_MAX) {
 			data->restore_read_fails++;	/* log this once only */
 			hid_info(hid,
-				 "range restore: the operating range has been unreadable for %u polls; if a game is running this is most likely HID++ contention, not a fault\n",
+				 "range restore: the operating range has been unreadable for %u polls; the range this driver set is still in force, so this is a lost readback rather than a wheel that has moved\n",
 				 HIDPP_FF_RANGE_READ_FAILS_MAX);
 		}
 		goto rearm;
