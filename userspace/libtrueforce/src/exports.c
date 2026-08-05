@@ -180,9 +180,18 @@ double logiWheelGetOperatingRangeDegrees(int index)
 
 	if (logitf_find_by_index(index, &dev))
 		return 0.0;
-	if (logitf_sysfs_read_int(dev, "wheel_range", &v) < 0)
-		return 0.0;
-	return (double)v;
+	/*
+	 * The direct-drive wheels expose wheel_range; the G923 has no wheel_*
+	 * attributes at all and calls the same setting "range". Reading only
+	 * the first meant this returned 0 for every G923, which a caller is
+	 * entitled to read as "no wheel" rather than "wheel present, range
+	 * unknown".
+	 */
+	if (logitf_sysfs_read_int(dev, "wheel_range", &v) == 0)
+		return (double)v;
+	if (logitf_sysfs_read_int(dev, "range", &v) == 0)
+		return (double)v;
+	return 0.0;
 }
 
 double logiWheelGetOperatingRangeRadians(int index)

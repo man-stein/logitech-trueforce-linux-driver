@@ -9,6 +9,11 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ### Fixed
 
+- **`libtrueforce` reported no rotation range for a G923.** Its range getter
+  read `wheel_range`, which only the direct-drive wheels have; a G923 calls
+  the same setting `range`. It returned 0, which a caller may reasonably read
+  as "no wheel" rather than "wheel present, range unknown". It now tries both.
+
 - **`doctor` told every G923 owner their wheel was not plugged in.** It
   looked for the three direct-drive USB ids only, so a G923 was invisible to
   it however well the wheel was working, and the driver-health section was
