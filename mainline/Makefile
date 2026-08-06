@@ -26,14 +26,16 @@ ifdef DEBUG
   MAKE_OPTS += CONFIG_HID_LOGITECH_HIDPP_DEBUG=1
 endif
 
+# $(CURDIR), not $(PWD): PWD comes from the environment and does not follow
+# make's own -C, so `make -C mainline` pointed the build at the repo root.
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) $(MAKE_OPTS) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) $(MAKE_OPTS) modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 
 install: all
-	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules_install
 	depmod -a
 
 load: all

@@ -91,7 +91,20 @@ impl Kind {
                 Ok(Value::Rgb(cs))
             }
             Kind::Curve => {
-                if raw == "reset" || raw.is_empty() || raw.contains("built-in") {
+                // The driver's read format is
+                // "<loaded>/<max> points loaded (0 = built-in curve)". The
+                // "built-in" in it is the legend and is present either way,
+                // so the count is what has to be read, not the words: 0 means
+                // no curve, anything else means a curve whose points this
+                // attribute cannot give back.
+                if let Some((loaded, _)) = parse_points_loaded(raw) {
+                    return Ok(if loaded == 0 {
+                        Value::Curve(vec![])
+                    } else {
+                        Value::CurveLoaded(loaded)
+                    });
+                }
+                if raw == "reset" || raw.is_empty() {
                     return Ok(Value::Curve(vec![]));
                 }
                 let mut pts = Vec::new();
@@ -155,6 +168,16 @@ impl Kind {
             (Kind::RgbStrip { .. }, Value::Rgb(cs)) => {
                 cs.iter().map(Color::to_hex).collect::<Vec<_>>().join(" ")
             }
+            // A loaded curve whose points cannot be read must not be
+            // formatted. Callers that persist settings treat an error as
+            // "skip this attribute", which leaves the wheel's curve alone;
+            // emitting "reset" here is what silently erased it.
+            (Kind::Curve, Value::CurveLoaded(n)) => {
+                return Err(Error::Parse(format!(
+                    "{n} curve points are loaded on the wheel but the attribute \
+                     cannot read them back, so this curve cannot be reproduced"
+                )))
+            }
             (Kind::Curve, Value::Curve(pts)) => {
                 if pts.is_empty() {
                     "reset".into()
@@ -214,6 +237,7 @@ impl Kind {
             // firmware string) renders on the single line the TUI gives it.
             (Kind::TextField { .. }, Value::Text(s)) => s.replace('\n', " / "),
             (Kind::RgbStrip { .. }, Value::Rgb(cs)) => format!("{} LEDs", cs.len()),
+            (Kind::Curve, Value::CurveLoaded(n)) => format!("{n} points"),
             (Kind::Curve, Value::Curve(p)) if p.is_empty() => "built-in".into(),
             (Kind::Curve, Value::Curve(p)) => format!("{} points", p.len()),
             (Kind::Pair { .. }, Value::Pair(lo, hi)) if *lo == 0 && *hi == 0 => "none".into(),
@@ -326,6 +350,40 @@ mod tests {
         assert!(matches!(k.parse("ff0000"), Err(Error::Invalid))); // wrong count
     }
 
+    /// The driver always prints "(0 = built-in curve)" as a legend, whatever
+    /// the actual count. Reading the words instead of the number made a
+    /// loaded curve look like no curve, and a computer profile then recorded
+    /// it as `reset` and wiped it on the next apply.
+    #[test]
+    fn a_loaded_curve_is_not_mistaken_for_the_built_in_one() {
+        let k = Kind::Curve;
+
+        // Nothing loaded: genuinely the built-in curve.
+        assert_eq!(
+            k.parse("0/64 points loaded (0 = built-in curve)\n").unwrap(),
+            Value::Curve(vec![])
+        );
+
+        // Loaded: the count survives, and the legend does not fool it.
+        for n in [1u16, 17, 64] {
+            let raw = format!("{n}/64 points loaded (0 = built-in curve)\n");
+            assert_eq!(k.parse(&raw).unwrap(), Value::CurveLoaded(n), "{raw:?}");
+            assert_eq!(k.display(&Value::CurveLoaded(n)), format!("{n} points"));
+        }
+    }
+
+    /// The data-loss step itself: a curve that cannot be read back must not
+    /// be formatted into a profile at all. Profile save treats a formatting
+    /// error as "skip this attribute", which leaves the wheel's own curve
+    /// untouched; emitting "reset" is what erased it.
+    #[test]
+    fn an_unreadable_curve_refuses_to_be_written_to_a_profile() {
+        let k = Kind::Curve;
+        assert!(k.format(&Value::CurveLoaded(64)).is_err());
+        // An empty curve still means "reset", which is a real user intent.
+        assert_eq!(k.format(&Value::Curve(vec![])).unwrap(), "reset");
+    }
+
     #[test]
     fn curve_reset_and_pairs() {
         let k = Kind::Curve;
@@ -435,3 +493,13 @@ mod slot_text_tests {
         );
     }
 }
+
+/// Parse the driver's `"<loaded>/<max> points loaded ..."` curve read, or
+/// `None` when `raw` is not that format (a profile file's own `a:b c:d` list,
+/// or `reset`).
+fn parse_points_loaded(raw: &str) -> Option<(u16, u16)> {
+    let head = raw.split_whitespace().next()?;
+    let (loaded, max) = head.split_once('/')?;
+    Some((loaded.trim().parse().ok()?, max.trim().parse().ok()?))
+}
+

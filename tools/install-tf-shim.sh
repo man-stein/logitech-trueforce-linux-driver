@@ -74,8 +74,20 @@ newest_sdk_version() {
 	# an error, and under `set -e` returning non-zero here killed the whole
 	# script at the assignment below before its own fallback could run: a
 	# user who had not staged the SDK yet got no install and no message.
+	#
+	# That first fix covered only the missing-directory case. A directory
+	# that exists but holds no version-named entry made grep exit 1,
+	# pipefail carried it out of the pipeline, and set -e killed the script
+	# at the assignment before the caller's own default could apply. The
+	# way to reach that state is to copy G HUB's Logi folder but drop the
+	# DLLs straight into Logi/Trueforce/ instead of a version directory,
+	# which is a mistake the missing-files message exists to correct and
+	# which instead produced no output at all.
+	#
+	# So: no answer is an answer. Every path here succeeds, and an empty
+	# result means "nothing installed", never "something went wrong".
 	[ -d "$1" ] || return 0
-	ls -1 "$1" 2>/dev/null | grep -E '^[0-9]+(_[0-9]+)*$' | sort -V | tail -1
+	ls -1 "$1" 2>/dev/null | grep -E '^[0-9]+(_[0-9]+)*$' | sort -V | tail -1 || true
 }
 
 resolve_sdk_dir() {
@@ -179,8 +191,26 @@ install_in_prefix() {
 	local tf_dir="$prefix/$TF_PFX_DIR"
 	local wheel_dir="$prefix/$WHEEL_PFX_DIR"
 	mkdir -p "$tf_dir" "$wheel_dir"
+	# A prefix that already carries the rotation proxy keeps it. Without
+	# this, the install below overwrites trueforce_sdk_x64.dll, which on a
+	# proxied prefix IS the proxy, with Logitech's stock library: a plain
+	# re-run silently undid a fix the user had deliberately applied. The
+	# way people met that is `sudo ./tools/setup.sh` after a kernel update,
+	# from a script whose own header calls itself idempotent, and the only
+	# symptom is the 90-degree steering clamp quietly coming back.
+	#
+	# Detected by the forward target sitting beside it, which is the same
+	# evidence `setup.sh doctor` uses.
+	# Scoped to this prefix, deliberately: mutating the global would make
+	# one proxied prefix turn the proxy on for every prefix processed after
+	# it, which is a worse bug than the one being fixed.
+	local want_proxy="$RANGE_PROXY"
+	if [ -f "$tf_dir/trueforce_real.dll" ] && [ "$want_proxy" != "1" ]; then
+		want_proxy=1
+		echo "  keeping the rotation shim already installed in $prefix"
+	fi
 	install -m 0644 "$SRC_TF_X64" "$tf_dir/trueforce_sdk_x64.dll"
-	if [ "$RANGE_PROXY" = "1" ]; then
+	if [ "$want_proxy" = "1" ]; then
 		# Logitech's library keeps working and keeps every call that
 		# matters; it just moves aside so ours can answer the one
 		# question it cannot answer here. Ours forwards the rest to it
