@@ -2970,6 +2970,8 @@ struct hidpp_ff_private_data {
 	bool restore_gave_up;		/* so the give-up line logs once */
 	bool restore_probed;		/* so the first poll result logs once */
 	u8 restore_read_fails;		/* consecutive aperture-read failures */
+	bool restore_ever_read;		/* the wheel answered the range read at least once */
+	bool restore_unsupported;	/* it never has, so stop asking */
 };
 
 struct hidpp_ff_work_data {
@@ -3513,6 +3515,10 @@ static ssize_t hidpp_ff_range_restore_store(struct device *dev,
 		 * produces evidence rather than repeating the silence. */
 		data->restore_probed = false;
 		data->restore_read_fails = 0;
+		/* An explicit re-enable is a request to try again, including
+		 * on a wheel we had written off. */
+		data->restore_unsupported = false;
+		data->restore_ever_read = false;
 	}
 	WRITE_ONCE(data->restore_enabled, on);
 	return count;
@@ -3619,6 +3625,8 @@ static void hidpp_ff_range_poll_work(struct work_struct *work)
 
 	if (!READ_ONCE(data->restore_enabled))
 		goto rearm;
+	if (data->restore_unsupported)
+		goto rearm;
 	if (data->range <= 0)
 		goto rearm;
 
@@ -3647,13 +3655,37 @@ static void hidpp_ff_range_poll_work(struct work_struct *work)
 				 ret);
 		} else if (data->restore_read_fails == HIDPP_FF_RANGE_READ_FAILS_MAX) {
 			data->restore_read_fails++;	/* log this once only */
-			hid_info(hid,
-				 "range restore: the operating range has been unreadable for %u polls; the range this driver set is still in force, so this is a lost readback rather than a wheel that has moved\n",
-				 HIDPP_FF_RANGE_READ_FAILS_MAX);
+			if (!data->restore_ever_read) {
+				/*
+				 * Never answered, not once, since probe. That
+				 * is not contention, it is a wheel with no
+				 * readable operating range: the G923 Xbox
+				 * edition returns -110 to every one of these
+				 * and always will (issue #27). Retrying costs
+				 * a HID++ round trip every few seconds for the
+				 * life of the session, and because an
+				 * unrelated success resets the counter the
+				 * same line comes back: one reporter's dmesg
+				 * carried it three times in twenty minutes.
+				 *
+				 * Stop asking, and say why once. Nothing is
+				 * lost, since the restore only ever acts on a
+				 * range it managed to read.
+				 */
+				data->restore_unsupported = true;
+				hid_info(hid,
+					 "range restore: this wheel does not report its operating range (%d); disabling the check. Force feedback and rotation are unaffected\n",
+					 ret);
+			} else {
+				hid_info(hid,
+					 "range restore: the operating range has been unreadable for %u polls; the range this driver set is still in force, so this is a lost readback rather than a wheel that has moved\n",
+					 HIDPP_FF_RANGE_READ_FAILS_MAX);
+			}
 		}
 		goto rearm;
 	}
 	data->restore_read_fails = 0;
+	data->restore_ever_read = true;
 
 	/*
 	 * The first successful read after each enable, reported once. It is
