@@ -194,9 +194,14 @@ GitHub does.
 Import the signing key, then add the repository:
 
 ```bash
-sudo pacman-key --recv-keys <KEYID> --keyserver keyserver.ubuntu.com
-sudo pacman-key --lsign-key <KEYID>
+sudo pacman-key --recv-keys 4B5BDD7802723B289FA934CACD77C00A443B9E79 \
+  --keyserver keyserver.ubuntu.com
+sudo pacman-key --lsign-key 4B5BDD7802723B289FA934CACD77C00A443B9E79
 ```
+
+The full fingerprint, not a short id: short ids can be collided, and this is
+the key your package manager will trust. It signs nothing but this
+repository's packages.
 
 ```ini
 # /etc/pacman.conf, at the end
