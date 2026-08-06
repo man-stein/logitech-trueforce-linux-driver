@@ -728,13 +728,13 @@ fn setup_sections<S: SysfsIo>(
                     lines.push(Line::from(vec![Span::raw("  logi-ffb: "), ffb_span]));
                     lines.push(Line::from(vec![
                         Span::raw("  Steam launch options: "),
-                        Span::styled("logi-ffb %command%", Style::default().fg(Color::Yellow)),
+                        Span::styled(logi_wheel_core::games::LAUNCH_LOGI_FFB, Style::default().fg(Color::Yellow)),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
                         Span::styled("  logi-ffb: ", dim),
                         ffb_span,
-                        Span::styled("   launch: logi-ffb %command%", dim),
+                        Span::styled(format!("   launch: {}", logi_wheel_core::games::LAUNCH_LOGI_FFB), dim),
                     ]));
                 }
             }
@@ -835,7 +835,7 @@ fn setup_sections<S: SysfsIo>(
                                 }
                             }
                             Some(logi_wheel_core::games::SetupAction::UseLogiFfb) => Span::styled(
-                                "launch: logi-ffb %command%",
+                                format!("launch: {}", logi_wheel_core::games::LAUNCH_LOGI_FFB),
                                 Style::default().fg(Color::Yellow),
                             ),
                             Some(logi_wheel_core::games::SetupAction::SimulatedTrueForce) => {
@@ -1058,7 +1058,7 @@ fn setup_sections<S: SysfsIo>(
     lines.push(Line::from(vec![
         Span::styled("Full game compatibility list: ", dim),
         Span::styled(
-            "github.com/mescon/logitech-trueforce-linux-driver/wiki",
+            "github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games",
             Style::default().fg(Color::Cyan),
         ),
     ]));

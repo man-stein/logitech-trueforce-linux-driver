@@ -47,9 +47,14 @@ build() {
 package_logitech-trueforce-dkms() {
 	pkgdesc="DKMS kernel driver for Logitech TrueForce direct-drive wheels (RS50, G PRO): force feedback, TrueForce texture routing, and wheel settings via sysfs"
 	license=('GPL-2.0-only')
-	depends=('dkms')
-	optdepends=('logi-wheel: settings TUI, FFB proxy, simulated TrueForce and shim installer'
-	            'oversteer: GUI to configure wheel settings'
+	# logi-wheel is a hard dependency, not a suggestion: this package
+	# installs udev rule 73, and that rule dispatches
+	# /usr/bin/logi-g923-modeswitch, which logi-wheel ships. Arch does not
+	# install optdepends, so as one it left a rule that could never fire
+	# and a G923 Xbox edition stuck in console mode - indistinguishable
+	# from a dead wheel. Debian, OBS and akmods all pull it in by default.
+	depends=('dkms' 'logi-wheel' 'usbutils')
+	optdepends=('oversteer: GUI to configure wheel settings'
 	            'usb_modeswitch: switch the G923 Xbox edition (c26d) into PC mode on plug-in')
 	provides=("$_dkmsname")
 	conflicts=("$_dkmsname")
@@ -138,6 +143,13 @@ package_logi-wheel() {
 	# $LOGITECH_TRUEFORCE_SDK_DIR / ~/.local/share/logitech-trueforce/sdk).
 	install -Dm755 "$_src/tools/install-tf-shim.sh" \
 		"$pkgdir/usr/bin/logi-shim"
+
+	# The rotation proxy the installer stages with --range-proxy. Shipped
+	# prebuilt because it is a Windows DLL and the people who need it are
+	# on Linux without a cross-compiler; without this, --range-proxy is
+	# unreachable for anyone who did not clone the repo.
+	install -Dm644 "$_src/tools/tf-range-proxy.dll" \
+		"$pkgdir/usr/share/logitech-trueforce/tf-range-proxy.dll"
 
 	# G923 Xbox mode-switch helper, dispatched by udev rule 73. Must not be
 	# run from the udev worker itself; see the rule's own comment.

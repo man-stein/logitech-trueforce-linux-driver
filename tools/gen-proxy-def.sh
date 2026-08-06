@@ -6,8 +6,18 @@
 # logiTrueForceSetTorqueTFint16/int32/int8 collapsed into one name that does
 # not exist. The proxy then forwarded a symbol nobody exports and omitted
 # three that games may well call. Nothing complains at build time.
-set -eu
-DLL="${1:-sdk/trueforce_1_3_11/trueforce_sdk_x64.dll}"
+set -e
+set -o pipefailu
+# Default matches the layout every other consumer uses. It pointed at
+# sdk/trueforce_1_3_11/, a path nothing in the tree stages, so running this
+# with no argument after staging the SDK the documented way failed on a
+# missing file - and, with no pipefail, truncated the .def to its header
+# while reporting success, yielding a proxy that forwards nothing.
+DLL="${1:-$(ls -1 sdk/Logi/Trueforce/*/trueforce_sdk_x64.dll 2>/dev/null | sort -V | tail -1)}"
+if [ -z "$DLL" ] || [ ! -f "$DLL" ]; then
+	echo "error: no trueforce_sdk_x64.dll found; stage the SDK or pass the path" >&2
+	exit 1
+fi
 OUT="${2:-tools/tf-range-proxy.def}"
 OVERRIDE="logiWheelGetOperatingRangeDegrees logiWheelGetOperatingRangeRadians
           logiWheelGetOperatingRangeBoundsDegrees logiWheelGetOperatingRangeBoundsRadians"

@@ -167,8 +167,14 @@ fi
 # pressure-vessel doesn't expose host /usr/lib to the game), so this
 # step runs as the invoking user, not root. Skip silently if no Steam
 # library is present.
+# No winegcc check: this used to gate on it and tell the user to install
+# wine-devel, which was true when the shim was compiled and has not been
+# since it became a copy of Logitech's own DLLs plus a system.reg edit. A
+# Proton-only machine, which is most of them, was told the shim was skipped
+# for a tool it had no reason to have. setup.sh's own shim step never had
+# the gate, so the two entry points disagreed about the same install.
 TF_INSTALL="$REPO_ROOT/tools/install-tf-shim.sh"
-if [ -x "$TF_INSTALL" ] && command -v winegcc >/dev/null 2>&1; then
+if [ -x "$TF_INSTALL" ]; then
 	echo "== installing TrueForce SDK shim for Proton games =="
 	if [ -n "${SUDO_USER:-}" ]; then
 		sudo -u "$SUDO_USER" "$TF_INSTALL" --all-steam \
@@ -177,9 +183,6 @@ if [ -x "$TF_INSTALL" ] && command -v winegcc >/dev/null 2>&1; then
 		"$TF_INSTALL" --all-steam \
 			|| echo "warning: TF shim install failed (continuing)"
 	fi
-elif [ -x "$TF_INSTALL" ]; then
-	echo "note: skipping TrueForce SDK shim (winegcc not available)."
-	echo "      install wine/wine-devel and re-run tools/install-tf-shim.sh --all-steam"
 fi
 
 cat <<'EOF'

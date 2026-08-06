@@ -36,7 +36,15 @@ pub const DEFAULT_INTENSITY: u8 = 60;
 /// Default per-game intensity (percent), relative to the master.
 pub const DEFAULT_GAME_INTENSITY: u8 = 100;
 /// Default pitch scale (percent of the crank rate).
-pub const DEFAULT_PITCH: u8 = 50; // hardware feel-test verdict 2026-07-20
+///
+/// 25, matching the daemon. This read 50 for a while, which was the value
+/// from before the daemon modelled the cylinder firing rate: afterwards 25
+/// produces exactly the feel 50 used to (rpm/60 * 4/2 * 0.25 == rpm/60 *
+/// 0.5), so the daemon moved and this mirror did not. The visible result was
+/// a fresh install whose Rev rate slider said 50% while the daemon ran at
+/// 25%, and nudging the slider and putting it back silently doubled it.
+/// Pinned against the daemon by tf-sim's `frontend_compat` test.
+pub const DEFAULT_PITCH: u8 = 25;
 
 /// The daemon's process name, as `/proc/<pid>/stat` reports it (11 chars,
 /// safely under the kernel's 15-char comm truncation).
@@ -502,7 +510,7 @@ pub fn set_game_intensity_in(path: &Path, id: &str, intensity: u8) -> Result<(),
 /// GPL-3.0-or-later boundary), same reason [`game_id_for_title`] hardcodes
 /// the ids.
 pub const DAEMON_GAME_IDS: &[&str] =
-    &["dirt-rally-2", "codemasters", "ams2-pcars2", "f1", "beamng", "ea-wrc"];
+    &["dirt-rally-2", "codemasters", "ams2-pcars2", "f1", "beamng", "ea-wrc", "relay"];
 
 /// The tf-sim game id for a games-list title, or `None` when the daemon
 /// has no per-game id for it. Deliberately conservative: only titles whose

@@ -163,11 +163,38 @@ pub fn installed_games(roots: &[PathBuf]) -> Vec<SteamGame> {
     games
 }
 
-/// Whether `dir` holds a populated SDK tree: a `trueforce_sdk_x64.dll`
-/// under `<dir>/Logi/Trueforce/<any version>/`. The Setup pages use this
-/// for the SDK folder field's live validity indicator.
+/// Where the steering-wheel SDK DLLs sit, above the version directory.
+const SDK_WHEEL_DIR: &str = "Logi/wheel_sdk";
+
+/// Whether `dir` holds a populated SDK tree.
+///
+/// Checks all four DLLs the installer requires, not just the TrueForce
+/// 64-bit one. Checking a single file meant the Setup page lit the folder
+/// green, enabled every per-game install button, and reported "TrueForce
+/// files: found", after which the install exited 2 with `error: missing
+/// .../logi_steering_wheel_x64.dll`. The status line is supposed to be a
+/// fact, so it now asks the same question the installer will.
 pub fn sdk_dir_valid(dir: &Path) -> bool {
-    trueforce_dll_under(&dir.join(SDK_TF_DIR))
+    let tf = dir.join(SDK_TF_DIR);
+    let wheel = dir.join(SDK_WHEEL_DIR);
+    version_dir_with(&tf, &["trueforce_sdk_x64.dll", "trueforce_sdk_x86.dll"])
+        && version_dir_with(
+            &wheel,
+            &["logi_steering_wheel_x64.dll", "logi_steering_wheel_x86.dll"],
+        )
+}
+
+/// Whether any version directory under `parent` holds every one of `files`.
+///
+/// Per directory, not across them: a tree with the 64-bit DLL in one version
+/// and the 32-bit in another is not a version the installer can stage.
+fn version_dir_with(parent: &Path, files: &[&str]) -> bool {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|e| files.iter().all(|f| e.path().join(f).is_file()))
 }
 
 /// Resolve the SDK directory the front-ends' Setup pages report and their
@@ -241,6 +268,18 @@ pub fn shim_install_args(prefix: &str, sdk_dir: Option<&Path>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stage a complete SDK tree at `version`, the way a real G HUB copy
+    /// looks: all four DLLs, TrueForce and steering wheel, 64 and 32 bit.
+    /// Writing only one of them is not a tree the installer can use, so a
+    /// fixture that does is testing a state no user can be in.
+    fn stage_sdk(root: &Path, version: &str) {
+        write(&root.join(SDK_TF_DIR).join(version).join("trueforce_sdk_x64.dll"), "dll");
+        write(&root.join(SDK_TF_DIR).join(version).join("trueforce_sdk_x86.dll"), "dll");
+        write(&root.join(SDK_WHEEL_DIR).join(version).join("logi_steering_wheel_x64.dll"), "dll");
+        write(&root.join(SDK_WHEEL_DIR).join(version).join("logi_steering_wheel_x86.dll"), "dll");
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A unique fixture directory under the system temp dir, removed on
@@ -361,7 +400,7 @@ mod tests {
         let tree = TempTree::new();
         let sdk = tree.path().join("sdk");
         assert!(!sdk_dir_valid(&sdk), "missing tree is invalid");
-        write(&sdk.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
+        stage_sdk(&sdk, "1_3_11");
         assert!(sdk_dir_valid(&sdk), "marker DLL makes it valid");
     }
 
@@ -377,7 +416,7 @@ mod tests {
             let tree = TempTree::new();
 
             let sdk = tree.path().join("sdk");
-            write(&sdk.join(SDK_TF_DIR).join(version).join("trueforce_sdk_x64.dll"), "dll");
+            stage_sdk(&sdk, version);
             assert!(sdk_dir_valid(&sdk), "{version}: SDK folder must be valid");
 
             let pfx = tree.path().join("pfx");
@@ -385,6 +424,38 @@ mod tests {
             write(&pfx.join(SHIM_TF_DIR).join(version).join("trueforce_sdk_x64.dll"), "dll");
             assert!(shim_installed_in(&pfx), "{version}: staged shim must be seen");
         }
+    }
+
+    /// The Setup page's green light has to mean the install will work. It
+    /// used to check one DLL of the four the installer requires, so a folder
+    /// holding only Logi/Trueforce lit green, enabled every install button,
+    /// and then failed with "missing logi_steering_wheel_x64.dll".
+    #[test]
+    fn a_partial_sdk_tree_is_not_valid() {
+        let tree = TempTree::new();
+        let sdk = tree.path().join("sdk");
+
+        // Only the TrueForce half, which is the easy half to copy.
+        write(&sdk.join(SDK_TF_DIR).join("1_3_12/trueforce_sdk_x64.dll"), "dll");
+        write(&sdk.join(SDK_TF_DIR).join("1_3_12/trueforce_sdk_x86.dll"), "dll");
+        assert!(!sdk_dir_valid(&sdk), "the steering-wheel SDK is missing");
+
+        // Complete it and it becomes valid.
+        stage_sdk(&sdk, "1_3_12");
+        assert!(sdk_dir_valid(&sdk));
+    }
+
+    /// The four must live in one version directory. A 64-bit DLL under one
+    /// version and a 32-bit under another is not a version to stage.
+    #[test]
+    fn the_four_dlls_must_share_a_version_directory() {
+        let tree = TempTree::new();
+        let sdk = tree.path().join("sdk");
+        write(&sdk.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
+        write(&sdk.join(SDK_TF_DIR).join("1_3_12/trueforce_sdk_x86.dll"), "dll");
+        write(&sdk.join(SDK_WHEEL_DIR).join("9_1_0/logi_steering_wheel_x64.dll"), "dll");
+        write(&sdk.join(SDK_WHEEL_DIR).join("9_1_0/logi_steering_wheel_x86.dll"), "dll");
+        assert!(!sdk_dir_valid(&sdk), "the TrueForce halves are split across versions");
     }
 
     /// A version directory that exists but holds no DLL is not a valid SDK:
@@ -423,7 +494,7 @@ mod tests {
     /// exists), for the resolver tests.
     fn populated_sdk(tree: &TempTree, name: &str) -> PathBuf {
         let dir = tree.path().join(name);
-        write(&dir.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
+        stage_sdk(&dir, "1_3_11");
         dir
     }
 
@@ -457,7 +528,7 @@ mod tests {
         let tree = TempTree::new();
         let repo = tree.path().join("repo");
         let sdk = repo.join("sdk");
-        write(&sdk.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
+        stage_sdk(&sdk, "1_3_11");
         let installer = repo.join("tools").join("install-tf-shim.sh");
         write(&installer, "#!/bin/sh");
         let found = resolve_sdk_dir_in("", None, Some(&installer), None);

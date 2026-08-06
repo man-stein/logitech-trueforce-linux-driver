@@ -215,14 +215,26 @@ install_in_prefix() {
 		# matters; it just moves aside so ours can answer the one
 		# question it cannot answer here. Ours forwards the rest to it
 		# by name, which is why the name it moves to is fixed.
-		local proxy="$REPO_ROOT/tools/tf-range-proxy.dll"
+		# Checked-out tree first, then the packaged location. Resolving
+		# it only under $REPO_ROOT meant /usr/tools/ for a packaged
+		# logi-shim, so the documented fix for the 90-degree clamp told
+		# every package user to run `make -C tools` in a directory they
+		# do not have, with a cross-compiler they have no reason to own.
+		local proxy=""
+		local cand
+		for cand in "$REPO_ROOT/tools/tf-range-proxy.dll" \
+			    "/usr/share/logitech-trueforce/tf-range-proxy.dll" \
+			    "/usr/local/share/logitech-trueforce/tf-range-proxy.dll"; do
+			[ -f "$cand" ] && { proxy="$cand"; break; }
+		done
 		if [ -f "$proxy" ]; then
 			mv -f "$tf_dir/trueforce_sdk_x64.dll" "$tf_dir/trueforce_real.dll"
 			install -m 0644 "$proxy" "$tf_dir/trueforce_sdk_x64.dll"
 			echo "  rotation shim installed in $prefix"
 		else
-			echo "  WARNING: --range-proxy asked for but tools/tf-range-proxy.dll is missing;" >&2
-			echo "           build it with: make -C tools tf-range-proxy.dll" >&2
+			echo "  WARNING: --range-proxy asked for but tf-range-proxy.dll was not found" >&2
+			echo "           in the checkout or /usr/share/logitech-trueforce/." >&2
+			echo "           From a git checkout: make -C tools tf-range-proxy.dll" >&2
 		fi
 	fi
 	install -m 0644 "$SRC_TF_X86" "$tf_dir/trueforce_sdk_x86.dll"
@@ -300,15 +312,33 @@ PY
 uninstall_in_prefix() {
 	local prefix="$1"
 	local sys_reg="$prefix/system.reg"
-	# Remove our DLL drops (careful: respect the Logitech dir layout users
-	# may have populated with real G HUB files outside of our installer).
-	# We only remove our installed files, not the parent dirs if empty.
-	for f in \
-		"$prefix/$TF_PFX_DIR/trueforce_sdk_x64.dll" \
-		"$prefix/$TF_PFX_DIR/trueforce_sdk_x86.dll" \
-		"$prefix/$WHEEL_PFX_DIR/logi_steering_wheel_x64.dll" \
-		"$prefix/$WHEEL_PFX_DIR/logi_steering_wheel_x86.dll"; do
-		rm -f "$f"
+	# Remove our DLL drops from EVERY version directory in the prefix, not
+	# just the one the SDK directory happens to hold right now.
+	#
+	# $TF_PFX_DIR is derived from whatever version is newest in the SDK
+	# tree, which has nothing to do with what was staged here: upgrade the
+	# staged SDK, or run the front-ends' Remove button (which passes no
+	# --sdk-dir and so resolves somewhere else entirely), and this removed
+	# a version that was never installed while leaving the one that was.
+	# It then stripped the registry keys and reported success, leaving a
+	# prefix with DLLs present and no registration - a state the app still
+	# reads as "TrueForce on", because it looks for any version.
+	#
+	# trueforce_real.dll goes too. It is Logitech's own library, moved
+	# aside by --range-proxy, and leaving it behind made the README's
+	# "--uninstall puts the original back" false.
+	#
+	# The parent directories stay: a user may have populated them with
+	# real G HUB files outside this installer.
+	local d
+	for d in "$prefix/drive_c/Program Files/Logi/Trueforce/"*/; do
+		[ -d "$d" ] || continue
+		rm -f "$d/trueforce_sdk_x64.dll" "$d/trueforce_sdk_x86.dll" \
+		      "$d/trueforce_real.dll"
+	done
+	for d in "$prefix/drive_c/Program Files/Logi/wheel_sdk/"*/; do
+		[ -d "$d" ] || continue
+		rm -f "$d/logi_steering_wheel_x64.dll" "$d/logi_steering_wheel_x86.dll"
 	done
 	# Also clean our old shim path (older versions installed there)
 	[ -d "$prefix/drive_c/logi-tf-shim" ] && rm -rf "$prefix/drive_c/logi-tf-shim"
@@ -351,7 +381,12 @@ steam_library_roots() {
 	# Standard Steam install (Arch, Fedora, most distros), then Debian's
 	# steam-installer package, which keeps its tree here instead
 	# (issue #18, reported by @matthiasvegh).
-	for base in "$HOME/.local/share/Steam" "$HOME/.steam/debian-installation"; do
+	# ~/.steam/steam was missing, which is the only root on a machine whose
+	# Steam was moved and symlinked, and Flatpak Steam was missing from
+	# every component. The three copies of this list disagreed about both.
+	for base in "$HOME/.local/share/Steam" "$HOME/.steam/steam" \
+		    "$HOME/.steam/debian-installation" \
+		    "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
 		[ -d "$base" ] || continue
 		printf '%s\n' "$base"
 		vdf="$base/steamapps/libraryfolders.vdf"
@@ -364,12 +399,20 @@ steam_library_roots() {
 # One prefix per line, so library paths containing spaces survive.
 steam_prefixes() {
 	local root pfx
-	steam_library_roots | sort -u | while IFS= read -r root; do
-		[ -d "$root" ] || continue
+	# Deduped by resolved path, not by string. ~/.steam/steam is normally a
+	# symlink to ~/.local/share/Steam, so with both in the root list a
+	# plain `sort -u` leaves the same library twice and every prefix gets
+	# installed into twice. Harmless for a copy, but it is the same
+	# counting bug that made doctor report four SDK sims on a machine with
+	# two, and it would make --range-proxy move an already-moved DLL.
+	steam_library_roots | while IFS= read -r root; do
+		[ -d "$root/steamapps" ] || continue
+		readlink -f "$root" 2>/dev/null || printf '%s\n' "$root"
+	done | awk '!seen[$0]++' | while IFS= read -r root; do
 		for pfx in "$root"/steamapps/compatdata/*/pfx; do
 			[ -d "$pfx" ] && printf '%s\n' "$pfx"
 		done
-	done
+	done | awk '!seen[$0]++'
 }
 
 # Parse flags in any order: a mode (--all-steam / --prefix / --uninstall)

@@ -645,9 +645,12 @@ echo 50 > wheel_led_brightness
 
 Brightness changed from the wheel itself (OLED menu) is tracked: the
 driver consumes the official x8040 `brightnessChangeEvent` broadcast,
-updates this attribute's value (and `wheel_sensitivity` when in
-desktop mode, per the aliasing described there), and notifies
-`poll()`ers on `wheel_led_brightness`.
+updates this attribute's value, and notifies `poll()`ers on
+`wheel_led_brightness`. It does not touch `wheel_sensitivity`: the two
+were once thought to alias in desktop mode, that was disproved on
+hardware, and the driver's own handler carries a note saying the read
+here must never touch sensitivity. The two are fully independent, as
+stated above.
 
 ### wheel_led_effect
 **Access**: Read/Write
@@ -746,7 +749,8 @@ wheel's onboard profile owns colours, direction and scaling. Protocol
 decoded from a G HUB capture by the TF4ALL project (see
 `docs/PROTOCOL_SPECIFICATION.md` section 9). The first write arms the
 feature. Writes return immediately: the driver coalesces them and
-flushes only the newest level at G HUB's ~160 ms cadence (faster
+flushes only the newest level at a ~10 ms floor, comfortably above
+G HUB's own measured ~60 Hz rev-light rate (faster
 bursts would starve the wheel's shared HID++ command processor), so a
 fast telemetry feeder always shows the latest value with no queueing
 lag. The

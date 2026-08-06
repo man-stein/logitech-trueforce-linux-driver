@@ -176,6 +176,7 @@ fn context_section<S: SysfsIo>(app: &App<S>) -> (Section, Scope) {
                 title: "Editing",
                 bindings: vec![
                     bf("Left/Right", "adjust / pick slot"),
+                    bf("Up/Down", "pick lower / upper (deadzones)"),
                     bf("type", "text"),
                     b("Backspace", "erase"),
                     bf("Enter", "commit"),

@@ -224,6 +224,10 @@ ln -s logi-wheel %{buildroot}%{_bindir}/logi-dd
 # TrueForce-in-Proton shim installer (no-op without the proprietary SDK DLLs).
 install -D -m 0755 tools/install-tf-shim.sh \
     %{buildroot}%{_bindir}/logi-shim
+# The rotation proxy that installer stages with --range-proxy. Prebuilt: it
+# is a Windows DLL and its users run Linux without a cross-compiler.
+install -D -m 0644 tools/tf-range-proxy.dll \
+    %{buildroot}%{_datadir}/logitech-trueforce/tf-range-proxy.dll
 # G923 Xbox mode-switch helper, dispatched by udev rule 73.
 install -D -m 0755 tools/g923-xbox-modeswitch.sh \
     %{buildroot}%{_bindir}/logi-g923-modeswitch
@@ -256,6 +260,8 @@ ln -s logi-wheel-gui %{buildroot}%{_bindir}/logi-dd-gui
 %{_bindir}/logi-ffb
 %{_bindir}/logi-tf-sim
 %{_bindir}/logi-shim
+%dir %{_datadir}/logitech-trueforce
+%{_datadir}/logitech-trueforce/tf-range-proxy.dll
 %{_bindir}/logi-g923-modeswitch
 %{_bindir}/logitech-trueforce-install-shim
 

@@ -57,8 +57,35 @@ impl EditState {
                 Value::Enum((*n as i32 + d).rem_euclid(len) as u8)
             }
             (Kind::Toggle { .. }, Value::Bool(b)) => Value::Bool(!*b),
+            // A pedal deadzone. This arm was missing entirely, and Pair is
+            // not a text mode either, so the editor opened, Left/Right did
+            // nothing, typing did nothing, and Enter wrote the value back
+            // unchanged and reported success. `slot` picks the half (1 =
+            // lower, 2 = upper), the same field SlotText uses to say which
+            // of several things a keypress applies to.
+            //
+            // Clamped against the other half rather than rejected: the
+            // driver's constraint is lower + upper <= 99, and the curve
+            // editor already clamps for exactly this, so a user leaning on
+            // an arrow key stops at the limit instead of being told off.
+            (Kind::Pair { .. }, Value::Pair(lo, hi)) => {
+                let (lo, hi) = (*lo, *hi);
+                if self.slot == 2 {
+                    Value::Pair(lo, ((hi as i32 + d).clamp(0, 99 - lo as i32)) as u8)
+                } else {
+                    Value::Pair(((lo as i32 + d).clamp(0, 99 - hi as i32)) as u8, hi)
+                }
+            }
             (_, v) => v.clone(),
         };
+    }
+
+    /// Move between the halves of a [`Kind::Pair`] (lower <-> upper).
+    /// No-op for every other kind, so the caller can bind it globally.
+    pub fn select_part(&mut self, d: i32) {
+        if matches!(self.kind, Kind::Pair { .. }) {
+            self.slot = if (self.slot as i32 + d).rem_euclid(2) == 0 { 2 } else { 1 };
+        }
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -100,6 +127,15 @@ impl EditState {
     pub fn display(&self) -> String {
         if let Kind::SlotText { .. } = self.kind {
             return format!("{}: {}_", self.slot, self.buffer);
+        }
+        // Mark the half the arrows will move, or the editor gives no clue
+        // which of the two numbers is about to change.
+        if let (Kind::Pair { .. }, Value::Pair(lo, hi)) = (self.kind, &self.draft) {
+            return if self.slot == 2 {
+                format!("{lo}% / [{hi}%]")
+            } else {
+                format!("[{lo}%] / {hi}%")
+            };
         }
         if self.is_text_mode() {
             format!("{}_", self.buffer)
@@ -272,5 +308,65 @@ mod slot_text_tests {
         let mut e = EditState::start("wheel_profile_names", K, &current());
         e.bump(1);
         assert_eq!(e.display(), "2: GT7_");
+    }
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::*;
+
+    fn dz() -> EditState {
+        EditState::start("wheel_throttle_deadzone", Kind::Pair { max: 99 }, &Value::Pair(10, 5))
+    }
+
+    /// The bug: Kind::Pair had no bump arm and is not a text mode, so the
+    /// editor opened, every key did nothing, and Enter reported success
+    /// having changed the value not at all.
+    #[test]
+    fn arrows_move_the_selected_half() {
+        let mut e = dz();
+        e.bump(1);
+        assert_eq!(e.commit_value().unwrap(), Value::Pair(11, 5), "lower is selected first");
+
+        e.select_part(1);
+        e.bump(-1);
+        assert_eq!(e.commit_value().unwrap(), Value::Pair(11, 4), "now the upper half");
+
+        e.select_part(1);
+        e.bump(1);
+        assert_eq!(e.commit_value().unwrap(), Value::Pair(12, 4), "and back to the lower");
+    }
+
+    /// The driver rejects lower + upper > 99. The curve editor clamps for
+    /// the same constraint, so this does too: holding an arrow stops at the
+    /// limit rather than producing a value the write will refuse.
+    #[test]
+    fn the_pair_cannot_be_pushed_past_the_drivers_limit() {
+        let mut e =
+            EditState::start("wheel_brake_deadzone", Kind::Pair { max: 99 }, &Value::Pair(60, 39));
+        for _ in 0..20 {
+            e.bump(1);
+        }
+        let Value::Pair(lo, hi) = e.commit_value().unwrap() else { panic!("not a pair") };
+        assert_eq!((lo, hi), (60, 39), "already at the limit, so nothing moves");
+
+        e.select_part(1);
+        for _ in 0..20 {
+            e.bump(-1);
+        }
+        for _ in 0..20 {
+            e.bump(1);
+        }
+        let Value::Pair(lo, hi) = e.commit_value().unwrap() else { panic!("not a pair") };
+        assert!(lo as u16 + hi as u16 <= 99, "{lo} + {hi} exceeds the driver's limit");
+    }
+
+    /// The display has to say which number the arrows will move.
+    #[test]
+    fn the_selected_half_is_visible() {
+        let mut e = dz();
+        assert_eq!(e.display(), "[10%] / 5%");
+        e.select_part(1);
+        assert_eq!(e.display(), "10% / [5%]");
     }
 }
