@@ -5,6 +5,42 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## 0.27.5 - 2026-08-06
+
+An adversarial review of the whole tree, prompted by six bugs in one night
+that all shared a shape: a rule learned in one component and never carried to
+the others. Seven serious defects, three of them introduced by the fixes for
+that very class.
+
+### Fixed
+
+- **Saving a computer profile could wipe the wheel's response curve.** The
+  driver reports curves as `"<loaded>/<max> points loaded (0 = built-in
+  curve)"`, and the phrase "built-in" is part of that legend whatever the
+  count. Reading the words instead of the number made a loaded curve look like
+  no curve, so a profile recorded the attribute as `reset` and applying it
+  later reverted the curve. The count is read now, and a curve whose points
+  cannot be read back is left alone rather than downgraded.
+- **A failed force-feedback init freed memory the settings still used.**
+  `input_ff_destroy()` frees the driver's own state, which every `wheel_*`
+  sysfs handler dereferences and which the normal teardown frees again on
+  unplug. It is detached first now, and the settings survive a force-feedback
+  failure instead of going with it.
+- **The shim installer could exit with no output at all** when the SDK
+  directory existed but held no version-named subdirectory: the exact result
+  of copying G HUB's `Logi` folder but dropping the DLLs one level too high.
+- **Full setup skipped the shim for anyone who staged the SDK where the README
+  says**, because the check ran as root while the install ran as the user. The
+  same run then reported both "not staged" and "all four staged".
+- **The check for "shim installed but no force feedback at all" had never
+  fired**, its path splitting on the space in "Program Files".
+- **Re-running setup silently reverted the rotation proxy**, restoring the
+  90-degree steering clamp a user had deliberately fixed.
+- **iRacing and RaceRoom owners got no warning** that `PROTON_ENABLE_HIDRAW=1`
+  is what stopped their force feedback; the list carried two of four titles.
+  The registry now owns the appids and a test fails when the two disagree.
+- `make -C mainline` pointed the build at the wrong directory.
+
 ## 0.27.4 - 2026-08-06
 
 ### Fixed
