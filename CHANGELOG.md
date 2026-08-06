@@ -5,12 +5,16 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## Unreleased
+## 0.28.0 - 2026-08-06
 
-The P0 half of an adversarial review of the whole tree, prompted by six bugs
-in one night that all shared a shape: a rule learned in one component and
-never carried to the others. Seven serious defects, three of them introduced
-by the fixes for that very class.
+An adversarial review of the whole tree, prompted by six bugs in one night
+that all shared a shape: a rule learned in one component and never carried to
+the others. Thirty-odd findings, worked through in full. Three of the worst
+were introduced by the fixes for that very class, which is the clearest
+argument that the shape is real.
+
+Minor rather than patch because `revlights` is removed and the Steam
+appid knowledge moved into the compatibility registry.
 
 ### Fixed
 
@@ -40,6 +44,51 @@ by the fixes for that very class.
   is what stopped their force feedback; the list carried two of four titles.
   The registry now owns the appids and a test fails when the two disagree.
 - `make -C mainline` pointed the build at the wrong directory.
+- **`logi-tf-sim` did not recognise the PlayStation/PC G923** (`c267`). It
+  kept its own product-id list and that copy still had the gap after the
+  other was fixed, so the wheel was named correctly by the settings pages and
+  then not found at all by the daemon.
+- **The simulated-TrueForce rev rate had three different defaults** (25 in the
+  daemon, 50 in the front-end mirror, 100 in the UI's initial value), so a
+  fresh install showed 50% while running at 25%.
+- **Pedal deadzones could not be edited in the terminal app at all.** The
+  editor opened, every key did nothing, and Enter reported success having
+  changed nothing. Left/Right now moves the selected half, Up/Down picks
+  which half.
+- **`--range-proxy` was unreachable for every package user**: no channel
+  shipped the proxy DLL, and the installer looked for it only inside a git
+  checkout. All four formats install it now.
+- **The Arch package installed a udev rule without the binary it calls**,
+  leaving a G923 Xbox edition stuck in console mode and looking like dead
+  hardware.
+- **`usbutils` was declared by no package** while the tooling needs `lsusb`,
+  and without it the wheel-capability check fell through to the answer that
+  tells G923 owners to set the variable that removes their force feedback.
+  The check reads sysfs first now, so it no longer depends on an optional
+  binary.
+- **The Setup page approved SDK folders the installer then rejected**,
+  checking one of the four required DLLs.
+- **`--uninstall` could leave a half-uninstalled prefix** that the app still
+  reported as installed, and never removed Logitech's own library that
+  `--range-proxy` had moved aside.
+- **Steam libraries**: three components disagreed about where to look, none
+  of them knew about Flatpak Steam, and one counted symlinked libraries
+  twice.
+- **`doctor` said nothing when an in-tree Logitech driver won the bind race**,
+  the exact situation the rebind helper exists for, and its stale-module
+  warning was permanently wrong on any tree with uncommitted changes.
+- **`dkms-update.sh` skipped the shim unless `winegcc` was installed**, which
+  nothing has needed since the shim became a copy of Logitech's own DLLs.
+- Documentation that contradicted the code: the rev-light cadence was
+  documented as 160 ms against an actual 10 ms floor (sixteenfold), and a
+  brightness/sensitivity aliasing that was disproved on hardware was still
+  described.
+
+### Removed
+
+- **`userspace/revlights/`**, superseded by `logi-tf-sim`'s rev-light feeder.
+  It was in no package and no README, and running it meant two processes
+  writing the same sysfs attribute at their own rates.
 
 ## 0.27.4 - 2026-08-06
 
