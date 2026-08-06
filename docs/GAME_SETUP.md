@@ -26,8 +26,8 @@ instead of wrapping it.
 |---|---|---|---|---|
 | American Truck Simulator * | Native Linux | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | Assetto Corsa (original) | Proton | Native FFB | Nothing to do | Nothing to do |
-| Assetto Corsa Competizione | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Force feedback works as is<br>leave `PROTON_ENABLE_HIDRAW` unset; for TrueForce install the shim with `--range-proxy` |
-| Assetto Corsa EVO (early access) | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Force feedback works as is<br>leave `PROTON_ENABLE_HIDRAW` unset; for TrueForce install the shim with `--range-proxy` |
+| Assetto Corsa Competizione | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Install the shim with `--proxy`<br>and leave `PROTON_ENABLE_HIDRAW` unset |
+| Assetto Corsa EVO (early access) | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Install the shim with `--proxy`<br>and leave `PROTON_ENABLE_HIDRAW` unset |
 | Assetto Corsa Rally (early access) * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Automobilista 2 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | BeamNG.drive * | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
@@ -96,7 +96,7 @@ the game in the app's Setup page.
 ## What each recipe means
 
 - **Install the shim.** Stage Logitech's signed SDK DLLs into the game's Proton prefix, from the app's Setup page or `tools/install-tf-shim.sh`. Install the TrueForce shim; set PROTON_ENABLE_HIDRAW=1; turn Steam Input off.
-- **On a wheel with no SDK TrueForce.** Force feedback works as it is. Leave PROTON_ENABLE_HIDRAW unset and skip the shim; setting it costs you force feedback. For TrueForce on this wheel, install the shim with --range-proxy: the proxy copies the game's own TrueForce across (see docs/GAME_SETUP.md). Turn Steam Input off.
+- **On a wheel with no SDK TrueForce.** Leave PROTON_ENABLE_HIDRAW unset: on this wheel it costs you force feedback. Install the shim WITH --proxy, which is what carries this game's own TrueForce to a wheel Logitech's SDK will not drive (see docs/GAME_SETUP.md). Steam Input off.
 - **Launch via logi-ffb.** Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off.
 - **Nothing to do.** The wheel is an ordinary Linux force feedback device and the game drives it directly.
 

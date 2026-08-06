@@ -136,11 +136,16 @@ Usage:
 
 Options:
   --sdk-dir <path>             Directory holding your Logitech SDK DLLs
-  --range-proxy                Also install the rotation shim, so games ask
-                               this driver how far the wheel turns instead of
-                               falling back to 90 degrees (see #27)
                                (default: \$LOGITECH_TRUEFORCE_SDK_DIR, the repo
                                sdk/ tree, or $(default_sdk_dir))
+  --proxy                      Also install this project's SDK proxy. It does
+                               two things: answers the rotation question so a
+                               game stops clamping the wheel to 90 degrees
+                               (#27), and carries the game's own TrueForce to
+                               a wheel Logitech's SDK will not drive, which is
+                               how a G923 gets TrueForce in ACC and AC EVO.
+                               Spelled --range-proxy before it did the second
+                               job; both names still work.
 EOF
 	exit 1
 }
@@ -430,7 +435,12 @@ while [ $# -gt 0 ]; do
 		[ -n "$PREFIX_ARG" ] || usage
 		shift
 		;;
-	--range-proxy)
+	--proxy|--range-proxy)
+		# --range-proxy is the original name, from when the DLL only
+		# answered the SDK's rotation question. It now also carries a
+		# game's own TrueForce to a G923, so the name undersells it and
+		# reads as irrelevant to anyone chasing haptics. Both spellings
+		# work; --proxy is the one the docs use.
 		RANGE_PROXY=1
 		;;
 	--sdk-dir)
