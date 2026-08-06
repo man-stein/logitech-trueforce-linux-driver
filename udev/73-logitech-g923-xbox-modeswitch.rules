@@ -43,7 +43,7 @@
 #
 # Gated on usb_modeswitch actually being installed (it is a recommended,
 # not hard, dependency in every packaging channel): some distros ship it
-# in /usr/bin, others in /usr/sbin - the same file via a symlink on
+# in usr bin, others in usr sbin - the same file via a symlink on
 # usrmerge systems, a genuinely separate package path otherwise -
 # `command -v` finds it wherever it lives instead of us hardcoding one.
 # Without it installed this rule is a silent no-op.
