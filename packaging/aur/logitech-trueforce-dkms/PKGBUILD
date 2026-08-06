@@ -47,13 +47,18 @@ build() {
 package_logitech-trueforce-dkms() {
 	pkgdesc="DKMS kernel driver for Logitech TrueForce direct-drive wheels (RS50, G PRO): force feedback, TrueForce texture routing, and wheel settings via sysfs"
 	license=('GPL-2.0-only')
-	# logi-wheel is a hard dependency, not a suggestion: this package
-	# installs udev rule 73, and that rule dispatches
-	# /usr/bin/logi-g923-modeswitch, which logi-wheel ships. Arch does not
-	# install optdepends, so as one it left a rule that could never fire
-	# and a G923 Xbox edition stuck in console mode - indistinguishable
-	# from a dead wheel. Debian, OBS and akmods all pull it in by default.
-	depends=('dkms' 'logi-wheel' 'usbutils')
+	# No dependency on logi-wheel. This package installs udev rule 73, and
+	# that rule dispatches /usr/bin/logi-g923-modeswitch, so the two have
+	# to arrive together or the rule silently does nothing and a G923 Xbox
+	# edition stays in console mode looking like dead hardware. Depending
+	# on logi-wheel fixed that and created a cycle, since logi-wheel
+	# depends on this package: pacman can usually untangle one, but it
+	# breaks installing either package on its own.
+	#
+	# The helper ships here instead, beside the rule that calls it. It is
+	# driver infrastructure rather than a user tool, so this is where it
+	# belonged anyway.
+	depends=('dkms' 'usbutils')
 	optdepends=('oversteer: GUI to configure wheel settings'
 	            'usb_modeswitch: switch the G923 Xbox edition (c26d) into PC mode on plug-in')
 	provides=("$_dkmsname")
@@ -98,6 +103,10 @@ package_logitech-trueforce-dkms() {
 	# (optdepends above), a no-op without it.
 	install -Dm644 "$_src/udev/73-logitech-g923-xbox-modeswitch.rules" \
 		"$pkgdir/usr/lib/udev/rules.d/73-logitech-g923-xbox-modeswitch.rules"
+	# The helper that rule dispatches. Same package, so the rule can never
+	# be installed without it.
+	install -Dm755 "$_src/tools/g923-xbox-modeswitch.sh" \
+		"$pkgdir/usr/bin/logi-g923-modeswitch"
 
 	# softdep ordering hint for the G923 PIDs, plus a narrow blacklist of
 	# the standalone new-lg4ff DKMS fork (see the file for why that one
@@ -153,8 +162,6 @@ package_logi-wheel() {
 
 	# G923 Xbox mode-switch helper, dispatched by udev rule 73. Must not be
 	# run from the udev worker itself; see the rule's own comment.
-	install -Dm755 "$_src/tools/g923-xbox-modeswitch.sh" \
-		"$pkgdir/usr/bin/logi-g923-modeswitch"
 
 	# Transitional symlinks: scripts and habits built around the old
 	# `logi-dd` and `logitech-trueforce-install-shim` names keep working.
