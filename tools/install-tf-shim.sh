@@ -215,14 +215,26 @@ install_in_prefix() {
 		# matters; it just moves aside so ours can answer the one
 		# question it cannot answer here. Ours forwards the rest to it
 		# by name, which is why the name it moves to is fixed.
-		local proxy="$REPO_ROOT/tools/tf-range-proxy.dll"
+		# Checked-out tree first, then the packaged location. Resolving
+		# it only under $REPO_ROOT meant /usr/tools/ for a packaged
+		# logi-shim, so the documented fix for the 90-degree clamp told
+		# every package user to run `make -C tools` in a directory they
+		# do not have, with a cross-compiler they have no reason to own.
+		local proxy=""
+		local cand
+		for cand in "$REPO_ROOT/tools/tf-range-proxy.dll" \
+			    "/usr/share/logitech-trueforce/tf-range-proxy.dll" \
+			    "/usr/local/share/logitech-trueforce/tf-range-proxy.dll"; do
+			[ -f "$cand" ] && { proxy="$cand"; break; }
+		done
 		if [ -f "$proxy" ]; then
 			mv -f "$tf_dir/trueforce_sdk_x64.dll" "$tf_dir/trueforce_real.dll"
 			install -m 0644 "$proxy" "$tf_dir/trueforce_sdk_x64.dll"
 			echo "  rotation shim installed in $prefix"
 		else
-			echo "  WARNING: --range-proxy asked for but tools/tf-range-proxy.dll is missing;" >&2
-			echo "           build it with: make -C tools tf-range-proxy.dll" >&2
+			echo "  WARNING: --range-proxy asked for but tf-range-proxy.dll was not found" >&2
+			echo "           in the checkout or /usr/share/logitech-trueforce/." >&2
+			echo "           From a git checkout: make -C tools tf-range-proxy.dll" >&2
 		fi
 	fi
 	install -m 0644 "$SRC_TF_X86" "$tf_dir/trueforce_sdk_x86.dll"

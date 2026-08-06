@@ -2287,6 +2287,9 @@ impl<S: SysfsIo> App<S> {
                 Esc => self.edit = None,
                 Left => ed.bump(-1),
                 Right => ed.bump(1),
+                // Only Kind::Pair listens; every other kind ignores it.
+                Up => ed.select_part(-1),
+                Down => ed.select_part(1),
                 Backspace => ed.backspace(),
                 Char(c) => ed.push_char(c),
                 _ => {}
@@ -4564,13 +4567,21 @@ mod tests {
         let mut a = tf_setup_app();
         enter_setup(&mut a, SetupSection::SimTf);
         a.on_key(KeyCode::Char('p'));
-        assert_eq!(a.tf_pitch_edit.as_deref(), Some("50"), "the default pitch seeds the editor");
+        // Derived, not restated: this asserted a literal "50" and so had to
+        // be edited when the default moved, which is the same drift the
+        // constant exists to prevent.
+        let want = logi_wheel_core::tfsim::DEFAULT_PITCH.to_string();
+        assert_eq!(a.tf_pitch_edit.as_deref(), Some(want.as_str()), "the default pitch seeds the editor");
         for _ in 0..3 {
             a.on_key(KeyCode::Backspace);
         }
         a.on_key(KeyCode::Char('5'));
         a.on_key(KeyCode::Enter);
-        assert_eq!(a.tf_cfg.pitch_pct, 50, "5 is below the 10-200 range");
+        assert_eq!(
+            a.tf_cfg.pitch_pct,
+            logi_wheel_core::tfsim::DEFAULT_PITCH,
+            "5 is below the 10-200 range, so the value is left as it was"
+        );
         assert!(a.status.contains("10-200"), "status: {}", a.status);
         a.on_key(KeyCode::Char('p'));
         for _ in 0..3 {

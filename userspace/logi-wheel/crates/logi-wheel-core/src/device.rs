@@ -182,15 +182,34 @@ fn read_hid_uniq(dir: &Path) -> Option<String> {
 /// USB product ids this crate can identify, mapped to their [`WheelModel`].
 /// See `mainline/hid-logitech-hidpp.c`/`mainline/dd-lg4ff.c` for where each
 /// id is bound on the kernel side.
+/// Logitech's USB vendor id.
+pub const LOGITECH_VID: u16 = 0x046d;
+
+/// Every USB product id the driver binds as a G923.
+///
+/// One owner, because there were two and they disagreed: this list was
+/// missing `c267` while the kernel bound all three, and after that was fixed
+/// here `logi-tf-sim` still carried its own copy with the same gap, so a
+/// `c267` owner was identified correctly by the settings pages and then not
+/// found at all by the simulated-TrueForce daemon.
+///
+/// `c26d` is deliberately absent: that is the Xbox edition still in console
+/// mode, which the driver cannot bind until the mode-switch helper has run.
+pub const G923_PIDS: &[u16] = &[0xc266, 0xc267, 0xc26e];
+
+/// Every USB product id the driver binds as a direct-drive wheel.
+pub const DD_PIDS: &[u16] = &[0xc276, 0xc272, 0xc268];
+
+/// Whether `pid` is a G923 of any edition.
+pub fn is_g923_pid(pid: u16) -> bool {
+    G923_PIDS.contains(&pid)
+}
+
 fn model_from_pid(pid: u16) -> WheelModel {
     match pid {
         0xc276 => WheelModel::Rs50,
         0xc272 | 0xc268 => WheelModel::GPro,
-        // c266 G923, c267 the PlayStation/PC edition, c26e the Xbox one.
-        // c267 was missing here while the kernel driver bound all three, so
-        // that wheel came out `Unknown` and was shown as a generic
-        // "Logitech Racing Wheel".
-        0xc266 | 0xc267 | 0xc26e => WheelModel::G923,
+        _ if is_g923_pid(pid) => WheelModel::G923,
         _ => WheelModel::Unknown,
     }
 }

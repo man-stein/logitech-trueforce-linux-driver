@@ -198,3 +198,40 @@ fn an_unknown_layer_name_writes_nothing() {
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("turbo_whistle"), "a typo reached the file");
 }
+
+/// The daemon keeps `logi-wheel-core` as a dev-dependency, so its G923
+/// product ids are a deliberate copy rather than an import. This is the
+/// guard that copy did not have: it omitted `c267` while the kernel bound
+/// all three, so a PlayStation/PC-edition G923 was named correctly by the
+/// settings pages and then not found at all by discovery here.
+#[test]
+fn g923_product_ids_match_the_shared_list() {
+    let mut mine = logi_tf_sim::g923::PIDS.to_vec();
+    let mut theirs = logi_wheel_core::device::G923_PIDS.to_vec();
+    mine.sort_unstable();
+    theirs.sort_unstable();
+    assert_eq!(
+        mine, theirs,
+        "logi-tf-sim's G923 product ids disagree with logi-wheel-core's. A wheel \
+         missing from one of them is identified by the settings pages and then \
+         invisible to the daemon, or the reverse."
+    );
+}
+
+/// Scalar defaults are part of the format contract too.
+///
+/// The effect gains below were already pinned; the scalars were not, and
+/// `pitch_pct` drifted to three different values: 25 in the daemon (which
+/// this module's own doc calls the format authority), 50 in the front-end
+/// mirror, and 100 as the Slint initial. A fresh install therefore showed a
+/// rev rate of 50% while the daemon ran at 25%.
+#[test]
+fn scalar_defaults_match_the_daemon() {
+    let daemon = logi_tf_sim::config::Config::default();
+    let mirror = logi_wheel_core::tfsim::Config::default();
+
+    assert_eq!(mirror.pitch_pct, daemon.pitch_pct, "pitch_pct (rev rate)");
+    assert_eq!(mirror.intensity, daemon.intensity, "intensity");
+    assert_eq!(mirror.enabled, daemon.enabled, "master enable");
+    assert_eq!(mirror.leds, daemon.leds, "rev-LED feeder");
+}

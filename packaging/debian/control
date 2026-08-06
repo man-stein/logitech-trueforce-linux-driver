@@ -10,7 +10,7 @@ Rules-Requires-Root: no
 
 Package: logitech-trueforce-dkms
 Architecture: all
-Depends: ${misc:Depends}, dkms
+Depends: ${misc:Depends}, dkms, usbutils
 # The pre-split logitech-trueforce-dkms shipped the userspace tools too;
 # recommending logi-wheel keeps upgrades (and "install the driver, get the
 # ecosystem") whole while still allowing a lean module-only install.

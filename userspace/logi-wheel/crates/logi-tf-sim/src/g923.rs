@@ -91,6 +91,10 @@ pub const PID_PS: u16 = 0xC266;
 /// to do here).
 pub const PID_XBOX: u16 = 0xC26E;
 
+/// G923, PlayStation/PC edition. The kernel binds this alongside the other
+/// two; it was missing here entirely.
+pub const PID_PS_PC: u16 = 0xC267;
+
 /// USB interface number of the TrueForce (vendor page 0xFFFD) transport.
 /// The kernel zero-pads the sysfs value ("02"), so compare numerically.
 /// Where the TrueForce interface sits on every three-interface wheel seen
@@ -151,10 +155,22 @@ const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
 include!(concat!(env!("OUT_DIR"), "/g923_init_data.rs"));
 
-/// True if `pid` is a recognized G923 edition (PS now; Xbox once it
-/// reaches this transport).
+/// Every G923 product id this transport recognizes.
+///
+/// The daemon keeps `logi-wheel-core` as a dev-dependency only, on purpose,
+/// so this cannot import the shared list and holds its own copy. That copy
+/// omitted `c267`: a PlayStation/PC-edition G923 was identified correctly by
+/// the settings pages and then skipped entirely by discovery here, leaving
+/// the daemon to fall through to a stream that wheel never answers.
+///
+/// `tests/frontend_compat.rs` fails if this disagrees with
+/// `logi_wheel_core::device::G923_PIDS`, which is the guard the previous
+/// copy did not have.
+pub const PIDS: &[u16] = &[PID_PS, PID_PS_PC, PID_XBOX];
+
+/// True if `pid` is a recognized G923 edition.
 fn is_g923_pid(pid: u16) -> bool {
-    pid == PID_PS || pid == PID_XBOX
+    PIDS.contains(&pid)
 }
 
 // ---------------------------------------------------------------------

@@ -122,6 +122,17 @@ find_wheel_sysfs() {
 # general case, the wheels this driver was written for.
 wheel_has_sdk_trueforce() {
 	local re
+	# sysfs first, lsusb second. The two attribute namespaces never
+	# overlap, so a device carrying wheel_range is direct-drive and one
+	# carrying the classic set is not, which is a fact about the machine
+	# rather than about which tools are installed. Keying on lsusb alone
+	# meant that on a box without usbutils - undeclared by every packaging
+	# channel until now - the check fell through to "yes", and a G923
+	# owner was told to set the variable that removes their force
+	# feedback. Wrong answers here cost people their force feedback, so it
+	# should not hinge on an optional binary being present.
+	[ -n "$(find_wheel_sysfs)" ] && return 0
+	[ -n "$(find_g923_sysfs)" ] && return 1
 	re="$(echo "$WHEEL_PIDS_G923 $WHEEL_PID_G923_CONSOLE" | tr ' ' '|')"
 	if lsusb 2>/dev/null | grep -qiE "046d:($re)"; then
 		re="$(echo "$WHEEL_PIDS_DD" | tr ' ' '|')"
@@ -200,7 +211,11 @@ doctor() {
 		# belongs to code nobody is reading any more, which is a
 		# spectacularly good way to waste an afternoon.
 		if [ -d "$REPO_ROOT/.git" ]; then
-			repo_ver="$(git -C "$REPO_ROOT" describe --tags --always 2>/dev/null)"
+			# --dirty, because that is what dkms-update.sh stamps into
+			# the module. Without it a contributor with uncommitted
+			# changes was told to rebuild, and rebuilding never cleared
+			# it: permanently wrong for the only people it addresses.
+			repo_ver="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null)"
 			if [ -n "$repo_ver" ] && [ "$loaded_ver" != "$repo_ver" ]; then
 				wrn "the loaded module is $loaded_ver but this checkout is $repo_ver - rebuild so you are testing the code you have (run: sudo ./tools/setup.sh)"
 			elif [ -n "$repo_ver" ]; then
@@ -254,18 +269,30 @@ doctor() {
 		wrn "no wheel detected on USB (plug it in and re-run doctor; everything below that needs the wheel is skipped)"
 	fi
 
-	local bound_generic=0 bound_ours=0
+	local bound_generic=0 bound_ours=0 bound_foreign=0 foreign_name=""
 	local pid_up
 	for pid_up in $(echo "$WHEEL_PIDS" | tr 'a-z ' 'A-Z\n'); do
 	for d in /sys/bus/hid/devices/0003:046D:${pid_up}.*; do
 		[ -e "$d" ] || continue
+		# The third case is the one that mattered and was missing. The
+		# rebind rule and rebind-wheel.sh both exist because an in-tree
+		# Logitech driver can win the race, and those bind as `logitech`
+		# or `logitech-hidpp-device` - neither of which matched an arm
+		# here, so both counters stayed zero and this section printed
+		# nothing at all. Section 3 then said "driver not bound (see
+		# [2])", pointing at a section that had been silent.
 		case "$(basename "$(readlink -f "$d/driver" 2>/dev/null)")" in
 			logitech-dd) bound_ours=$((bound_ours+1));;
 			hid-generic) bound_generic=$((bound_generic+1));;
+			"") ;;
+			*) bound_foreign=$((bound_foreign+1))
+			   foreign_name="$(basename "$(readlink -f "$d/driver" 2>/dev/null)")";;
 		esac
 	done
 	done
-	if [ "$bound_ours" -gt 0 ] && [ "$bound_generic" -eq 0 ]; then
+	if [ "$bound_foreign" -gt 0 ]; then
+		bad "$bound_foreign wheel interface(s) claimed by the $foreign_name driver instead of ours (run: sudo ./tools/rebind-wheel.sh)"
+	elif [ "$bound_ours" -gt 0 ] && [ "$bound_generic" -eq 0 ]; then
 		ok "all $bound_ours wheel interfaces bound to our driver"
 	elif [ "$bound_generic" -gt 0 ]; then
 		bad "$bound_generic wheel interface(s) stuck on hid-generic (run: sudo ./tools/rebind-wheel.sh)"
