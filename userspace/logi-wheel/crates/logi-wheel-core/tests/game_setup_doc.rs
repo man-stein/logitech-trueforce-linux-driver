@@ -44,8 +44,8 @@ fn recipe_cell(g: &GameCompat, caps: WheelCaps) -> String {
     // having seen the other column say to set a variable, and needs telling
     // that doing so on their wheel is not merely pointless.
     if g.ffb == Ffb::TrueForceShim && !caps.sdk_trueforce {
-        return "Nothing to do<br>no TrueForce on this wheel; \
-                leave `PROTON_ENABLE_HIDRAW` unset"
+        return "Force feedback works as is<br>leave `PROTON_ENABLE_HIDRAW` \
+                unset; for TrueForce install the shim with `--range-proxy`"
             .to_string();
     }
     let action = match g.setup_action(caps) {
@@ -202,4 +202,5 @@ fn the_two_wheel_columns_actually_differ_for_sdk_titles() {
     // variable precisely in order to say to leave it alone.
     assert!(!classic.contains("PROTON_ENABLE_HIDRAW=1"), "{classic}");
     assert!(classic.contains("unset"), "{classic}");
+    assert!(classic.contains("--range-proxy"), "the G923 route must be named: {classic}");
 }

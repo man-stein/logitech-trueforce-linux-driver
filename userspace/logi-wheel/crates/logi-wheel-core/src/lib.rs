@@ -32,6 +32,7 @@ pub use device::{Device, DeviceInfo, WheelModel};
 pub mod games;
 
 pub mod relay;
+pub mod tfstream;
 pub mod telemetry;
 
 /// Project home, shown in the Info view of both front-ends so users know

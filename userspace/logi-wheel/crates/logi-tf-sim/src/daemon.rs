@@ -96,6 +96,30 @@ pub(crate) fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
 }
 
 /// A live wheel stream plus the state that feeds it.
+/// Marks an [`Active`] stream fed by captured TrueForce rather than by a
+/// telemetry decoder. Not a real game id: nothing gates on it, because a
+/// game sending its own TrueForce has already decided it wants haptics.
+const CAPTURED_GAME: &str = "captured";
+
+/// Take every captured-TrueForce datagram waiting on `sock`, newest last.
+///
+/// Concatenated rather than deduplicated: these are consecutive runs of a
+/// waveform, so dropping any would put a gap in it. Malformed packets are
+/// skipped silently, which is the same treatment the telemetry decoders give
+/// a packet they cannot read.
+fn drain_captured_tf(sock: &UdpSocket, buf: &mut [u8]) -> Vec<f32> {
+    let mut out = Vec::new();
+    while let Ok(n) = sock.recv(buf) {
+        if let Some(mut s) = logi_wheel_core::tfstream::decode(&buf[..n]) {
+            out.append(&mut s);
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    out
+}
+
 struct Active {
     stream: WheelStream,
     mixer: Mixer,
@@ -188,12 +212,21 @@ pub fn run(cfg: &Config) -> Result<()> {
     let pc_sock = bind(cfg.pcars_port)?;
     let bn_sock = bind(cfg.beamng_port)?;
     let relay_sock = bind(cfg.relay_port)?;
+    // TrueForce a game produced itself, captured from its SDK calls by the
+    // proxy DLL and forwarded here. Separate from the telemetry sockets
+    // because it is finished haptics rather than an input to synthesis: the
+    // samples go to the wheel as they are.
+    let tf_sock = bind(logi_wheel_core::tfstream::DEFAULT_PORT)?;
     install_signal_handlers()?;
 
     eprintln!(
         "logi-tf-sim: listening (codemasters/F1/WRC on udp/{}, pcars2/ams2 on udp/{}, \
-         beamng on udp/{}, shared-memory relay on udp/{})",
-        cfg.codemasters_port, cfg.pcars_port, cfg.beamng_port, cfg.relay_port
+         beamng on udp/{}, shared-memory relay on udp/{}, captured TrueForce on udp/{})",
+        cfg.codemasters_port,
+        cfg.pcars_port,
+        cfg.beamng_port,
+        cfg.relay_port,
+        logi_wheel_core::tfstream::DEFAULT_PORT
     );
     if !cfg.enabled {
         eprintln!("logi-tf-sim: master switch is off in the config; listening but not synthesizing");
@@ -205,7 +238,12 @@ pub fn run(cfg: &Config) -> Result<()> {
     let mut buf = [0u8; 2048];
 
     while !STOP.load(Ordering::SeqCst) {
-        poll_sockets(&[&cm_sock, &pc_sock, &bn_sock, &relay_sock]);
+        poll_sockets(&[&cm_sock, &pc_sock, &bn_sock, &relay_sock, &tf_sock]);
+
+        // Drained first and kept separate: captured samples are the game's
+        // own TrueForce and must not be mixed with, or replaced by, anything
+        // synthesized from telemetry the same game also emits.
+        let captured = drain_captured_tf(&tf_sock, &mut buf);
 
         let mut latest: Option<(&'static str, Telemetry)> = None;
         drain(&cm_sock, &mut buf, |p| decoders.parse_codemasters_port(p), &mut latest);
@@ -269,10 +307,61 @@ pub fn run(cfg: &Config) -> Result<()> {
             }
         }
 
+        // Captured TrueForce takes precedence over anything synthesized.
+        //
+        // Assetto Corsa Competizione and Assetto Corsa EVO produce real
+        // TrueForce; a G923 never receives it, because that generation's SDK
+        // path wants a G HUB agent Linux does not have. When the proxy
+        // forwards those samples here, they go to the wheel as they are.
+        // Synthesizing an engine note over the top would be inventing
+        // haptics for a game that already sent us its own.
+        if !captured.is_empty() {
+            if let Some(a) = &mut active {
+                a.last_telemetry = now;
+                a.last_gen = now;
+                if let Err(e) = a.stream.push(&captured) {
+                    eprintln!("logi-tf-sim: captured TrueForce push failed: {e}");
+                }
+            } else if now >= next_open_attempt {
+                match open_wheel_stream(cfg) {
+                    Ok(stream) => {
+                        eprintln!(
+                            "logi-tf-sim: stream start (captured TrueForce from the game's own SDK)"
+                        );
+                        // No mixer and no rev display: this path carries the
+                        // game's finished haptics, and the game drives its
+                        // own rev lights through the SDK it is already
+                        // talking to. Synthesizing either would be adding
+                        // something nobody asked for.
+                        active = Some(Active {
+                            stream,
+                            mixer: Mixer::engine_only(
+                                cfg.cylinders,
+                                f32::from(cfg.pitch_pct) / 100.0,
+                                cfg.effect_gains,
+                            ),
+                            game: CAPTURED_GAME,
+                            tel: Telemetry::default(),
+                            last_telemetry: now,
+                            last_gen: now,
+                            samples: Vec::with_capacity(MAX_GEN_SAMPLES as usize),
+                            leds: None,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("logi-tf-sim: cannot open wheel ({e}); retrying in {}s", OPEN_RETRY.as_secs());
+                        next_open_attempt = now + OPEN_RETRY;
+                    }
+                }
+            }
+        }
+
         // Watchdog + generation for the active stream.
         let mut stop_reason: Option<String> = None;
         if let Some(a) = &mut active {
-            if now.duration_since(a.last_telemetry) >= Duration::from_millis(SILENCE_TIMEOUT_MS) {
+            if a.game == CAPTURED_GAME && !captured.is_empty() {
+                // Fed directly above; nothing to synthesize this tick.
+            } else if now.duration_since(a.last_telemetry) >= Duration::from_millis(SILENCE_TIMEOUT_MS) {
                 stop_reason = Some(format!("telemetry silent for {SILENCE_TIMEOUT_MS} ms"));
             } else {
                 let elapsed_ms = now.duration_since(a.last_gen).as_millis() as u64;

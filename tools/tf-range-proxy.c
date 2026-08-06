@@ -33,6 +33,9 @@
  *       tools/tf-range-proxy.c tools/tf-range-proxy.def
  */
 
+/* winsock2.h before windows.h, or windows.h pulls in the older
+ * winsock.h and the two collide. */
+#include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
 
@@ -214,6 +217,169 @@ __declspec(dllexport) int logiWheelGetOperatingRangeBoundsRadians(int index,
 	return r;
 }
 
+/* ------------------------------------------------------------------
+ * TrueForce capture
+ *
+ * Assetto Corsa Competizione and Assetto Corsa EVO produce real TrueForce
+ * and hand it to this SDK continuously. On a direct-drive wheel Logitech's
+ * own library drives the wheel with it. On a G923 it goes nowhere: that
+ * generation's SDK path expects a G HUB agent, which does not exist on
+ * Linux, so the samples are simply dropped and the owner gets no TrueForce
+ * in the two games that actually ship it.
+ *
+ * The wheel is capable. This project already streams TrueForce to a G923
+ * from synthesized telemetry in other titles, using the same packet format
+ * the direct-drive wheels take. What was missing was the game's own data.
+ *
+ * So: every call below is forwarded to Logitech's library exactly as before
+ * (direct-drive wheels see no change whatsoever), and the samples are
+ * additionally copied to logi-tf-sim over localhost UDP, which streams them
+ * to the wheel's interface-2 transport. If nothing is listening the sends
+ * fail silently and the game is unaffected.
+ *
+ * Wire format: userspace/logi-wheel/crates/logi-wheel-core/src/tfstream.rs.
+ * That module owns the layout and its golden-bytes test; the constants here
+ * are asserted against the same numbers below.
+ * ------------------------------------------------------------------ */
+
+#define TF_MAGIC0		'L'
+#define TF_MAGIC1		'T'
+#define TF_MAGIC2		'F'
+#define TF_MAGIC3		'T'
+#define TF_VERSION		1
+#define TF_HEADER_LEN		8
+#define TF_MAX_SAMPLES		256
+#define TF_DEFAULT_PORT		20781
+
+/* Kept honest against tfstream.rs rather than trusted to stay in step. */
+typedef char tf_layout_assert[
+	(TF_HEADER_LEN == 8 && TF_MAX_SAMPLES == 256 &&
+	 TF_HEADER_LEN + TF_MAX_SAMPLES * 4 == 1032) ? 1 : -1];
+
+static SOCKET tf_sock = INVALID_SOCKET;
+static struct sockaddr_in tf_addr;
+
+/* Real entry points, resolved once so the forwards below still reach
+ * Logitech's library now that these are implemented here instead of being
+ * PE-forwarded. */
+static int (*real_SetTorqueTFdouble)(int, const double *, int);
+static int (*real_SetTorqueTFfloat)(int, const float *, int);
+static int (*real_SetTorqueTFint32)(int, const int *, int);
+static int (*real_SetTorqueTFint16)(int, const short *, int);
+static int (*real_SetTorqueTFint8)(int, const signed char *, int);
+static int (*real_SetStreamTF)(int, const void *, int);
+
+static void tf_capture_init(HMODULE real)
+{
+	WSADATA wsa;
+
+	real_SetTorqueTFdouble = (void *)GetProcAddress(real, "logiTrueForceSetTorqueTFdouble");
+	real_SetTorqueTFfloat  = (void *)GetProcAddress(real, "logiTrueForceSetTorqueTFfloat");
+	real_SetTorqueTFint32  = (void *)GetProcAddress(real, "logiTrueForceSetTorqueTFint32");
+	real_SetTorqueTFint16  = (void *)GetProcAddress(real, "logiTrueForceSetTorqueTFint16");
+	real_SetTorqueTFint8   = (void *)GetProcAddress(real, "logiTrueForceSetTorqueTFint8");
+	real_SetStreamTF       = (void *)GetProcAddress(real, "logiTrueForceSetStreamTF");
+
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+		return;
+	tf_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (tf_sock == INVALID_SOCKET)
+		return;
+	memset(&tf_addr, 0, sizeof(tf_addr));
+	tf_addr.sin_family = AF_INET;
+	tf_addr.sin_port = htons(TF_DEFAULT_PORT);
+	tf_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	say("TrueForce capture ready, forwarding to 127.0.0.1:%d", TF_DEFAULT_PORT);
+}
+
+/*
+ * Send one run of normalized samples. Best effort throughout: a full socket
+ * buffer or an absent daemon must never slow down or fail a call the game is
+ * making on its audio path.
+ */
+static void tf_send(const float *samples, int count)
+{
+	unsigned char pkt[TF_HEADER_LEN + TF_MAX_SAMPLES * 4];
+	int i, n;
+
+	if (tf_sock == INVALID_SOCKET || !samples || count <= 0)
+		return;
+	while (count > 0) {
+		n = count > TF_MAX_SAMPLES ? TF_MAX_SAMPLES : count;
+		pkt[0] = TF_MAGIC0;
+		pkt[1] = TF_MAGIC1;
+		pkt[2] = TF_MAGIC2;
+		pkt[3] = TF_MAGIC3;
+		pkt[4] = TF_VERSION;
+		pkt[5] = 0;
+		pkt[6] = (unsigned char)(n & 0xff);
+		pkt[7] = (unsigned char)((n >> 8) & 0xff);
+		/* x86 and x86-64 are little-endian, and this DLL only ever
+		 * runs there, so the float bytes go out as they sit. */
+		for (i = 0; i < n; i++)
+			memcpy(&pkt[TF_HEADER_LEN + i * 4], &samples[i], 4);
+		sendto(tf_sock, (const char *)pkt, TF_HEADER_LEN + n * 4, 0,
+		       (struct sockaddr *)&tf_addr, sizeof(tf_addr));
+		samples += n;
+		count -= n;
+	}
+}
+
+/*
+ * The integer variants carry the same waveform at a different scale, so
+ * they are normalized to the same -1..1 the float ones already use. Full
+ * scale of the source type is full scale of the wheel.
+ */
+#define TF_FORWARD_SCALED(SUFFIX, CTYPE, SCALE)                                \
+__declspec(dllexport) int logiTrueForceSetTorqueTF##SUFFIX(int index,          \
+							   const CTYPE *v,     \
+							   int count)          \
+{                                                                              \
+	float buf[TF_MAX_SAMPLES];                                             \
+	int i, n, done = 0;                                                    \
+									       \
+	if (v && count > 0) {                                                  \
+		while (done < count) {                                         \
+			n = count - done > TF_MAX_SAMPLES                      \
+				  ? TF_MAX_SAMPLES : count - done;             \
+			for (i = 0; i < n; i++)                                \
+				buf[i] = (float)((double)v[done + i] / (SCALE));\
+			tf_send(buf, n);                                       \
+			done += n;                                             \
+		}                                                              \
+	}                                                                      \
+	return real_SetTorqueTF##SUFFIX                                        \
+		     ? real_SetTorqueTF##SUFFIX(index, v, count)               \
+		     : LOGI_ERR_BAD_PARAM;                                     \
+}
+
+TF_FORWARD_SCALED(int32, int, 2147483647.0)
+TF_FORWARD_SCALED(int16, short, 32767.0)
+TF_FORWARD_SCALED(int8, signed char, 127.0)
+TF_FORWARD_SCALED(double, double, 1.0)
+
+__declspec(dllexport) int logiTrueForceSetTorqueTFfloat(int index,
+							const float *v,
+							int count)
+{
+	if (v && count > 0)
+		tf_send(v, count);
+	return real_SetTorqueTFfloat ? real_SetTorqueTFfloat(index, v, count)
+				     : LOGI_ERR_BAD_PARAM;
+}
+
+/*
+ * Stream configuration rather than samples: nothing to capture, but it has
+ * to be implemented here because it can no longer be PE-forwarded once this
+ * file exports its neighbours.
+ */
+__declspec(dllexport) int logiTrueForceSetStreamTF(int index, const void *cfg,
+						   int len)
+{
+	return real_SetStreamTF ? real_SetStreamTF(index, cfg, len)
+				: LOGI_ERR_BAD_PARAM;
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
 	(void)inst;
@@ -282,6 +448,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 			return FALSE;
 		}
 		say("loaded Logitech's library from %s", path);
+		tf_capture_init(GetModuleHandleA("trueforce_real.dll"));
 		say("wheel range from sysfs = %d", wheel_range_degrees());
 	} else if (reason == DLL_PROCESS_DETACH) {
 		if (logfp)

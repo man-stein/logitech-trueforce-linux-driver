@@ -21,8 +21,10 @@ CFLAGS_WIN := -O2 -Wall
 
 all: tf-range-proxy.dll tf-pipe-probe.exe
 
+# -lws2_32: the proxy copies the game's own TrueForce to logi-tf-sim over
+# localhost UDP, so it needs winsock. Wine implements it.
 tf-range-proxy.dll: tf-range-proxy.c tf-range-proxy.def
-	$(CC_WIN) $(CFLAGS_WIN) -shared -o $@ tf-range-proxy.c tf-range-proxy.def
+	$(CC_WIN) $(CFLAGS_WIN) -shared -o $@ tf-range-proxy.c tf-range-proxy.def -lws2_32
 
 tf-pipe-probe.exe: tf-pipe-probe.c
 	$(CC_WIN) $(CFLAGS_WIN) -o $@ $<

@@ -336,9 +336,11 @@ impl GameCompat {
             // wheel has no SDK TrueForce", because it also covers the
             // unidentified wheel, about which we know only that we cannot
             // deliver it.
-            "Force feedback works as it is. SDK TrueForce is not available \
-             on this wheel, so skip the shim and leave PROTON_ENABLE_HIDRAW \
-             unset; setting it costs you force feedback. Turn Steam Input off."
+            "Force feedback works as it is. Leave PROTON_ENABLE_HIDRAW unset \
+             and skip the shim; setting it costs you force feedback. For \
+             TrueForce on this wheel, install the shim with --range-proxy: \
+             the proxy copies the game's own TrueForce across (see \
+             docs/GAME_SETUP.md). Turn Steam Input off."
         } else {
             self.setup
         }

@@ -1,6 +1,8 @@
 EXPORTS
 ; Generated from the real DLL's Ordinal/Name Pointer table.
-; All but the four rotation getters forward to Logitech's library.
+; All but the rotation getters and the TrueForce setters, which
+; this file implements so it can copy the game's own TrueForce
+; to a G923; those still call through to Logitech's library.
 ; Regenerate with: tools/gen-proxy-def.sh
 dllClose=trueforce_real.dllClose
 dllOpen=trueforce_real.dllOpen
@@ -33,14 +35,8 @@ logiTrueForceSetDamping=trueforce_real.logiTrueForceSetDamping
 logiTrueForceSetGainKF=trueforce_real.logiTrueForceSetGainKF
 logiTrueForceSetGainTF=trueforce_real.logiTrueForceSetGainTF
 logiTrueForceSetReconstructionFilterKF=trueforce_real.logiTrueForceSetReconstructionFilterKF
-logiTrueForceSetStreamTF=trueforce_real.logiTrueForceSetStreamTF
 logiTrueForceSetTorqueKF=trueforce_real.logiTrueForceSetTorqueKF
 logiTrueForceSetTorqueKFPiecewise=trueforce_real.logiTrueForceSetTorqueKFPiecewise
-logiTrueForceSetTorqueTFdouble=trueforce_real.logiTrueForceSetTorqueTFdouble
-logiTrueForceSetTorqueTFfloat=trueforce_real.logiTrueForceSetTorqueTFfloat
-logiTrueForceSetTorqueTFint16=trueforce_real.logiTrueForceSetTorqueTFint16
-logiTrueForceSetTorqueTFint32=trueforce_real.logiTrueForceSetTorqueTFint32
-logiTrueForceSetTorqueTFint8=trueforce_real.logiTrueForceSetTorqueTFint8
 logiTrueForceSupported=trueforce_real.logiTrueForceSupported
 logiTrueForceSupportedByDirectInputA=trueforce_real.logiTrueForceSupportedByDirectInputA
 logiTrueForceSupportedByDirectInputW=trueforce_real.logiTrueForceSupportedByDirectInputW
