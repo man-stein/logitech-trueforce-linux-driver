@@ -443,6 +443,14 @@ jobs:
           # whole repository exists to route around.
           gpg --armor --export "$KEYID" > repo/logitech-trueforce-signing-key.asc
 
+          # The Arch container's makepkg.conf enables debug packaging, so
+          # the build also emits a -debug package of split symbols. Local
+          # builds do not produce one, nobody asked for it, and shipping it
+          # would put an extra entry in every user's `pacman -Sl` for the
+          # rest of the repository's life. Drop it rather than publish a
+          # thing that exists only because of a builder default.
+          rm -f repo/*-debug-*.pkg.tar.*
+
           cd repo
           for f in *.pkg.tar.*; do
             case "$f" in *.sig) continue;; esac
