@@ -169,7 +169,9 @@ fn newest_buffer(map: &[u8]) -> Option<(usize, usize)> {
         if off + buf_len > map.len() {
             continue;
         }
-        if best.is_none_or(|(bt, _)| tick > bt) {
+        // `Option::is_none_or` is stable only since 1.82; this crate
+        // declares 1.74.
+        if best.map_or(true, |(bt, _)| tick > bt) {
             best = Some((tick, off));
         }
     }
@@ -221,7 +223,14 @@ pub fn decode(map: &[u8]) -> Option<RelayTelemetry> {
     if !rpm.is_finite() || !throttle.is_finite() || !max_rpm.is_finite() {
         return None;
     }
-    if !(max_rpm > 0.0) || max_rpm > MAX_PLAUSIBLE_RPM || rpm > MAX_PLAUSIBLE_RPM || rpm < 0.0 {
+    // Written as a finite check plus ranges rather than negated
+    // comparisons: a NaN must be refused, and `contains` refuses it for
+    // free where `<=` would quietly let it through.
+    if !max_rpm.is_finite()
+        || max_rpm <= 0.0
+        || max_rpm > MAX_PLAUSIBLE_RPM
+        || !(0.0..=MAX_PLAUSIBLE_RPM).contains(&rpm)
+    {
         return None;
     }
 

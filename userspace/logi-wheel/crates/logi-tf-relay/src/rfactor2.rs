@@ -181,7 +181,10 @@ pub fn decode(telemetry: &[u8], scoring: &[u8], game_id: &'static str) -> Option
     if !rpm.is_finite() || !max_rpm.is_finite() {
         return None;
     }
-    if max_rpm <= 0.0 || rpm < 0.0 || rpm > MAX_PLAUSIBLE_RPM || max_rpm > MAX_PLAUSIBLE_RPM {
+    if max_rpm <= 0.0
+        || max_rpm > MAX_PLAUSIBLE_RPM
+        || !(0.0..=MAX_PLAUSIBLE_RPM).contains(&rpm)
+    {
         return None;
     }
 

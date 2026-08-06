@@ -90,7 +90,9 @@ fn load_f32(cell: &AtomicU32) -> f32 {
 /// anyway (NaN or impossible values).
 fn sample() -> Option<RelayTelemetry> {
     let max_rpm = load_f32(&STATE.max_rpm);
-    if !(max_rpm > 0.0) {
+    // Finite check first: the negation was there to refuse NaN, and
+    // `<= 0.0` alone would pass it.
+    if !max_rpm.is_finite() || max_rpm <= 0.0 {
         return None;
     }
     let game_id = STATE.game_id.lock().map(|g| *g).unwrap_or(logi_wheel_core::relay::ID);

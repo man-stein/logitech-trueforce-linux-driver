@@ -129,7 +129,10 @@ pub fn decode(physics: &[u8], statics: &[u8]) -> Option<RelayTelemetry> {
 
     let max_rpm = i32_at(statics, OFF_MAX_RPM)? as f32;
     let rpm = i32_at(physics, OFF_RPMS)? as f32;
-    if max_rpm <= 0.0 || rpm < 0.0 || rpm > MAX_PLAUSIBLE_RPM || max_rpm > MAX_PLAUSIBLE_RPM {
+    if max_rpm <= 0.0
+        || max_rpm > MAX_PLAUSIBLE_RPM
+        || !(0.0..=MAX_PLAUSIBLE_RPM).contains(&rpm)
+    {
         return None;
     }
 

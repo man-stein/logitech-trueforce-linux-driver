@@ -122,7 +122,10 @@ pub fn decode(buf: &[u8]) -> Option<RelayTelemetry> {
     // max_engine_rps <= 0 covers both the vendor's -1.0 "not available" and
     // the all-zero buffer a session that has not started yet leaves behind.
     // Without a redline there is nothing to scale an engine note against.
-    if max_rpm <= 0.0 || rpm < 0.0 || rpm > MAX_PLAUSIBLE_RPM || max_rpm > MAX_PLAUSIBLE_RPM {
+    if max_rpm <= 0.0
+        || max_rpm > MAX_PLAUSIBLE_RPM
+        || !(0.0..=MAX_PLAUSIBLE_RPM).contains(&rpm)
+    {
         return None;
     }
 
@@ -175,7 +178,7 @@ mod tests {
     /// so pin it against a hand-computed case: 7000 rpm is 733.04 rad/s.
     #[test]
     fn engine_speed_converts_from_radians_per_second() {
-        let sample = decode(&buffer(3, 733.038_3, 837.758_0, 0.5, 3)).expect("valid buffer");
+        let sample = decode(&buffer(3, 733.038, 837.758, 0.5, 3)).expect("valid buffer");
         assert!((sample.rpm - 7000.0).abs() < 1.0, "got {} rpm", sample.rpm);
         assert!((sample.max_rpm - 8000.0).abs() < 1.0, "got {} max", sample.max_rpm);
     }
@@ -185,13 +188,13 @@ mod tests {
     /// conversion needs its own test rather than a range check.
     #[test]
     fn forgetting_the_conversion_would_not_have_looked_wrong() {
-        let sample = decode(&buffer(3, 733.038_3, 837.758_0, 1.0, 4)).unwrap();
+        let sample = decode(&buffer(3, 733.038, 837.758, 1.0, 4)).unwrap();
         assert!(sample.rpm > 6000.0, "raw rad/s would have passed every range gate");
     }
 
     #[test]
     fn decodes_the_remaining_fields() {
-        let sample = decode(&buffer(3, 733.038_3, 837.758_0, 0.25, 4)).unwrap();
+        let sample = decode(&buffer(3, 733.038, 837.758, 0.25, 4)).unwrap();
         assert_eq!(sample.game_id, ID);
         assert_eq!(sample.gear, 4);
         assert!((sample.throttle - 0.25).abs() < 1e-6);
