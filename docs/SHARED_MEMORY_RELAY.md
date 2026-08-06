@@ -88,21 +88,34 @@ than sending a wrong number, but that is a design argument, not evidence.
 
 ## Get it
 
-Download `logi-tf-relay-<version>.exe` from the
-[latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest).
-It is not in the distro packages: it is a Windows executable that runs inside
-a Proton prefix, so it has no business in `/usr`.
+If you installed from a package (Debian, Arch, Fedora, openSUSE), you
+already have it:
 
-To build it yourself instead, it needs the Windows target and a MinGW linker:
+```
+/usr/share/logitech-trueforce/logi-tf-relay.exe
+```
+
+It is a Windows executable, so it lives in the shared data directory rather
+than in `bin`: you do not run it directly, you run it inside a game's Proton
+prefix. It ships prebuilt because no distro builder has a Rust Windows
+target, the same reason `tf-range-proxy.dll` is prebuilt.
+
+Otherwise download `logi-tf-relay-<version>.exe` from the
+[latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest).
+
+To build it yourself, or to refresh the committed copy after changing the
+relay's sources:
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
-cargo build --release -p logi-tf-relay --target x86_64-pc-windows-gnu
+tools/build-relay.sh
 ```
 
-The result is `target/x86_64-pc-windows-gnu/release/logi-tf-relay.exe`. If
-`cargo` says the target is unavailable, your distribution's Rust probably
-cannot cross-compile; a rustup-managed toolchain can. The build needs no
+That uses the `relay-dist` cargo profile, which is what keeps the committed
+binary small, and writes `tools/logi-tf-relay.exe`. Refresh it that way
+rather than by hand: CI runs `tools/build-relay.sh --check` and fails if the
+committed binary is older than the sources it was built from, so a packaged
+relay cannot silently lag the code. The build needs a MinGW linker, no
 Windows machine and no Wine.
 
 ## Run it
