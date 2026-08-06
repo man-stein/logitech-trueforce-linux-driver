@@ -88,8 +88,12 @@ than sending a wrong number, but that is a design argument, not evidence.
 
 ## Get it
 
-If you installed from a package (Debian, Arch, Fedora, openSUSE), you
-already have it:
+**`sudo ./tools/setup.sh` puts it in every Proton prefix for you**, so there
+is usually nothing to do here. It lands at the prefix's drive root, which
+makes the in-prefix path `C:\logi-tf-relay.exe`.
+
+If you installed from a package (Debian, Arch, Fedora, openSUSE), the master
+copy is at:
 
 ```
 /usr/share/logitech-trueforce/logi-tf-relay.exe
@@ -135,8 +139,11 @@ running. The prefix is named after the game's Steam appid:
 
 ```bash
 WINEPREFIX=~/.steam/steam/steamapps/compatdata/244210/pfx \
-  wine logi-tf-relay.exe --game assetto
+  wine 'c:\logi-tf-relay.exe' --game assetto
 ```
+
+(That is where `setup.sh` installs it. If you put it somewhere else, use
+your own path instead.)
 
 Leave it running. It re-reads the section about 60 times a second and sends
 what it finds to `logi-tf-sim`, which must also be running. Then turn the

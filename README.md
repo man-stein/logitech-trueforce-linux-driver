@@ -307,8 +307,11 @@ The summary below is the shape of it.
   it) lets you feel the effect without launching a game.
   Hardware-verified with those test sweeps; in-game reports welcome.
 
-  Two kinds of game need a helper before they can feed it, both documented
-  and both downloadable from the releases page rather than needing a build:
+  Two kinds of game need a helper before they can feed it. **`sudo
+  ./tools/setup.sh` installs both for you**, into every Proton prefix and
+  into both truck sims, so there is normally nothing to fetch or copy. They
+  are also packaged and downloadable if you would rather place them
+  yourself:
   Euro Truck Simulator 2 and American Truck Simulator use a native Linux
   plugin ([docs/SCS_PLUGIN.md](docs/SCS_PLUGIN.md)); iRacing, RaceRoom, the
   Assetto Corsa family, rFactor 2 and Le Mans Ultimate publish to shared

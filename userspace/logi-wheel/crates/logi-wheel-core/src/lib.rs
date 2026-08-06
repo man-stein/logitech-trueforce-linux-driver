@@ -34,6 +34,7 @@ pub mod games;
 pub mod relay;
 pub mod tfstream;
 pub mod telemetry;
+pub mod telemetry_helpers;
 
 /// Project home, shown in the Info view of both front-ends so users know
 /// where to find the documentation and source.

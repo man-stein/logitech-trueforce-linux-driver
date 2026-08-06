@@ -557,6 +557,91 @@ doctor() {
 }
 
 # ----------------------------------------------------------------- setup --
+# --- telemetry helpers ------------------------------------------------------
+#
+# Two files games load rather than the user running: the relay (a Windows
+# executable, one copy per Proton prefix) and the truck-sim plugin (loaded
+# from inside the game's own installation). Packages stage master copies in
+# /usr/share/logitech-trueforce; a checkout has them in tools/ and the build
+# output. Placing them is what stops a user hunting for anything beyond
+# Logitech's own DLLs.
+
+RELAY_BIN="logi-tf-relay.exe"
+SCS_PLUGIN="liblogi_tf_scs.so"
+# Keep in step with logi-wheel-core's telemetry_helpers module and
+# docs/SCS_PLUGIN.md.
+SCS_PLUGIN_DIR="bin/linux_x64/plugins"
+
+# Print the master copy of $1, or nothing.
+helper_source() {
+	local name="$1" c
+	for c in "/usr/share/logitech-trueforce/$name" \
+		 "/usr/local/share/logitech-trueforce/$name" \
+		 "$REPO_ROOT/tools/$name" \
+		 "$REPO_ROOT/userspace/logi-wheel/target/release/$name"; do
+		[ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
+	done
+	return 1
+}
+
+# Copy $1 to $2 as the invoking user, reporting what happened.
+place_helper() {
+	local src="$1" dst="$2" what="$3" verb="installed"
+	[ -f "$dst" ] && verb="updated"
+	if [ "$EUID" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+		runuser -u "$SUDO_USER" -- mkdir -p "$(dirname "$dst")" || return 1
+		runuser -u "$SUDO_USER" -- cp -f "$src" "$dst" || return 1
+	else
+		mkdir -p "$(dirname "$dst")" || return 1
+		cp -f "$src" "$dst" || return 1
+	fi
+	echo "  $verb: $what"
+}
+
+# Put the relay in every Proton prefix and the plugin in every truck sim.
+do_helpers() {
+	local relay scs root pfx appid game manifest installdir dir n=0
+
+	relay="$(helper_source "$RELAY_BIN" || true)"
+	scs="$(helper_source "$SCS_PLUGIN" || true)"
+	if [ -z "$relay" ] && [ -z "$scs" ]; then
+		echo "  no telemetry helpers found to install (not packaged, not built)"
+		return 0
+	fi
+
+	if [ -n "$relay" ]; then
+		for root in $(steam_roots); do
+			[ -d "$root/steamapps/compatdata" ] || continue
+			for pfx in "$root"/steamapps/compatdata/*/pfx; do
+				[ -d "$pfx" ] || continue
+				appid="$(basename "$(dirname "$pfx")")"
+				place_helper "$relay" "$pfx/drive_c/$RELAY_BIN" \
+					"relay -> prefix $appid" && n=$((n+1))
+			done
+		done
+	fi
+
+	if [ -n "$scs" ]; then
+		# Native Linux titles, so they have no Proton prefix and the loop
+		# above cannot see them; they are looked up by appid instead.
+		for root in $(steam_roots); do
+			for appid in 227300 270880; do
+				manifest="$root/steamapps/appmanifest_$appid.acf"
+				[ -f "$manifest" ] || continue
+				installdir="$(sed -nE 's/^[[:space:]]*"installdir"[[:space:]]+"(.*)"[[:space:]]*$/\1/p' "$manifest" | head -1)"
+				[ -n "$installdir" ] || continue
+				dir="$root/steamapps/common/$installdir"
+				[ -d "$dir" ] || continue
+				place_helper "$scs" "$dir/$SCS_PLUGIN_DIR/$SCS_PLUGIN" \
+					"truck-sim plugin -> $installdir" && n=$((n+1))
+			done
+		done
+	fi
+
+	[ "$n" -eq 0 ] && echo "  nothing to install into (no Steam prefixes or truck sims found)"
+	return 0
+}
+
 do_shim() {
 	if [ "$EUID" -eq 0 ]; then
 		if [ -n "${SUDO_USER:-}" ]; then
@@ -585,10 +670,10 @@ setup() {
 		exit 1
 	fi
 
-	say "[1/5] Kernel module (DKMS) + udev rule"
+	say "[1/6] Kernel module (DKMS) + udev rule"
 	"$REPO_ROOT/tools/dkms-update.sh" || exit 1
 
-	say "[2/5] Migrating off any old full-fork install"
+	say "[2/6] Migrating off any old full-fork install"
 	# The old build shipped its module as hid-logitech-hidpp - the SAME
 	# name as the in-tree driver - so DKMS DISPLACED the genuine in-tree
 	# module (backing it up under .../original_module/) and the installer
@@ -642,7 +727,7 @@ setup() {
 		echo "  nothing to migrate (clean install)"
 	fi
 
-	say "[3/5] Loading the module"
+	say "[3/6] Loading the module"
 	modprobe -r hid-logitech-dd 2>/dev/null || true
 	if modprobe hid-logitech-dd; then
 		echo "  loaded"
@@ -652,7 +737,7 @@ setup() {
 	# claim the wheel if it is currently sitting on hid-generic
 	"$REPO_ROOT/tools/rebind-wheel.sh" >/dev/null 2>&1 || true
 
-	say "[4/5] TrueForce shim (Steam prefixes)"
+	say "[4/6] TrueForce shim (Steam prefixes)"
 	if ls "$(resolved_sdk_dir)"/Logi/Trueforce/*/trueforce_sdk_x64.dll >/dev/null 2>&1; then
 		do_shim || true
 	else
@@ -660,7 +745,10 @@ setup() {
 		echo "  see the wiki's Force-feedback-in-games page for TrueForce)"
 	fi
 
-	say "[5/5] Doctor"
+	say "[5/6] Telemetry helpers (relay + truck-sim plugin)"
+	do_helpers || true
+
+	say "[6/6] Doctor"
 	# diagnosis runs best as the real user (permission checks)
 	if [ -n "${SUDO_USER:-}" ]; then
 		runuser -u "$SUDO_USER" -- "$(readlink -f "$0")" doctor || true
