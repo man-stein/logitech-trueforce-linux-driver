@@ -26,7 +26,11 @@ name: Publish release packages
 #                    binary repository. Generate a dedicated one, never reuse
 #                    a personal key: it lives in CI and signs whatever is
 #                    built there.
-#                      gpg --batch --passphrase '<pass>' --quick-gen-key \
+#                    Omit --batch/--passphrase so gpg prompts for the
+#                    passphrase: passing it on the command line puts it in
+#                    your shell history, and a placeholder in a runnable
+#                    line gets pasted literally.
+#                      gpg --quick-gen-key \
 #                        'logitech-trueforce packaging <5875228+mescon@users.noreply.github.com>' \
 #                        default default 3y
 #                      gpg --armor --export-secret-keys <KEYID>   # -> this secret
