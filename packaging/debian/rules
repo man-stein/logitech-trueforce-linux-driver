@@ -56,6 +56,10 @@ override_dh_install:
 	# to run `make -C tools` in a directory a package user does not have.
 	install -D -m 0644 tools/tf-range-proxy.dll \
 		$(TUI)/usr/share/logitech-trueforce/tf-range-proxy.dll
+	# The truck sims load this from inside the game rather than from a
+	# Proton prefix, so it ships beside the proxy rather than in bin.
+	install -D -m 0644 userspace/logi-wheel/target/release/liblogi_tf_scs.so \
+		$(TUI)/usr/share/logitech-trueforce/liblogi_tf_scs.so
 	# G923 Xbox mode-switch helper, dispatched by udev rule 73. Must not be
 	# run from the udev worker itself; see the rule's own comment.
 	install -D -m 0755 tools/g923-xbox-modeswitch.sh \

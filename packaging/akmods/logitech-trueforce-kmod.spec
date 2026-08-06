@@ -120,6 +120,7 @@ Proton prefixes.
 %{_bindir}/logi-shim
 %dir %{_datadir}/logitech-trueforce
 %{_datadir}/logitech-trueforce/tf-range-proxy.dll
+%{_datadir}/logitech-trueforce/liblogi_tf_scs.so
 %{_bindir}/logi-g923-modeswitch
 %{_bindir}/logitech-trueforce-install-shim
 
@@ -231,6 +232,8 @@ install -D -m 0755 tools/install-tf-shim.sh \
 # is a Windows DLL and its users run Linux without a cross-compiler.
 install -D -m 0644 tools/tf-range-proxy.dll \
     "%{buildroot}%{_datadir}/logitech-trueforce/tf-range-proxy.dll"
+install -D -m 0644 userspace/logi-wheel/target/release/liblogi_tf_scs.so \
+    "%{buildroot}%{_datadir}/logitech-trueforce/liblogi_tf_scs.so"
 # G923 Xbox mode-switch helper, dispatched by udev rule 73.
 install -D -m 0755 tools/g923-xbox-modeswitch.sh \
     "%{buildroot}%{_bindir}/logi-g923-modeswitch"

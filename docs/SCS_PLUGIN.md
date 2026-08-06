@@ -10,7 +10,14 @@ It is a native Linux plugin. No Wine, no Proton, nothing to cross-compile.
 
 ## Install
 
-Download `liblogi_tf_scs-<version>.so` from the
+If you installed from a package (Debian, Arch, Fedora, openSUSE), you
+already have it:
+
+```
+/usr/share/logitech-trueforce/liblogi_tf_scs.so
+```
+
+Otherwise download `liblogi_tf_scs-<version>.so` from the
 [latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest)
 and rename it to `liblogi_tf_scs.so`, or build it yourself:
 
