@@ -49,8 +49,8 @@ instead of wrapping it.
 | Forza Horizon 5 | Not on Linux | Not on Linux | - | - |
 | Forza Motorsport (2023) | Not on Linux | Not on Linux | - | - |
 | Gran Turismo 7 | Not on Linux | Not on Linux | - | - |
-| GRID (2019) | Proton | Native FFB | Nothing to do | Nothing to do |
-| GRID Legends | Proton | Native FFB | Nothing to do | Nothing to do |
+| GRID (2019) | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
+| GRID Legends | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | iRacing * | Proton | logi-ffb | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | KartKraft * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Le Mans Ultimate | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
@@ -83,7 +83,7 @@ app's Setup page afterwards.
 | Game | Simulated TrueForce |
 |---|---|
 | American Truck Simulator | supported today |
-| Assetto Corsa (original) | no usable telemetry |
+| Assetto Corsa (original) | possible, needs a telemetry parser first |
 | Assetto Corsa Competizione | not needed: the game has real TrueForce |
 | Assetto Corsa EVO (early access) | not needed: the game has real TrueForce |
 | Assetto Corsa Rally (early access) | no usable telemetry |
@@ -96,8 +96,8 @@ app's Setup page afterwards.
 | EA Sports F1 (F1 22-25) | supported today |
 | EA Sports WRC | supported today |
 | Euro Truck Simulator 2 | supported today |
-| GRID (2019) | possible, needs a telemetry parser first |
-| GRID Legends | possible, needs a telemetry parser first |
+| GRID (2019) | supported today |
+| GRID Legends | supported today |
 | iRacing | supported today |
 | KartKraft | possible, needs a telemetry parser first |
 | Le Mans Ultimate | possible, needs a telemetry parser first |

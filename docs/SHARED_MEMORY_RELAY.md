@@ -15,20 +15,32 @@ daemon over localhost UDP.
 | Game | State |
 |---|---|
 | iRacing | Decoder written. Unconfirmed against a live session. |
+| RaceRoom Racing Experience | Layout published by the vendor. Decoder not written yet. |
 | rFactor 2 | Needs a byte fixture first, see below. |
 | Le Mans Ultimate | Needs a byte fixture first, see below. |
 
-iRacing is ahead of the other two for a specific reason: its telemetry is
-**self-describing**. The section starts with a small header pointing at a
-table of variable descriptors, each carrying a variable's name next to its
-offset and type, so the decoder looks up `RPM`, `Throttle` and `Gear` by name
-at runtime. Nothing about where those values live is guessed.
+What separates these is not difficulty, it is whether the layout can be
+trusted without a capture.
 
-rFactor 2 and Le Mans Ultimate publish fixed-layout C structs with no such
-table. Reading them means hardcoding byte offsets, and a wrong offset yields
+iRacing's telemetry is **self-describing**. The section starts with a small
+header pointing at a table of variable descriptors, each carrying a
+variable's name next to its offset and type, so the decoder looks up `RPM`,
+`Throttle` and `Gear` by name at runtime. Nothing about where those values
+live is guessed.
+
+RaceRoom is not self-describing, but the layout comes from KW Studios
+themselves, who publish it at `github.com/sector3studios/r3e-api` and own
+both sides of the interface. A first-party header is the same standing as the
+SCS SDK headers behind `logi-tf-scs`, so a RaceRoom decoder does not need a
+fixture either. It simply has not been written.
+
+rFactor 2 and Le Mans Ultimate are the case the rule exists for. Their layout
+comes from a community plugin that has forks and versions, so the struct the
+game publishes depends on which build the user installed. Reading it means
+hardcoding byte offsets against a moving target, and a wrong offset yields
 numbers that look plausible and are wrong, with nothing in the data to catch
-it. So those decoders wait for a real capture. That is a deliberate rule
-here, not an oversight.
+it. So those two wait for a real capture. That is a deliberate rule here, not
+an oversight.
 
 ## Build it
 

@@ -442,7 +442,14 @@ pub const GAMES: &[GameCompat] = &[
         linux: Linux::Proton,
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::No,
+        // Kunos publish a UDP remote-telemetry protocol (port 9996) and a
+        // shared-memory block, so the data exists; what is missing is a
+        // decoder for either. Both differ from every format the daemon
+        // currently speaks: the UDP one needs a handshake before the game
+        // will send anything, and the shared memory lives inside the Proton
+        // prefix, so it belongs in `logi-tf-relay` rather than the daemon's
+        // passive listener.
+        simulated_tf: SimTf::PossibleWithParser,
         setup: "Plain force feedback; no shim; turn Steam Input off.",
         confidence: Confidence::Documented,
     },
@@ -626,10 +633,10 @@ simulated TrueForce, install the logi-tf-scs plugin (see docs/SCS_PLUGIN.md).",
         linux: Linux::Proton,
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::Expected,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Plain force feedback; Steam Input off. Whether its TrueForce \
-reaches the wheel through Logitech's SDK is unconfirmed, so nothing here \
-installs one; reports welcome.",
+        simulated_tf: SimTf::LiveNow("codemasters"),
+        setup: "Enable UDP telemetry (Codemasters format); run logi-tf-sim. \
+Steam Input off. Whether its TrueForce reaches the wheel through Logitech's \
+SDK is unconfirmed, so nothing here installs one; reports welcome.",
         confidence: Confidence::Documented,
     },
     GameCompat {
@@ -637,8 +644,9 @@ installs one; reports welcome.",
         linux: Linux::Proton,
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Plain force feedback; turn Steam Input off.",
+        simulated_tf: SimTf::LiveNow("codemasters"),
+        setup: "Enable UDP telemetry (Codemasters format); run logi-tf-sim; \
+turn Steam Input off.",
         confidence: Confidence::Documented,
     },
     GameCompat {
@@ -739,6 +747,14 @@ mod tests {
             ("Project CARS 2", "ams2-pcars2"),
             ("DiRT Rally 2.0", "dirt-rally-2"),
             ("DiRT 4", "codemasters"),
+            // Same EGO engine and same packed float-array output as DiRT 4,
+            // so the existing Codemasters parser reads them unchanged: its
+            // length gate accepts the whole 64..=70 float range and both
+            // titles land inside it. These two sat marked "needs a parser"
+            // for a while purely because nobody carried the fact across
+            // from the parser, which is what this allowlist is here to stop.
+            ("GRID (2019)", "codemasters"),
+            ("GRID Legends", "codemasters"),
             ("BeamNG.drive", "beamng"),
             ("EA Sports F1 (F1 22-25)", "f1"),
             ("EA Sports WRC", "ea-wrc"),
