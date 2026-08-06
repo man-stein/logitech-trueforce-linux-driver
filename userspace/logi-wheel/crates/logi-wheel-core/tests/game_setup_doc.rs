@@ -74,11 +74,17 @@ fn render() -> String {
     out.push_str(
         "What a game needs depends on the wheel as well as the game. The\n\
          direct-drive wheels answer Logitech's TrueForce SDK, so a sim with\n\
-         built-in TrueForce can reach them through the staged SDK DLLs. The\n\
-         G923 does not: its force feedback is the older classic protocol,\n\
-         and `PROTON_ENABLE_HIDRAW=1` on that wheel diverts the game to raw\n\
-         HID reports it cannot drive feedback through, costing you the force\n\
-         feedback you already had. That is why the columns differ.\n\n",
+         built-in TrueForce reaches them through the staged SDK DLLs, and\n\
+         `PROTON_ENABLE_HIDRAW=1` is what lets it.\n\n\
+         The G923 does not answer that SDK. Setting the variable there does\n\
+         not add TrueForce, it diverts the game to raw HID reports the wheel\n\
+         cannot drive force feedback through, so it costs you the force\n\
+         feedback you already had. Leave it unset.\n\n\
+         That wheel is still capable of TrueForce, and gets it a different\n\
+         way: installing the shim with `--proxy` puts this project's own SDK\n\
+         proxy in the game's path, which copies the TrueForce the game is\n\
+         already producing and streams it to the wheel directly. Same\n\
+         haptics, carried by a route that does not need the SDK to cooperate.\n\n",
     );
     out.push_str(
         "Launch options go in Steam under the game's Properties. Paste them\n\
@@ -119,11 +125,17 @@ fn render() -> String {
     out.push_str("## Simulated TrueForce\n\n");
     out.push_str(
         "Games with no TrueForce of their own can still have engine haptics\n\
-         and rev lights, synthesized by `logi-tf-sim` from the game's own UDP\n\
-         telemetry. This works on every supported wheel, including the G923:\n\
-         it is ordinary force feedback driven from telemetry, not the SDK.\n\
-         Turn the game's telemetry output on in its own settings, then enable\n\
-         the game in the app's Setup page.\n\n",
+         and rev lights, synthesized by `logi-tf-sim` from whatever telemetry\n\
+         the game publishes. This works on every supported wheel, including\n\
+         the G923: it is ordinary force feedback driven from telemetry, not\n\
+         the SDK.\n\n\
+         How the telemetry reaches the daemon depends on the game. Most\n\
+         broadcast it over UDP and only need that switched on in their own\n\
+         settings. Euro Truck Simulator 2 and American Truck Simulator use a\n\
+         plugin instead (`docs/SCS_PLUGIN.md`), and iRacing publishes to\n\
+         shared memory that a small in-prefix relay forwards\n\
+         (`docs/SHARED_MEMORY_RELAY.md`). Either way, enable the game in the\n\
+         app's Setup page afterwards.\n\n",
     );
     out.push_str("| Game | Simulated TrueForce |\n|---|---|\n");
     for g in games::sorted_by_name().iter().filter(|g| g.linux != Linux::Unsupported) {

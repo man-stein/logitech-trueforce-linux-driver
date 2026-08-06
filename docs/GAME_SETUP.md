@@ -9,11 +9,19 @@ registry, so what you read here is what the app will tell you.
 
 What a game needs depends on the wheel as well as the game. The
 direct-drive wheels answer Logitech's TrueForce SDK, so a sim with
-built-in TrueForce can reach them through the staged SDK DLLs. The
-G923 does not: its force feedback is the older classic protocol,
-and `PROTON_ENABLE_HIDRAW=1` on that wheel diverts the game to raw
-HID reports it cannot drive feedback through, costing you the force
-feedback you already had. That is why the columns differ.
+built-in TrueForce reaches them through the staged SDK DLLs, and
+`PROTON_ENABLE_HIDRAW=1` is what lets it.
+
+The G923 does not answer that SDK. Setting the variable there does
+not add TrueForce, it diverts the game to raw HID reports the wheel
+cannot drive force feedback through, so it costs you the force
+feedback you already had. Leave it unset.
+
+That wheel is still capable of TrueForce, and gets it a different
+way: installing the shim with `--proxy` puts this project's own SDK
+proxy in the game's path, which copies the TrueForce the game is
+already producing and streams it to the wheel directly. Same
+haptics, carried by a route that does not need the SDK to cooperate.
 
 Launch options go in Steam under the game's Properties. Paste them
 exactly, `%command%` included: it is the placeholder Steam replaces
@@ -59,11 +67,18 @@ documented rather than tested end to end.
 ## Simulated TrueForce
 
 Games with no TrueForce of their own can still have engine haptics
-and rev lights, synthesized by `logi-tf-sim` from the game's own UDP
-telemetry. This works on every supported wheel, including the G923:
-it is ordinary force feedback driven from telemetry, not the SDK.
-Turn the game's telemetry output on in its own settings, then enable
-the game in the app's Setup page.
+and rev lights, synthesized by `logi-tf-sim` from whatever telemetry
+the game publishes. This works on every supported wheel, including
+the G923: it is ordinary force feedback driven from telemetry, not
+the SDK.
+
+How the telemetry reaches the daemon depends on the game. Most
+broadcast it over UDP and only need that switched on in their own
+settings. Euro Truck Simulator 2 and American Truck Simulator use a
+plugin instead (`docs/SCS_PLUGIN.md`), and iRacing publishes to
+shared memory that a small in-prefix relay forwards
+(`docs/SHARED_MEMORY_RELAY.md`). Either way, enable the game in the
+app's Setup page afterwards.
 
 | Game | Simulated TrueForce |
 |---|---|

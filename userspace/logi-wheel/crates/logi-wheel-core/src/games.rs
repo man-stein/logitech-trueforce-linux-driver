@@ -331,6 +331,13 @@ impl GameCompat {
     /// one case where following the direct-drive advice makes things worse
     /// rather than merely not better.
     pub fn setup_line(&self, caps: WheelCaps) -> &'static str {
+        // A title nobody can run on Linux gets its own line whatever the
+        // wheel. Without this, an SDK title that happens to be unplayable
+        // here still handed a G923 owner install steps for it, which reads
+        // as though it were only the wheel standing in the way.
+        if self.linux == Linux::Unsupported {
+            return self.setup;
+        }
         if self.ffb == Ffb::TrueForceShim && !caps.sdk_trueforce {
             // Worded as "not available on this wheel" rather than "this
             // wheel has no SDK TrueForce", because it also covers the
@@ -620,7 +627,9 @@ simulated TrueForce, install the logi-tf-scs plugin (see docs/SCS_PLUGIN.md).",
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::Expected,
         simulated_tf: SimTf::PossibleWithParser,
-        setup: "Plain force feedback; the TrueForce shim is worth trying; Steam Input off.",
+        setup: "Plain force feedback; Steam Input off. Whether its TrueForce \
+reaches the wheel through Logitech's SDK is unconfirmed, so nothing here \
+installs one; reports welcome.",
         confidence: Confidence::Documented,
     },
     GameCompat {
@@ -923,6 +932,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every recipe must agree with how the app will actually behave.
+    ///
+    /// The setup line is prose and the action is code, and they have drifted
+    /// apart more than once: a title told the reader to try the TrueForce
+    /// shim while its classification meant the app would never offer one,
+    /// and a G923 recipe told the same reader to skip the shim and to
+    /// install it in one sentence. Prose that contradicts the button is
+    /// worse than no prose, so the rules are checked here.
+    #[test]
+    fn every_recipe_agrees_with_what_the_app_will_do() {
+        let dd = WheelCaps { sdk_trueforce: true };
+        let classic = WheelCaps { sdk_trueforce: false };
+        let mut problems = Vec::new();
+
+        for g in GAMES {
+            for (label, caps) in [("RS50/G PRO", dd), ("G923", classic)] {
+                let line = g.setup_line(caps);
+                let low = line.to_lowercase();
+                let action = g.setup_action(caps);
+
+                // Suggesting the shim only means something when the app
+                // offers it, or when the text names the proxy route that
+                // installs it for a wheel the SDK cannot drive.
+                let suggests_shim = low.contains("shim")
+                    && !low.contains("no shim")
+                    && !low.contains("skip the shim");
+                if suggests_shim
+                    && action != SetupAction::InstallShim
+                    && !line.contains("--proxy")
+                {
+                    problems.push(format!("{} [{label}]: suggests the shim, but the app offers {action:?}", g.name));
+                }
+
+                // Telling anyone to set the variable that removes their
+                // force feedback is the bug this whole axis exists for.
+                if line.contains("PROTON_ENABLE_HIDRAW=1") && action != SetupAction::InstallShim {
+                    problems.push(format!("{} [{label}]: says to set PROTON_ENABLE_HIDRAW=1", g.name));
+                }
+
+                // A title nobody can run on Linux should not carry Linux
+                // setup steps; it reads as though it were playable.
+                if g.linux == Linux::Unsupported
+                    && (suggests_shim || line.contains("PROTON_ENABLE_HIDRAW"))
+                {
+                    problems.push(format!("{}: not on Linux but gives Linux setup steps", g.name));
+                }
+
+                // A recipe must not say both.
+                if low.contains("skip the shim") && low.contains("install the shim") {
+                    problems.push(format!("{} [{label}]: says to skip and to install the shim", g.name));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "recipes disagree with the app:\n  {}", problems.join("\n  "));
     }
 
     #[test]

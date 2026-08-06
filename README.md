@@ -244,9 +244,16 @@ The summary below is the shape of it.
   is on the
   [Force feedback in games](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Force-Feedback-in-Games)
   wiki page. Verified end to end on **Assetto Corsa Competizione** and
-  **Assetto Corsa EVO**. RS50 and G PRO only: on the G923 the SDK path does
-  not work and `PROTON_ENABLE_HIDRAW` must stay unset - see
-  [G923 support](#g923-support).
+  **Assetto Corsa EVO**.
+
+  **On a G923 the recipe is different, not absent.** That wheel does not
+  answer the TrueForce SDK, so `PROTON_ENABLE_HIDRAW` must stay unset: there
+  it does not add TrueForce, it takes away the force feedback you already
+  had. Install the shim with `--proxy` instead. That puts this project's own
+  SDK proxy in the game's path, where it copies the TrueForce the game is
+  already producing and streams it to the wheel directly, so a G923 gets the
+  game's real haptics without the SDK needing to cooperate. New, and not yet
+  confirmed by anyone driving it. See [G923 support](#g923-support).
 
   **Where the SDK files go.** Copy the `Logi` folder out of a Windows G HUB
   install into `~/.local/share/logitech-trueforce/sdk`, keeping its own
