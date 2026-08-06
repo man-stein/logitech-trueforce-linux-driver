@@ -10734,7 +10734,7 @@ static DEVICE_ATTR(wheel_led_effect, 0664, wheel_led_effect_show, wheel_led_effe
  * Two cautions baked in, both from TF4ALL's testing on real hardware:
  * writes are fire-and-forget (no reply is read - the pair does not
  * reliably generate one, and a sync wait would eat timeouts), and
- * updates are floor-limited to G HUB's own ~160 ms cadence because
+ * updates are floor-limited to the ~10 ms gap below because
  * bursting level writes starves the wheel's shared HID++ command
  * processor. The wheel holds a level for a long time but reverts
  * eventually; a telemetry feeder should refresh at ~1 Hz or faster,
@@ -10745,7 +10745,7 @@ static DEVICE_ATTR(wheel_led_effect, 0664, wheel_led_effect_show, wheel_led_effe
  * only validates, publishes the target level, and queues the worker for
  * the next allowed slot, returning immediately. Fast feeders (50-100 Hz)
  * therefore collapse to one send per slot with the newest level winning,
- * instead of blocking each write ~160 ms and draining stale
+ * instead of blocking each write and draining stale
  * intermediates onto the wire.
  */
 #define HIDPP_DD_REV_SWID		0x0d	/* G HUB's sw-id, kept verbatim */
@@ -10898,7 +10898,7 @@ out_send:
 	/*
 	 * The feeder moved the target while we were sending: schedule the
 	 * next flush a full cadence gap out (rev_last_write is now), so the
-	 * 160 ms floor holds across the hand-off.
+	 * rate floor holds across the hand-off.
 	 */
 	if (READ_ONCE(ff->rev_target) != target &&
 	    !atomic_read_acquire(&ff->stopping) &&

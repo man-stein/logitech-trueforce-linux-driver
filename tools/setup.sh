@@ -179,8 +179,13 @@ steam_roots() {
 	local u_home base vdf real
 	u_home="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
 	{
+		# Flatpak Steam last: it is a different install root entirely,
+		# and the akmods spec targets Bazzite/Silverblue where it is the
+		# normal way to have Steam. None of the three components looked
+		# for it, so those users got "no Steam installation found".
 		for base in "$u_home/.steam/steam" "$u_home/.local/share/Steam" \
-			    "$u_home/.steam/debian-installation"; do
+			    "$u_home/.steam/debian-installation" \
+			    "$u_home/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
 			[ -d "$base" ] || continue
 			printf '%s\n' "$base"
 			vdf="$base/steamapps/libraryfolders.vdf"
@@ -401,7 +406,14 @@ doctor() {
 	local sdk_root dll_missing=0
 	sdk_root="$(resolved_sdk_dir)"
 	if [ -z "$sdk_root" ]; then
-		wrn "cannot locate the shim installer, so the SDK cannot be checked (expected tools/install-tf-shim.sh or logi-shim on PATH)"
+		# Two different failures used to print the same line. Saying
+		# "cannot locate the shim installer" when it was located and
+		# then failed is the sort of claim this whole review was about.
+		if [ -n "$(find_shim_installer)" ]; then
+			wrn "the shim installer ($(find_shim_installer)) could not report its SDK directory; run it directly with --print-sdk-dir to see why"
+		else
+			wrn "cannot locate the shim installer, so the SDK cannot be checked (expected tools/install-tf-shim.sh or logi-shim on PATH)"
+		fi
 	else
 		for f in "Logi/Trueforce/*/trueforce_sdk_x64.dll" \
 			 "Logi/Trueforce/*/trueforce_sdk_x86.dll" \

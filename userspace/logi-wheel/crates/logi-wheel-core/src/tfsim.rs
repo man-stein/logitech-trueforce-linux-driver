@@ -510,7 +510,7 @@ pub fn set_game_intensity_in(path: &Path, id: &str, intensity: u8) -> Result<(),
 /// GPL-3.0-or-later boundary), same reason [`game_id_for_title`] hardcodes
 /// the ids.
 pub const DAEMON_GAME_IDS: &[&str] =
-    &["dirt-rally-2", "codemasters", "ams2-pcars2", "f1", "beamng", "ea-wrc"];
+    &["dirt-rally-2", "codemasters", "ams2-pcars2", "f1", "beamng", "ea-wrc", "relay"];
 
 /// The tf-sim game id for a games-list title, or `None` when the daemon
 /// has no per-game id for it. Deliberately conservative: only titles whose

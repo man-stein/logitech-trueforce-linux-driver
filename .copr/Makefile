@@ -8,7 +8,15 @@
 # on each user's kernel via the akmods service. No per-kernel build on COPR.
 
 SPEC   := packaging/akmods/logitech-trueforce-kmod.spec
+# The git tag first, the spec's literal only as a fallback. The spec is
+# stamped by publish-release.yml at release time and otherwise carries
+# whatever it was last committed with, which was 0.16.0 while HEAD was
+# 0.27.x: a locally built SRPM came out labelled older than what users
+# already had, so dnf would not upgrade to it.
+VER    := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+ifeq ($(VER),)
 VER    := $(shell sed -n 's/^%global[[:space:]]*upstream_ver[[:space:]]*//p' $(SPEC))
+endif
 PREFIX := logitech-trueforce-linux-driver-$(VER)
 SRCDIR := $(HOME)/rpmbuild/SOURCES
 
