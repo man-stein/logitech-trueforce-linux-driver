@@ -457,6 +457,12 @@ doctor() {
 			wrn "shim in $shimmed of $found_pfx installed SDK sim(s) (run: ./tools/setup.sh shim)"
 		elif [ "$found_pfx" -gt 0 ]; then
 			wrn "shim not installed in any of the $found_pfx installed SDK sim(s) (run: ./tools/setup.sh shim)"
+		else
+			# Say so rather than printing a bare heading. With no SDK
+			# sim installed every branch above was skipped and the
+			# section rendered as a title with nothing under it, which
+			# reads like a check that failed to run (#54).
+			ok "no SDK sims installed, so there is nothing to shim"
 		fi
 
 		# If the rotation shim is installed, Logitech's library has to be
