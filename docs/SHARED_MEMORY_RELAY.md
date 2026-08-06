@@ -17,7 +17,7 @@ daemon over localhost UDP.
 | iRacing | Decoder written. Unconfirmed against a live session. |
 | RaceRoom Racing Experience | Decoder written. Unconfirmed against a live session. |
 | Assetto Corsa | Decoder written. Layout confirmed via Competizione, which shares it. |
-| Assetto Corsa Competizione | **Confirmed on a live session** (2026-08-06). |
+| Assetto Corsa Competizione | **Confirmed end to end on a G923** (2026-08-06). |
 | Assetto Corsa EVO | Decoder written. Unconfirmed against a live session. |
 | rFactor 2 | Decoder written. Unconfirmed against a live session. |
 | Le Mans Ultimate | Decoder written. Unconfirmed against a live session. |
@@ -64,12 +64,17 @@ detectable and gets dropped. And the player's car is found by matching a slot
 id between two independently written buffers, which a misaligned read fails
 rather than passes with plausible numbers.
 
-Assetto Corsa Competizione was checked against a running game on
-2026-08-06: both sections opened, the physics head read a coherent live car
-(2720 rpm, second gear, 49.6 km/h), the static block's UTF-16 guard passed on
-real bytes, and `maxRpm` at offset 412 read 8650, a genuine GT3 redline
-rather than plausible garbage. That confirms the offsets Assetto Corsa
-shares with it.
+Assetto Corsa Competizione was confirmed end to end on 2026-08-06, on a
+G923. Both sections opened; the physics head read a coherent live car; the
+static block's UTF-16 guard passed on real bytes; and `maxRpm` at offset 412
+read 8650, a genuine GT3 redline rather than plausible garbage.
+
+Then the whole chain was run: game shared memory, relay wire format, daemon,
+synth, wheel. With the car **stationary in the pit box** and the engine
+revving, the wheel produced an engine note. That is the test worth repeating,
+because force feedback cannot fake it: a parked car generates no tyre or
+suspension force, so anything felt while stationary came from telemetry. Same
+offsets confirm Assetto Corsa, which shares this layout.
 
 The rest have not been run against a live game. Every read in them is bounds
 checked and range gated, and each drops a sample it cannot vouch for rather
