@@ -140,6 +140,17 @@ fn render() -> String {
     out.push_str("| Game | Simulated TrueForce |\n|---|---|\n");
     for g in games::sorted_by_name().iter().filter(|g| g.linux != Linux::Unsupported) {
         let cell = match g.simulated_tf {
+            // A title with TrueForce of its own that ALSO has a telemetry
+            // decoder must say both, or its row contradicts the sibling
+            // title next to it: one reads "supported today" and the other
+            // "not needed, the game has real TrueForce", and a reader with a
+            // direct-drive wheel concludes the first one now requires
+            // something. It does not. Simulated TrueForce is the fallback
+            // for the wheels that cannot receive the real thing.
+            SimTf::LiveNow(_) if g.ffb == Ffb::TrueForceShim => {
+                "the game's own TrueForce is the route to use; \
+                 simulated is the fallback for a wheel that cannot receive it"
+            }
             SimTf::LiveNow(_) => "supported today",
             SimTf::PossibleWithParser => "possible, needs a telemetry parser first",
             SimTf::No => "no usable telemetry",
@@ -198,6 +209,34 @@ fn game_setup_doc_matches_the_registry() {
         "docs/GAME_SETUP.md is stale. Regenerate it:\n\
          \n    UPDATE_GAME_SETUP=1 cargo test -p logi-wheel-core --test game_setup_doc\n"
     );
+}
+
+/// A title that has real TrueForce must never be described as merely
+/// "supported today" by the simulated-TrueForce table, because a reader with
+/// a direct-drive wheel takes that to mean the game now needs something it
+/// does not. Assetto Corsa Competizione is the case: it has native
+/// TrueForce and gained a telemetry decoder for the wheels that cannot
+/// receive it, and for a while its row and AC EVO's flatly contradicted
+/// each other.
+#[test]
+fn a_native_trueforce_title_never_reads_as_needing_the_simulated_kind() {
+    let doc = render();
+    for g in games::GAMES.iter().filter(|g| g.ffb == Ffb::TrueForceShim) {
+        if g.simulated_tf.live_id().is_none() {
+            continue;
+        }
+        let row = doc
+            .lines()
+            .filter(|l| l.starts_with(&format!("| {} |", g.name)))
+            .find(|l| !l.contains("Proton") && !l.contains("Not on Linux"))
+            .unwrap_or_else(|| panic!("no simulated-TrueForce row for {}", g.name));
+        assert!(
+            row.contains("own TrueForce") && row.contains("fallback"),
+            "{} has real TrueForce; its row must say so rather than imply the \
+             simulated kind is what to use: {row}",
+            g.name
+        );
+    }
 }
 
 /// The doc's whole purpose is that the two wheel columns say different
