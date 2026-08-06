@@ -60,7 +60,9 @@ provisional marker in [`docs/GAME_SETUP.md`](docs/GAME_SETUP.md).
   root-owned and nothing granted a desktop user access, so every write
   failed silently while the daemon reported it was driving the display. The
   direct-drive wheels use a different attribute that this project already
-  made writable, which is why it went unnoticed. Needs the new udev rule.
+  made writable, which is why it went unnoticed. Confirmed working after the
+  fix by sampling the five brightness files through a rev sweep: they fill
+  one at a time to all five and drain back in order.
 - **With two wheels attached, the rev display of the wrong one was driven.**
   The daemon vibrated the wheel it had opened and lit whichever wheel sysfs
   listed first.
