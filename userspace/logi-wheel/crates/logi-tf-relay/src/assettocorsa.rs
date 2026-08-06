@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Decoder for Assetto Corsa's `acpmf_physics` / `acpmf_static` sections.
+//! Decoder for Assetto Corsa and Assetto Corsa Competizione, which share
+//! the `acpmf_physics` / `acpmf_static` sections and their layout.
 //!
 //! # Why this one can be written without a captured fixture
 //!
@@ -62,8 +63,20 @@
 
 use logi_wheel_core::relay::RelayTelemetry;
 
-/// The relay wire id for this game.
+/// The relay wire id for Assetto Corsa.
 pub const ID: &str = "assetto";
+
+/// The relay wire id for Assetto Corsa Competizione.
+///
+/// Competizione publishes the *same section names* as Assetto Corsa, and
+/// both blocks are byte-identical through every field read here, so this
+/// decoder reads it unchanged. Only the id differs, because the two are
+/// separate games to somebody setting an intensity.
+///
+/// The shared section name has a consequence worth knowing: only one of the
+/// two can be running at a time, so whichever is up is what gets read,
+/// whatever `--game` said. That misroutes a setting, never a reading.
+pub const ID_ACC: &str = "acc";
 
 /// Windows named section carrying the per-tick physics block.
 pub const SECTION_PHYSICS: &str = "Local\\acpmf_physics";
@@ -119,7 +132,7 @@ fn static_layout_looks_right(buf: &[u8]) -> bool {
 /// against. Returns `None` for a short buffer, a static block whose layout
 /// fails its guard, or a session that is not running (Assetto Corsa leaves
 /// the engine fields zeroed in menus).
-pub fn decode(physics: &[u8], statics: &[u8]) -> Option<RelayTelemetry> {
+pub fn decode(physics: &[u8], statics: &[u8], game_id: &'static str) -> Option<RelayTelemetry> {
     if physics.len() < MIN_PHYSICS_LEN || statics.len() < MIN_STATIC_LEN {
         return None;
     }
@@ -146,7 +159,7 @@ pub fn decode(physics: &[u8], statics: &[u8]) -> Option<RelayTelemetry> {
         _ => 0,
     };
 
-    Some(RelayTelemetry { game_id: ID, rpm, max_rpm, throttle, gear })
+    Some(RelayTelemetry { game_id, rpm, max_rpm, throttle, gear })
 }
 
 #[cfg(test)]
@@ -184,9 +197,25 @@ mod tests {
         assert_eq!(SECTION_STATIC, "Local\\acpmf_static");
     }
 
+    /// Competizione is read by this decoder on the claim that its physics
+    /// and static blocks are byte-identical to Assetto Corsa's through every
+    /// field used here. The claim is what makes the reuse legitimate, so the
+    /// id is the only thing allowed to differ between the two.
+    #[test]
+    fn competizione_decodes_identically_and_differs_only_in_id() {
+        let p = physics(0.75, 3, 6200);
+        let s = statics(7500);
+        let ac = decode(&p, &s, ID).unwrap();
+        let acc = decode(&p, &s, ID_ACC).unwrap();
+        assert_eq!(acc.game_id, "acc");
+        assert_ne!(ac.game_id, acc.game_id, "separate games, separate switches");
+        assert_eq!((ac.rpm, ac.max_rpm, ac.gear), (acc.rpm, acc.max_rpm, acc.gear));
+        assert_eq!(ac.throttle, acc.throttle);
+    }
+
     #[test]
     fn decodes_a_running_session() {
-        let s = decode(&physics(0.75, 3, 6200), &statics(7500)).expect("valid buffers");
+        let s = decode(&physics(0.75, 3, 6200), &statics(7500), ID).expect("valid buffers");
         assert_eq!(s.game_id, ID);
         assert_eq!(s.rpm, 6200.0);
         assert_eq!(s.max_rpm, 7500.0);
@@ -199,7 +228,7 @@ mod tests {
     fn gears_shift_down_by_one_from_assetto_corsas_numbering() {
         let cases = [(0, -1), (1, 0), (2, 1), (3, 2), (8, 7)];
         for (ac, expected) in cases {
-            let s = decode(&physics(0.5, ac, 6000), &statics(7500)).unwrap();
+            let s = decode(&physics(0.5, ac, 6000), &statics(7500), ID).unwrap();
             assert_eq!(s.gear, expected, "AC gear {ac} should relay as {expected}");
         }
     }
@@ -212,41 +241,41 @@ mod tests {
         // UTF-32-shaped: '1', 0, 0, 0. The second 16-bit unit reads zero.
         wrong[2] = 0;
         wrong[3] = 0;
-        assert!(decode(&physics(0.5, 3, 6000), &wrong).is_none());
+        assert!(decode(&physics(0.5, 3, 6000), &wrong, ID).is_none());
 
         let mut zeroed = statics(7500);
         zeroed[0..4].fill(0);
-        assert!(decode(&physics(0.5, 3, 6000), &zeroed).is_none(), "unwritten block");
+        assert!(decode(&physics(0.5, 3, 6000), &zeroed, ID).is_none(), "unwritten block");
     }
 
     #[test]
     fn short_buffers_are_refused_rather_than_read_past() {
         let p = physics(0.5, 3, 6000);
         let s = statics(7500);
-        assert!(decode(&p[..MIN_PHYSICS_LEN - 1], &s).is_none());
-        assert!(decode(&p, &s[..MIN_STATIC_LEN - 1]).is_none());
-        assert!(decode(&[], &[]).is_none());
+        assert!(decode(&p[..MIN_PHYSICS_LEN - 1], &s, ID).is_none());
+        assert!(decode(&p, &s[..MIN_STATIC_LEN - 1], ID).is_none());
+        assert!(decode(&[], &[], ID).is_none());
     }
 
     /// Menus leave the engine fields zeroed, and a car with no redline
     /// gives an engine note nothing to scale against.
     #[test]
     fn a_session_that_is_not_running_yields_nothing() {
-        assert!(decode(&physics(0.0, 0, 0), &statics(0)).is_none(), "no redline");
-        assert!(decode(&physics(0.0, 0, 0), &statics(7500)).is_some(), "idle is still a session");
+        assert!(decode(&physics(0.0, 0, 0), &statics(0), ID).is_none(), "no redline");
+        assert!(decode(&physics(0.0, 0, 0), &statics(7500), ID).is_some(), "idle is still a session");
     }
 
     #[test]
     fn implausible_engine_values_are_refused() {
-        assert!(decode(&physics(0.5, 3, -100), &statics(7500)).is_none());
-        assert!(decode(&physics(0.5, 3, 90_000), &statics(7500)).is_none());
-        assert!(decode(&physics(0.5, 3, 6000), &statics(90_000)).is_none());
+        assert!(decode(&physics(0.5, 3, -100), &statics(7500), ID).is_none());
+        assert!(decode(&physics(0.5, 3, 90_000), &statics(7500), ID).is_none());
+        assert!(decode(&physics(0.5, 3, 6000), &statics(90_000), ID).is_none());
     }
 
     #[test]
     fn a_non_finite_or_out_of_range_throttle_is_tamed() {
-        assert_eq!(decode(&physics(f32::NAN, 3, 6000), &statics(7500)).unwrap().throttle, 0.0);
-        assert_eq!(decode(&physics(5.0, 3, 6000), &statics(7500)).unwrap().throttle, 1.0);
-        assert_eq!(decode(&physics(-5.0, 3, 6000), &statics(7500)).unwrap().throttle, 0.0);
+        assert_eq!(decode(&physics(f32::NAN, 3, 6000), &statics(7500), ID).unwrap().throttle, 0.0);
+        assert_eq!(decode(&physics(5.0, 3, 6000), &statics(7500), ID).unwrap().throttle, 1.0);
+        assert_eq!(decode(&physics(-5.0, 3, 6000), &statics(7500), ID).unwrap().throttle, 0.0);
     }
 }

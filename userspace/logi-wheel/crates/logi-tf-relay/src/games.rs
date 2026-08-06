@@ -81,6 +81,17 @@ pub const GAMES: &[Game] = &[
         read_len: DEFAULT_READ_LEN,
     },
     Game {
+        id: crate::assettocorsa::ID_ACC,
+        name: "Assetto Corsa Competizione",
+        // Identical section names and identical layout to Assetto Corsa, so
+        // the same decoder reads it; only the settings id differs.
+        section: crate::assettocorsa::SECTION_PHYSICS,
+        aux_section: Some(crate::assettocorsa::SECTION_STATIC),
+        prerequisite: None,
+        decodable: true,
+        read_len: DEFAULT_READ_LEN,
+    },
+    Game {
         id: crate::rfactor2::ID_LMU,
         name: "Le Mans Ultimate",
         section: crate::rfactor2::SECTION_TELEMETRY,
@@ -113,7 +124,8 @@ mod tests {
     fn lookup_is_case_insensitive_and_misses_are_none() {
         assert_eq!(by_id("iRacing").unwrap().id, "iracing");
         assert_eq!(by_id("LMU").unwrap().name, "Le Mans Ultimate");
-        assert!(by_id("acc").is_none());
+        assert_eq!(by_id("ACC").unwrap().name, "Assetto Corsa Competizione");
+        assert!(by_id("gran turismo").is_none());
     }
 
     #[test]
@@ -154,7 +166,10 @@ mod tests {
         for game in GAMES {
             let needs_two = matches!(
                 game.id,
-                crate::assettocorsa::ID | crate::rfactor2::ID_RF2 | crate::rfactor2::ID_LMU
+                crate::assettocorsa::ID
+                    | crate::assettocorsa::ID_ACC
+                    | crate::rfactor2::ID_RF2
+                    | crate::rfactor2::ID_LMU
             );
             assert_eq!(game.aux_section.is_some(), needs_two, "{}", game.name);
         }

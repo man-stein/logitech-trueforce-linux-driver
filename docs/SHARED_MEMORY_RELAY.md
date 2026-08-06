@@ -1,9 +1,9 @@
 # Simulated TrueForce for sims that publish to shared memory
 
 Most sims broadcast telemetry over UDP, which `logi-tf-sim` reads directly.
-A few do not: iRacing, RaceRoom, Assetto Corsa, rFactor 2 and Le Mans
-Ultimate publish into a named Windows shared-memory section that only the
-game's own SDK reads. Nothing on the Linux side can see it.
+A few do not: iRacing, RaceRoom, Assetto Corsa and Competizione, rFactor 2
+and Le Mans Ultimate publish into a named Windows shared-memory section that
+only the game's own SDK reads. Nothing on the Linux side can see it.
 
 `logi-tf-relay` is a small Windows executable that runs inside the game's
 Proton prefix, reads that section with the ordinary Win32 API (which Wine
@@ -17,6 +17,7 @@ daemon over localhost UDP.
 | iRacing | Decoder written. Unconfirmed against a live session. |
 | RaceRoom Racing Experience | Decoder written. Unconfirmed against a live session. |
 | Assetto Corsa | Decoder written. Unconfirmed against a live session. |
+| Assetto Corsa Competizione | Same decoder. Unconfirmed against a live session. |
 | rFactor 2 | Decoder written. Unconfirmed against a live session. |
 | Le Mans Ultimate | Decoder written. Unconfirmed against a live session. |
 
@@ -41,6 +42,8 @@ fields to the physics block for a decade, but appending does not move what
 came before, and throttle, gear and rpm have been in its first 32 bytes since
 1.0. The redline comes from a second block where the offset is less obviously
 safe, so the decoder verifies that block's layout in-band before trusting it.
+Competizione publishes the same section names and the same layout, byte for
+byte through every field used, so it is read by the same decoder.
 
 **rFactor 2 and Le Mans Ultimate say whether a read was good.** Their layout
 comes from a community plugin rather than a vendor, which is why they were
@@ -82,6 +85,7 @@ running. The prefix is named after the game's Steam appid:
 | iRacing | `iracing` | 266410 | |
 | RaceRoom Racing Experience | `raceroom` | 211500 | |
 | Assetto Corsa | `assetto` | 244210 | |
+| Assetto Corsa Competizione | `acc` | 805550 | |
 | rFactor 2 | `rf2` | 365960 | `rF2SharedMemoryMapPlugin` |
 | Le Mans Ultimate | `lmu` | 2399420 | `rF2SharedMemoryMapPlugin` |
 
@@ -93,6 +97,12 @@ WINEPREFIX=~/.steam/steam/steamapps/compatdata/244210/pfx \
 Leave it running. It re-reads the section about 60 times a second and sends
 what it finds to `logi-tf-sim`, which must also be running. Then turn the
 game on in the app's Setup page under Simulated TrueForce.
+
+**Competizione is a special case.** It has real TrueForce of its own, and on
+a direct-drive wheel that is the route to use: install the shim and skip the
+relay entirely. The relay is here for the G923, which cannot receive the
+SDK's TrueForce at all, so a synthesized engine note is the difference
+between haptics and silence rather than a second-best.
 
 None of these needs anything switched on inside the game: unlike the UDP
 titles, the shared memory is always published. rFactor 2 and Le Mans Ultimate

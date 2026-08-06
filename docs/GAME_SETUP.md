@@ -84,7 +84,7 @@ app's Setup page afterwards.
 |---|---|
 | American Truck Simulator | supported today |
 | Assetto Corsa (original) | supported today |
-| Assetto Corsa Competizione | not needed: the game has real TrueForce |
+| Assetto Corsa Competizione | supported today |
 | Assetto Corsa EVO (early access) | not needed: the game has real TrueForce |
 | Assetto Corsa Rally (early access) | no usable telemetry |
 | Automobilista 2 | supported today |

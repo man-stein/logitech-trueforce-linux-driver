@@ -90,6 +90,12 @@ pub enum SimTf {
     No,
     /// Not applicable: the title already delivers real TrueForce, so there
     /// is nothing to synthesize.
+    ///
+    /// Read this as "on a wheel that can receive it". These titles hand
+    /// their TrueForce to Logitech's SDK, which only the direct-drive wheels
+    /// answer, so on a G923 the game is producing TrueForce that never
+    /// arrives. Where this project can synthesize a substitute, the title is
+    /// [`SimTf::LiveNow`] instead, even though its TrueForce is real.
     NotApplicableNative,
 }
 
@@ -434,7 +440,13 @@ pub const GAMES: &[GameCompat] = &[
         linux: Linux::Proton,
         ffb: Ffb::TrueForceShim,
         native_trueforce: Support::Yes,
-        simulated_tf: SimTf::NotApplicableNative,
+        // Native TrueForce, and on a direct-drive wheel that is the
+        // route to use: install the shim and this is redundant. It is here
+        // for the G923, which cannot receive the SDK's TrueForce at all, so
+        // a synthesized engine note is the difference between haptics and
+        // silence. Competizione publishes the same shared memory as Assetto
+        // Corsa, byte for byte, so this needed no new decoder.
+        simulated_tf: SimTf::LiveNow("acc"),
         setup: "Install the TrueForce shim; set PROTON_ENABLE_HIDRAW=1; turn Steam Input off.",
         confidence: Confidence::Verified,
     },
@@ -794,6 +806,10 @@ mod tests {
             ("iRacing", "iracing"),
             ("RaceRoom Racing Experience", "raceroom"),
             ("Assetto Corsa (original)", "assetto"),
+            // Same sections and same layout as Assetto Corsa, so the same
+            // decoder; listed separately because it is a separate game to
+            // anyone setting an intensity.
+            ("Assetto Corsa Competizione", "acc"),
             // The rF2 family's layout comes from a community plugin rather
             // than a vendor, which is why it was written last. What makes it
             // decodable is that the format says whether a read was clean:

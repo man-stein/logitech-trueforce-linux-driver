@@ -38,7 +38,7 @@ USAGE:
   logi-tf-relay --game <id> --dump <file>     write the section's bytes to <file>
   logi-tf-relay --section <name> --dump <file>  dump any named section
 
-Games:  iracing, raceroom, assetto, rf2, lmu
+Games:  iracing, raceroom, assetto, acc, rf2, lmu
 
 --dump is for reporting a game that decodes nothing: take it while a session
 is actually RUNNING, sitting in the menus is not always enough, and send the
@@ -188,8 +188,10 @@ fn run_stream(section: &str, aux: Option<&str>, game: &str, read_len: usize) -> 
                 };
                 let sample = match game {
                     raceroom::ID => raceroom::decode(&bytes),
-                    assettocorsa::ID => {
-                        aux_bytes.and_then(|s| assettocorsa::decode(&bytes, &s))
+                    id @ (assettocorsa::ID | assettocorsa::ID_ACC) => {
+                        let id =
+                            if id == assettocorsa::ID_ACC { assettocorsa::ID_ACC } else { assettocorsa::ID };
+                        aux_bytes.and_then(|s| assettocorsa::decode(&bytes, &s, id))
                     }
                     id @ (rfactor2::ID_RF2 | rfactor2::ID_LMU) => {
                         // The two share a decoder but not a settings
@@ -348,7 +350,7 @@ mod tests {
 
     #[test]
     fn unknown_game_and_missing_values_are_errors() {
-        assert!(parse_args(&args(&["--game", "acc"])).is_err());
+        assert!(parse_args(&args(&["--game", "gran-turismo"])).is_err());
         assert!(parse_args(&args(&["--game"])).is_err());
         assert!(parse_args(&args(&["--dump"])).is_err());
         assert!(parse_args(&args(&["--frobnicate"])).is_err());

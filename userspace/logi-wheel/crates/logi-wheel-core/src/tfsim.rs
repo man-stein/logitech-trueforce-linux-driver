@@ -524,6 +524,7 @@ pub const DAEMON_GAME_IDS: &[&str] = &[
     "iracing",
     "raceroom",
     "assetto",
+    "acc",
     "lmu",
     "rf2",
     "relay",
