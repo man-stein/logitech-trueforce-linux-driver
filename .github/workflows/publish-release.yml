@@ -468,8 +468,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # --repo explicitly. gh otherwise infers it from the current
+          # directory's git remote, and `cd repo` lands in a downloaded
+          # artifact directory with no .git above it, so the upload failed
+          # with "not a git repository" while everything it was uploading
+          # was built and signed correctly.
           cd repo
-          gh release upload "$TAG" \
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
             *.pkg.tar.zst *.pkg.tar.zst.sig \
             logitech-trueforce.db logitech-trueforce.db.sig \
             logitech-trueforce.files logitech-trueforce.files.sig \
