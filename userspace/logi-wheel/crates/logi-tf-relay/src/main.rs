@@ -288,27 +288,34 @@ mod win {
         unsafe {
             let mapping = OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr());
             if mapping.is_null() {
-                return Err(format!("OpenFileMappingW: fel {}", GetLastError()));
+                return Err(format!("OpenFileMappingW: error {}", GetLastError()));
             }
             let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
             if view.Value.is_null() {
                 let err = GetLastError();
                 CloseHandle(mapping);
-                return Err(format!("MapViewOfFile: fel {err}"));
+                return Err(format!("MapViewOfFile: error {err}"));
             }
 
             // The section size: VirtualQuery on the view gives the region length.
             let mut info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-            let size = if VirtualQuery(
+            // Falling back to `limit` here would read that many bytes from
+            // a view that may be smaller, which is an out-of-bounds read
+            // rather than a short answer. The rF2 family asks for 236 KiB,
+            // so guessing is not survivable; not knowing the size is a
+            // failed read.
+            if VirtualQuery(
                 view.Value,
                 &mut info,
                 std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            ) != 0
+            ) == 0
             {
-                info.RegionSize.min(limit)
-            } else {
-                limit
-            };
+                let err = GetLastError();
+                UnmapViewOfFile(view);
+                CloseHandle(mapping);
+                return Err(format!("VirtualQuery: error {err}"));
+            }
+            let size = info.RegionSize.min(limit);
 
             let bytes = std::slice::from_raw_parts(view.Value as *const u8, size).to_vec();
             UnmapViewOfFile(view);

@@ -14,23 +14,43 @@ the contract is "it works on RS50 and G Pro as listed here".
   than over UDP, so a small native Linux plugin now forwards engine speed,
   throttle and gear to the daemon. No Wine involved. See
   [`docs/SCS_PLUGIN.md`](docs/SCS_PLUGIN.md).
-- **Simulated TrueForce in iRacing**, via a relay that runs inside the game's
-  Proton prefix and reads the shared memory the game publishes to. See
+- **Simulated TrueForce in every sim that publishes to shared memory**:
+  iRacing, RaceRoom Racing Experience, Assetto Corsa, rFactor 2 and Le Mans
+  Ultimate. A small relay runs inside the game's Proton prefix and forwards
+  what it reads to the daemon. rFactor 2 and Le Mans Ultimate also need the
+  community `rF2SharedMemoryMapPlugin`. See
   [`docs/SHARED_MEMORY_RELAY.md`](docs/SHARED_MEMORY_RELAY.md).
-- Groundwork for rFactor 2 and Le Mans Ultimate: the relay can capture the
-  byte fixture their decoders need, but it will not stream from them until
-  someone provides one. Guessing struct offsets produces numbers that look
-  right and are not.
+- **Simulated TrueForce in GRID (2019) and GRID Legends.** No new code: both
+  are the same Codemasters telemetry format the DiRT titles use and the
+  parser already read them. What was missing was saying so, and telling you
+  to switch the game's UDP output on.
 
-Both are new and unconfirmed by anyone actually driving them, so those
-titles carry the provisional marker in
-[`docs/GAME_SETUP.md`](docs/GAME_SETUP.md) until someone reports back.
+Each decoder is written against a layout its publisher documents, and every
+read is bounds checked and range gated so a sample that cannot be vouched for
+is dropped rather than sent as a wrong number. None has yet been confirmed by
+anyone actually driving the game, so these titles carry the provisional
+marker in [`docs/GAME_SETUP.md`](docs/GAME_SETUP.md) until someone reports
+back.
+
+### Fixed
+
+- **iRacing owners were told to turn on simulated TrueForce instead of being
+  given their launch options.** iRacing needs `logi-ffb %command%` to have
+  any force feedback at all, and the recipe dropped that the moment the game
+  gained a telemetry decoder, so the advice was to enable an engine note for
+  a wheel that was not being driven. The two are not alternatives and are no
+  longer treated as such.
+- **Assetto Corsa was listed as having no usable telemetry.** It publishes
+  both a documented UDP protocol and a shared-memory block; it now has a
+  decoder for the latter.
 
 ### Changed
 
-- Each telemetry source now carries its own game id, so Euro Truck Simulator
-  2, American Truck Simulator and iRacing get separate enable switches and
-  separate intensities instead of sharing one.
+- Each telemetry source now carries its own game id, so every relayed title
+  gets its own enable switch and intensity instead of sharing one.
+- The relay is now built for Windows in CI. Everything in it that touches
+  shared memory sits behind `cfg(windows)`, so nothing had ever compiled the
+  code users actually run.
 
 ## 0.28.0 - 2026-08-06
 

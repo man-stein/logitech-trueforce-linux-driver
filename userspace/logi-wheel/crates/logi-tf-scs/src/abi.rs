@@ -215,7 +215,7 @@ mod tests {
         let v = ScsValue { value_type: SCS_VALUE_TYPE_FLOAT, _padding: 0, storage };
         unsafe {
             assert_eq!(v.as_float(), Some(1500.0));
-            assert_eq!(v.as_s32(), None, "fel typtagg ska ge None, aldrig en omtolkning");
+            assert_eq!(v.as_s32(), None, "a wrong type tag must give None, never a reinterpretation");
         }
 
         let mut storage = ScsValueStorage([0u8; 40]);
