@@ -473,11 +473,15 @@ pub const GAMES: &[GameCompat] = &[
         setup: "Plain force feedback; no shim; turn Steam Input off. \
 Simulated TrueForce needs logi-tf-relay in the prefix (see \
 docs/SHARED_MEMORY_RELAY.md); nothing to switch on in the game.",
-        // Expected: the decoder reads only the head of Kunos' physics block,
-        // which has not moved since AC 1.0, and checks the static block's
-        // layout in-band before trusting the redline. Unconfirmed in a live
-        // session under Proton.
-        confidence: Confidence::Expected,
+        // Documented: the decoder reads only the head of Kunos' physics
+        // block, which has not moved since AC 1.0, and checks the static
+        // block's layout in-band before trusting the redline. Those exact
+        // offsets were confirmed against a live Competizione session on
+        // 2026-08-06, which publishes the same two sections with the same
+        // layout: the UTF-16 guard passed on real bytes and maxRpm at 412
+        // read a genuine redline. This title itself has not been run, which
+        // is the only reason this is not Verified.
+        confidence: Confidence::Documented,
     },
     GameCompat {
         name: "Automobilista 2",

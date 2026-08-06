@@ -16,8 +16,8 @@ daemon over localhost UDP.
 |---|---|
 | iRacing | Decoder written. Unconfirmed against a live session. |
 | RaceRoom Racing Experience | Decoder written. Unconfirmed against a live session. |
-| Assetto Corsa | Decoder written. Unconfirmed against a live session. |
-| Assetto Corsa Competizione | Same decoder. Unconfirmed against a live session. |
+| Assetto Corsa | Decoder written. Layout confirmed via Competizione, which shares it. |
+| Assetto Corsa Competizione | **Confirmed on a live session** (2026-08-06). |
 | Assetto Corsa EVO | Decoder written. Unconfirmed against a live session. |
 | rFactor 2 | Decoder written. Unconfirmed against a live session. |
 | Le Mans Ultimate | Decoder written. Unconfirmed against a live session. |
@@ -64,10 +64,16 @@ detectable and gets dropped. And the player's car is found by matching a slot
 id between two independently written buffers, which a misaligned read fails
 rather than passes with plausible numbers.
 
-None of these decoders has been confirmed against a running game yet. Every
-read is bounds checked and range gated, and each drops a sample it cannot
-vouch for rather than sending a wrong number, but a report from someone who
-has actually run one is what moves it from "should work" to "known to work".
+Assetto Corsa Competizione was checked against a running game on
+2026-08-06: both sections opened, the physics head read a coherent live car
+(2720 rpm, second gear, 49.6 km/h), the static block's UTF-16 guard passed on
+real bytes, and `maxRpm` at offset 412 read 8650, a genuine GT3 redline
+rather than plausible garbage. That confirms the offsets Assetto Corsa
+shares with it.
+
+The rest have not been run against a live game. Every read in them is bounds
+checked and range gated, and each drops a sample it cannot vouch for rather
+than sending a wrong number, but that is a design argument, not evidence.
 
 ## Get it
 
