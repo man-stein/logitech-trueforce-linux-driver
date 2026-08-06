@@ -51,11 +51,11 @@ instead of wrapping it.
 | Gran Turismo 7 | Not on Linux | Not on Linux | - | - |
 | GRID (2019) | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | GRID Legends | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
-| iRacing * | Proton | logi-ffb | Turn on simulated TrueForce | Turn on simulated TrueForce |
+| iRacing * | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | KartKraft * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Le Mans Ultimate | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Project CARS 2 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
-| RaceRoom Racing Experience * | Proton | logi-ffb | Turn on simulated TrueForce | Turn on simulated TrueForce |
+| RaceRoom Racing Experience * | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Rennsport * | Proton | Native FFB | Nothing to do | Nothing to do |
 | rFactor 2 | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Richard Burns Rally * | Proton | Native FFB | Nothing to do | Nothing to do |
@@ -100,11 +100,11 @@ app's Setup page afterwards.
 | GRID Legends | supported today |
 | iRacing | supported today |
 | KartKraft | possible, needs a telemetry parser first |
-| Le Mans Ultimate | possible, needs a telemetry parser first |
+| Le Mans Ultimate | supported today |
 | Project CARS 2 | supported today |
 | RaceRoom Racing Experience | supported today |
 | Rennsport | no usable telemetry |
-| rFactor 2 | possible, needs a telemetry parser first |
+| rFactor 2 | supported today |
 | Richard Burns Rally | possible, needs a telemetry parser first |
 | Wreckfest | no usable telemetry |
 
@@ -112,7 +112,7 @@ app's Setup page afterwards.
 
 - **Install the shim.** Stage Logitech's signed SDK DLLs into the game's Proton prefix, from the app's Setup page or `tools/install-tf-shim.sh`. Install the TrueForce shim; set PROTON_ENABLE_HIDRAW=1; turn Steam Input off.
 - **On a wheel with no SDK TrueForce.** Leave PROTON_ENABLE_HIDRAW unset: on this wheel it costs you force feedback. Install the shim WITH --proxy, which is what carries this game's own TrueForce to a wheel Logitech's SDK will not drive (see docs/GAME_SETUP.md). Steam Input off.
-- **Launch via logi-ffb.** Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off.
+- **Launch via logi-ffb.** Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off. Simulated TrueForce needs the community rF2SharedMemoryMapPlugin plus logi-tf-relay in the prefix (see docs/SHARED_MEMORY_RELAY.md).
 - **Nothing to do.** The wheel is an ordinary Linux force feedback device and the game drives it directly.
 
 ## Confidence

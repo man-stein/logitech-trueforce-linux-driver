@@ -17,12 +17,11 @@ daemon over localhost UDP.
 | iRacing | Decoder written. Unconfirmed against a live session. |
 | RaceRoom Racing Experience | Decoder written. Unconfirmed against a live session. |
 | Assetto Corsa | Decoder written. Unconfirmed against a live session. |
-| rFactor 2 | Needs a byte fixture first, see below. |
-| Le Mans Ultimate | Needs a byte fixture first, see below. |
+| rFactor 2 | Decoder written. Unconfirmed against a live session. |
+| Le Mans Ultimate | Decoder written. Unconfirmed against a live session. |
 
 What separates these is not difficulty, it is whether the layout can be
-trusted without a capture. Each of the first three earned that trust a
-different way.
+trusted without a capture. Each earned that trust a different way.
 
 **iRacing's telemetry is self-describing.** The section starts with a small
 header pointing at a table of variable descriptors, each carrying a
@@ -43,17 +42,20 @@ came before, and throttle, gear and rpm have been in its first 32 bytes since
 1.0. The redline comes from a second block where the offset is less obviously
 safe, so the decoder verifies that block's layout in-band before trusting it.
 
-**rFactor 2 and Le Mans Ultimate are the case the rule exists for.** Their
-layout comes from a community plugin that has forks and versions, so the
-struct the game publishes depends on which build the user installed. A wrong
-offset yields numbers that look plausible and are wrong. So those two wait
-for a real capture. That is a deliberate rule here, not an oversight.
+**rFactor 2 and Le Mans Ultimate say whether a read was good.** Their layout
+comes from a community plugin rather than a vendor, which is why they were
+written last: the struct depends on which fork and build the user installed.
+What makes them decodable anyway is that the format carries its own
+consistency state. Each buffer is preceded by a pair of counters the plugin
+bumps before and after writing, so a read that caught a write in progress is
+detectable and gets dropped. And the player's car is found by matching a slot
+id between two independently written buffers, which a misaligned read fails
+rather than passes with plausible numbers.
 
-None of the three written decoders has been confirmed against a running game
-yet. Every read in them is bounds checked and range gated, and each drops a
-sample it cannot vouch for rather than sending a wrong number, but a report
-from someone who has actually run one is what moves it from "should work" to
-"known to work".
+None of these decoders has been confirmed against a running game yet. Every
+read is bounds checked and range gated, and each drops a sample it cannot
+vouch for rather than sending a wrong number, but a report from someone who
+has actually run one is what moves it from "should work" to "known to work".
 
 ## Build it
 
@@ -75,11 +77,13 @@ Windows machine and no Wine.
 Run the relay in the same Proton prefix as the game, while the game is
 running. The prefix is named after the game's Steam appid:
 
-| Game | `--game` | Steam appid |
-|---|---|---|
-| iRacing | `iracing` | 266410 |
-| RaceRoom Racing Experience | `raceroom` | 211500 |
-| Assetto Corsa | `assetto` | 244210 |
+| Game | `--game` | Steam appid | Also needs |
+|---|---|---|---|
+| iRacing | `iracing` | 266410 | |
+| RaceRoom Racing Experience | `raceroom` | 211500 | |
+| Assetto Corsa | `assetto` | 244210 | |
+| rFactor 2 | `rf2` | 365960 | `rF2SharedMemoryMapPlugin` |
+| Le Mans Ultimate | `lmu` | 2399420 | `rF2SharedMemoryMapPlugin` |
 
 ```bash
 WINEPREFIX=~/.steam/steam/steamapps/compatdata/244210/pfx \
@@ -90,9 +94,13 @@ Leave it running. It re-reads the section about 60 times a second and sends
 what it finds to `logi-tf-sim`, which must also be running. Then turn the
 game on in the app's Setup page under Simulated TrueForce.
 
-None of these three needs anything switched on inside the game: unlike the
-UDP titles, the shared memory is always published. If your Steam library is
-on another drive, `./tools/setup.sh doctor` prints the roots it found.
+None of these needs anything switched on inside the game: unlike the UDP
+titles, the shared memory is always published. rFactor 2 and Le Mans Ultimate
+do need the community `rF2SharedMemoryMapPlugin` in the game's `Plugins`
+directory, though, or the game publishes nothing at all.
+
+If your Steam library is on another drive, `./tools/setup.sh doctor` prints
+the roots it found.
 
 If the daemon uses a non-default relay port, tell the relay too:
 
@@ -100,13 +108,11 @@ If the daemon uses a non-default relay port, tell the relay too:
 LOGI_TF_SIM_RELAY_PORT=20999 wine logi-tf-relay.exe --game iracing
 ```
 
-## Capture a fixture (rFactor 2, Le Mans Ultimate)
+## Capture a fixture
 
-This is the piece the project needs from testers, and it takes one run.
-
-rFactor 2 and Le Mans Ultimate also need the community
-`rF2SharedMemoryMapPlugin` in the game's `Plugins` directory; without it the
-game publishes nothing at all.
+Every decoder here is written against a published layout, and none has yet
+been confirmed against a running game. If one of them stays silent, or sends
+something obviously wrong, a dump is what turns that into a fix.
 
 With the game running and a session actually **live** (sitting in the menus
 is not always enough):
@@ -116,8 +122,9 @@ WINEPREFIX=<the game's prefix> \
   wine logi-tf-relay.exe --game lmu --dump lmu-dump.bin
 ```
 
-Attach `lmu-dump.bin` to an issue. That file is what the decoder gets written
-and unit-tested against. Without it, any decoder would be a guess.
+Attach `lmu-dump.bin` to an issue, saying which game and which build. The
+dump is what a decoder gets re-tested against, so a real one settles a
+question that no amount of reading headers can.
 
 The dump contains vehicle telemetry for the session that was running. It
 carries no account details, no keys and no personal data, but it does reflect

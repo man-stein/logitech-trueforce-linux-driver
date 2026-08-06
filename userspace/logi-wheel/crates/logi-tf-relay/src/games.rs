@@ -6,12 +6,14 @@
 //! (rFactor 2 and Le Mans Ultimate share the engine and the community
 //! `rF2SharedMemoryMapPlugin`) publishes globally named `$...$` sections.
 //!
-//! A game gets a decoder here once its layout can be trusted, which happens
-//! one of three ways: the format is self-describing (iRacing), the vendor
-//! publishes the layout and owns both ends of it (RaceRoom), or the fields
-//! needed sit in a part of the struct that provably has not moved and the
-//! risky part carries an in-band check (Assetto Corsa). Anything else waits
-//! for a real captured fixture, which is what `--dump` is for.
+//! A game gets a decoder here once its layout can be trusted, which has so
+//! far happened four ways: the format is self-describing (iRacing), the
+//! vendor publishes the layout and owns both ends of it (RaceRoom), the
+//! fields needed sit in a part of the struct that provably has not moved and
+//! the risky part carries an in-band check (Assetto Corsa), or the format
+//! carries enough state to tell a good read from a bad one (the rF2 family's
+//! version counters and cross-buffer id match). A format with none of those
+//! waits for a real captured fixture, which is what `--dump` is for.
 
 /// One shared-memory sim the relay can open.
 pub struct Game {
@@ -31,7 +33,23 @@ pub struct Game {
     pub prerequisite: Option<&'static str>,
     /// Whether a decoder exists, or `--dump` is all this game can do yet.
     pub decodable: bool,
+    /// How many bytes to read from the section each tick.
+    ///
+    /// Per game because the sizes are not close: iRacing needs its header
+    /// and descriptor table, Assetto Corsa a few hundred bytes, and the rF2
+    /// family a 236 KiB array of every car in the session. Reading a fixed
+    /// small amount would silently truncate the last of those.
+    pub read_len: usize,
 }
+
+/// Bytes read per tick for a game whose section has no fixed size, notably
+/// iRacing's header plus its variable-descriptor table (112 bytes plus about
+/// 300 descriptors of 144 bytes).
+pub const DEFAULT_READ_LEN: usize = 64 * 1024;
+
+/// The prerequisite both rF2-family titles share.
+const RF2_PLUGIN: &str =
+    "needs the community rF2SharedMemoryMapPlugin in the game's Plugins directory";
 
 /// Every game the relay knows the section name for.
 pub const GAMES: &[Game] = &[
@@ -42,6 +60,7 @@ pub const GAMES: &[Game] = &[
         aux_section: None,
         prerequisite: None,
         decodable: true,
+        read_len: DEFAULT_READ_LEN,
     },
     Game {
         id: crate::raceroom::ID,
@@ -50,6 +69,7 @@ pub const GAMES: &[Game] = &[
         aux_section: None,
         prerequisite: None,
         decodable: true,
+        read_len: DEFAULT_READ_LEN,
     },
     Game {
         id: crate::assettocorsa::ID,
@@ -58,26 +78,25 @@ pub const GAMES: &[Game] = &[
         aux_section: Some(crate::assettocorsa::SECTION_STATIC),
         prerequisite: None,
         decodable: true,
+        read_len: DEFAULT_READ_LEN,
     },
     Game {
-        id: "lmu",
+        id: crate::rfactor2::ID_LMU,
         name: "Le Mans Ultimate",
-        section: "$rFactor2SMMP_Telemetry$",
-        aux_section: None,
-        prerequisite: Some(
-            "needs the community rF2SharedMemoryMapPlugin in the game's Plugins directory",
-        ),
-        decodable: false,
+        section: crate::rfactor2::SECTION_TELEMETRY,
+        aux_section: Some(crate::rfactor2::SECTION_SCORING),
+        prerequisite: Some(RF2_PLUGIN),
+        decodable: true,
+        read_len: crate::rfactor2::TELEMETRY_LEN,
     },
     Game {
-        id: "rf2",
+        id: crate::rfactor2::ID_RF2,
         name: "rFactor 2",
-        section: "$rFactor2SMMP_Telemetry$",
-        aux_section: None,
-        prerequisite: Some(
-            "needs the community rF2SharedMemoryMapPlugin in the game's Plugins directory",
-        ),
-        decodable: false,
+        section: crate::rfactor2::SECTION_TELEMETRY,
+        aux_section: Some(crate::rfactor2::SECTION_SCORING),
+        prerequisite: Some(RF2_PLUGIN),
+        decodable: true,
+        read_len: crate::rfactor2::TELEMETRY_LEN,
     },
 ];
 
@@ -127,14 +146,28 @@ mod tests {
         }
     }
 
-    /// Only Assetto Corsa needs two sections, and it must actually name the
-    /// second: without the static block there is no redline, and the
-    /// decoder would refuse every sample.
+    /// A game that names a second section needs it: Assetto Corsa's redline
+    /// and the rF2 family's `mIsPlayer` both live outside the primary
+    /// section, and without them their decoders refuse every sample.
     #[test]
-    fn assetto_corsa_is_the_only_two_section_game() {
+    fn the_two_section_games_are_the_ones_that_need_a_second() {
         for game in GAMES {
-            let expected = game.id == crate::assettocorsa::ID;
-            assert_eq!(game.aux_section.is_some(), expected, "{}", game.name);
+            let needs_two = matches!(
+                game.id,
+                crate::assettocorsa::ID | crate::rfactor2::ID_RF2 | crate::rfactor2::ID_LMU
+            );
+            assert_eq!(game.aux_section.is_some(), needs_two, "{}", game.name);
+        }
+    }
+
+    /// The rF2 family's telemetry mapping is an array of every car in the
+    /// session. Reading the default amount would take the first 34 of 128
+    /// rows and silently miss a player further down the grid.
+    #[test]
+    fn the_rf2_family_reads_its_whole_mapping() {
+        for game in GAMES.iter().filter(|g| g.section == crate::rfactor2::SECTION_TELEMETRY) {
+            assert_eq!(game.read_len, crate::rfactor2::TELEMETRY_LEN, "{}", game.name);
+            assert!(game.read_len > DEFAULT_READ_LEN, "{} needs more than the default", game.name);
         }
     }
 }

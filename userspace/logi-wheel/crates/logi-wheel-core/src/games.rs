@@ -314,10 +314,20 @@ impl GameCompat {
             } else {
                 SetupAction::WorksOutOfBox
             }
+        } else if self.ffb == Ffb::DirectInput {
+            // Ahead of simulated TrueForce deliberately, because the two are
+            // not alternatives: logi-ffb is what gives a DirectInput title
+            // any force feedback at all, while simulated TrueForce adds
+            // haptics on top of feedback that already works. Ordered the
+            // other way, a title that gained a telemetry decoder silently
+            // lost its launch options, and its owner was told to enable an
+            // engine note for a wheel that was not being driven at all.
+            // Simulated TrueForce for these titles is not lost: it has its
+            // own section in the generated doc and its own switch in the
+            // app's Setup page.
+            SetupAction::UseLogiFfb
         } else if self.simulated_tf.live_id().is_some() {
             SetupAction::SimulatedTrueForce
-        } else if self.ffb == Ffb::DirectInput {
-            SetupAction::UseLogiFfb
         } else {
             SetupAction::WorksOutOfBox
         }
@@ -475,8 +485,11 @@ docs/SHARED_MEMORY_RELAY.md); nothing to switch on in the game.",
         linux: Linux::Proton,
         ffb: Ffb::DirectInput,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off.",
+        simulated_tf: SimTf::LiveNow("rf2"),
+        setup: "Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; \
+Steam Input off. Simulated TrueForce needs the community \
+rF2SharedMemoryMapPlugin plus logi-tf-relay in the prefix (see \
+docs/SHARED_MEMORY_RELAY.md).",
         confidence: Confidence::Documented,
     },
     GameCompat {
@@ -484,8 +497,11 @@ docs/SHARED_MEMORY_RELAY.md); nothing to switch on in the game.",
         linux: Linux::Proton,
         ffb: Ffb::DirectInput,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off.",
+        simulated_tf: SimTf::LiveNow("lmu"),
+        setup: "Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; \
+Steam Input off. Simulated TrueForce needs the community \
+rF2SharedMemoryMapPlugin plus logi-tf-relay in the prefix (see \
+docs/SHARED_MEMORY_RELAY.md).",
         confidence: Confidence::Verified,
     },
     GameCompat {
@@ -778,6 +794,14 @@ mod tests {
             ("iRacing", "iracing"),
             ("RaceRoom Racing Experience", "raceroom"),
             ("Assetto Corsa (original)", "assetto"),
+            // The rF2 family's layout comes from a community plugin rather
+            // than a vendor, which is why it was written last. What makes it
+            // decodable is that the format says whether a read was clean:
+            // version counters around each buffer catch a torn read, and the
+            // player's car is found by matching an id across two
+            // independently written buffers, which a wrong layout fails.
+            ("rFactor 2", "rf2"),
+            ("Le Mans Ultimate", "lmu"),
         ]
         .into_iter()
         .collect();
