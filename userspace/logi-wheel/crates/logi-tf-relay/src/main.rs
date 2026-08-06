@@ -38,7 +38,7 @@ USAGE:
   logi-tf-relay --game <id> --dump <file>     write the section's bytes to <file>
   logi-tf-relay --section <name> --dump <file>  dump any named section
 
-Games:  iracing, raceroom, assetto, acc, rf2, lmu
+Games:  iracing, raceroom, assetto, acc, ac-evo, rf2, lmu
 
 --dump is for reporting a game that decodes nothing: take it while a session
 is actually RUNNING, sitting in the menus is not always enough, and send the
@@ -188,6 +188,7 @@ fn run_stream(section: &str, aux: Option<&str>, game: &str, read_len: usize) -> 
                 };
                 let sample = match game {
                     raceroom::ID => raceroom::decode(&bytes),
+                    assettocorsa::ID_EVO => assettocorsa::decode_evo(&bytes),
                     id @ (assettocorsa::ID | assettocorsa::ID_ACC) => {
                         let id =
                             if id == assettocorsa::ID_ACC { assettocorsa::ID_ACC } else { assettocorsa::ID };

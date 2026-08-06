@@ -85,7 +85,7 @@ app's Setup page afterwards.
 | American Truck Simulator | supported today |
 | Assetto Corsa (original) | supported today |
 | Assetto Corsa Competizione | the game's own TrueForce is the route to use; simulated is the fallback for a wheel that cannot receive it |
-| Assetto Corsa EVO (early access) | not needed: the game has real TrueForce |
+| Assetto Corsa EVO (early access) | the game's own TrueForce is the route to use; simulated is the fallback for a wheel that cannot receive it |
 | Assetto Corsa Rally (early access) | no usable telemetry |
 | Automobilista 2 | supported today |
 | BeamNG.drive | supported today |

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Decoder for Assetto Corsa and Assetto Corsa Competizione, which share
-//! the `acpmf_physics` / `acpmf_static` sections and their layout.
+//! Decoders for the Assetto Corsa family.
+//!
+//! Assetto Corsa and Competizione share the `acpmf_physics` /
+//! `acpmf_static` sections and their layout, so one decoder reads both.
+//! EVO renamed every section and moved the redline into the physics block,
+//! so it gets [`decode_evo`]; it still shares the physics head and the gear
+//! convention, which is why it lives here rather than in its own module.
 //!
 //! # Why this one can be written without a captured fixture
 //!
@@ -66,6 +71,14 @@ use logi_wheel_core::relay::RelayTelemetry;
 /// The relay wire id for Assetto Corsa.
 pub const ID: &str = "assetto";
 
+/// The relay wire id for Assetto Corsa EVO.
+///
+/// EVO renamed its sections and dropped the static block's `maxRpm`, so it
+/// does not share Competizione's "identical, only the id differs" story. It
+/// shares the physics head and the gear convention, and nothing else this
+/// module needs. See [`decode_evo`].
+pub const ID_EVO: &str = "ac-evo";
+
 /// The relay wire id for Assetto Corsa Competizione.
 ///
 /// Competizione publishes the *same section names* as Assetto Corsa, and
@@ -84,6 +97,10 @@ pub const SECTION_PHYSICS: &str = "Local\\acpmf_physics";
 /// Windows named section carrying the per-session static block.
 pub const SECTION_STATIC: &str = "Local\\acpmf_static";
 
+/// Assetto Corsa EVO's physics section. EVO renamed every block, so it does
+/// not collide with the two older games and can be told apart from them.
+pub const SECTION_PHYSICS_EVO: &str = "Local\\acevo_pmf_physics";
+
 // Physics offsets (see module docs).
 const OFF_GAS: usize = 4;
 const OFF_GEAR: usize = 16;
@@ -91,6 +108,20 @@ const OFF_RPMS: usize = 20;
 
 /// Through the last physics field read, `rpms`.
 const MIN_PHYSICS_LEN: usize = OFF_RPMS + 4;
+
+/// EVO's redline, `currentMaxRpm`, which lives in the physics block rather
+/// than a static one and is republished every tick.
+const OFF_CURRENT_MAX_RPM: usize = 588;
+
+/// Through EVO's `currentMaxRpm`.
+const MIN_PHYSICS_EVO_LEN: usize = OFF_CURRENT_MAX_RPM + 4;
+
+/// No engine with a redline worth synthesizing against reports one below
+/// this. It is the EVO decoder's main defence: with no static block to
+/// sanity-check and no version field, a wrong `currentMaxRpm` offset would
+/// most likely land on a temperature, a pressure or a pedal, all of which
+/// are far below any real redline.
+const MIN_PLAUSIBLE_REDLINE: f32 = 1_000.0;
 
 // Static offsets (see module docs).
 const OFF_MAX_RPM: usize = 412;
@@ -149,17 +180,65 @@ pub fn decode(physics: &[u8], statics: &[u8], game_id: &'static str) -> Option<R
         return None;
     }
 
+    let (throttle, gear) = head_inputs(physics)?;
+    Some(RelayTelemetry { game_id, rpm, max_rpm, throttle, gear })
+}
+
+/// Read throttle and gear from the physics head, which every Assetto Corsa
+/// generation shares. Factored out so the two decoders cannot drift on the
+/// gear translation, which is the field most easily got wrong.
+fn head_inputs(physics: &[u8]) -> Option<(f32, i16)> {
     let throttle = f32_at(physics, OFF_GAS)?;
     let throttle = if throttle.is_finite() { throttle.clamp(0.0, 1.0) } else { 0.0 };
-
     // Assetto Corsa numbers reverse 0, neutral 1, first 2. The relay wants
     // reverse -1, neutral 0, first 1, so every gear shifts down by one.
     let gear = match i32_at(physics, OFF_GEAR)? {
         g @ 0..=16 => (g - 1) as i16,
         _ => 0,
     };
+    Some((throttle, gear))
+}
 
-    Some(RelayTelemetry { game_id, rpm, max_rpm, throttle, gear })
+/// Decode one read of Assetto Corsa EVO's physics section.
+///
+/// # Why EVO gets its own function
+///
+/// EVO shares this module because it shares the physics head and the gear
+/// convention. It does not share the rest. Kunos renamed every section, and
+/// they removed the car spec sheet from the static block, so the redline
+/// that Assetto Corsa and Competizione read from `acpmf_static` is simply
+/// not there. Its replacement is `currentMaxRpm`, in the physics block, and
+/// republished every tick because in EVO it varies with engine state.
+///
+/// That leaves EVO with one section and no layout guard: no static block to
+/// cross-check, no version field, no packed struct. `currentMaxRpm` sits at
+/// offset 588, well past the stable head, so it is the one number here that
+/// a layout change could move.
+///
+/// The defence is that a redline is a distinctive value. A wrong offset in a
+/// physics block lands on a temperature, a pressure, a pedal position or a
+/// slip ratio, and none of those reaches [`MIN_PLAUSIBLE_REDLINE`]. The
+/// sample is dropped rather than sent, so a layout change makes EVO go quiet
+/// instead of making the wheel behave strangely.
+pub fn decode_evo(physics: &[u8]) -> Option<RelayTelemetry> {
+    if physics.len() < MIN_PHYSICS_EVO_LEN {
+        return None;
+    }
+    let rpm = i32_at(physics, OFF_RPMS)? as f32;
+    let max_rpm = i32_at(physics, OFF_CURRENT_MAX_RPM)? as f32;
+    if !(MIN_PLAUSIBLE_REDLINE..=MAX_PLAUSIBLE_RPM).contains(&max_rpm)
+        || !(0.0..=MAX_PLAUSIBLE_RPM).contains(&rpm)
+    {
+        return None;
+    }
+    // A car does not turn half again its own redline. Reading well past it
+    // means these two numbers did not come from one engine, which is what a
+    // moved offset looks like from here.
+    if rpm > max_rpm * 1.5 {
+        return None;
+    }
+    let (throttle, gear) = head_inputs(physics)?;
+    Some(RelayTelemetry { game_id: ID_EVO, rpm, max_rpm, throttle, gear })
 }
 
 #[cfg(test)]
@@ -195,6 +274,80 @@ mod tests {
         assert_eq!(OFF_MAX_RPM, 412);
         assert_eq!(SECTION_PHYSICS, "Local\\acpmf_physics");
         assert_eq!(SECTION_STATIC, "Local\\acpmf_static");
+    }
+
+    /// An EVO physics block: same head, plus `currentMaxRpm` where EVO put
+    /// it instead of in a static block.
+    fn physics_evo(gas: f32, gear: i32, rpms: i32, current_max_rpm: i32) -> Vec<u8> {
+        let mut b = vec![0u8; MIN_PHYSICS_EVO_LEN];
+        b[OFF_GAS..][..4].copy_from_slice(&gas.to_le_bytes());
+        b[OFF_GEAR..][..4].copy_from_slice(&gear.to_le_bytes());
+        b[OFF_RPMS..][..4].copy_from_slice(&rpms.to_le_bytes());
+        b[OFF_CURRENT_MAX_RPM..][..4].copy_from_slice(&current_max_rpm.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn evo_offsets_match_the_documented_layout() {
+        assert_eq!(OFF_CURRENT_MAX_RPM, 588);
+        assert_eq!(SECTION_PHYSICS_EVO, "Local\\acevo_pmf_physics");
+        assert_ne!(SECTION_PHYSICS_EVO, SECTION_PHYSICS, "EVO renamed its sections");
+    }
+
+    #[test]
+    fn evo_decodes_a_running_session_from_one_section() {
+        let s = decode_evo(&physics_evo(0.8, 4, 6800, 8400)).expect("valid EVO block");
+        assert_eq!(s.game_id, "ac-evo");
+        assert_eq!(s.rpm, 6800.0);
+        assert_eq!(s.max_rpm, 8400.0, "redline comes from the physics block, not a static one");
+        assert_eq!(s.gear, 3, "EVO shares the 0=R, 1=N gear convention");
+        assert!((s.throttle - 0.8).abs() < 1e-6);
+    }
+
+    /// EVO has no static block to cross-check and no version field, so the
+    /// redline's own implausibility is the only thing standing between a
+    /// moved offset and a wrong number reaching the wheel. A wrong offset in
+    /// a physics block lands on a temperature, a pressure or a pedal.
+    #[test]
+    fn evo_refuses_a_redline_no_engine_would_report() {
+        for wrong in [0, 1, 85, 200, 999] {
+            assert!(
+                decode_evo(&physics_evo(0.5, 3, 6000, wrong)).is_none(),
+                "{wrong} is not a redline and must not be used as one"
+            );
+        }
+        assert!(decode_evo(&physics_evo(0.5, 3, 6000, 7000)).is_some(), "7000 is a redline");
+    }
+
+    /// Reading far past the redline means the two numbers did not come from
+    /// one engine, which is what a moved offset looks like from here.
+    #[test]
+    fn evo_refuses_revs_that_cannot_belong_to_that_redline() {
+        assert!(decode_evo(&physics_evo(0.5, 3, 20_000, 7000)).is_none());
+        // A touch over the limiter is ordinary and must still pass.
+        assert!(decode_evo(&physics_evo(0.5, 3, 7200, 7000)).is_some());
+    }
+
+    #[test]
+    fn evo_refuses_short_buffers_and_dead_sessions() {
+        let full = physics_evo(0.5, 3, 6000, 7000);
+        assert!(decode_evo(&full[..MIN_PHYSICS_EVO_LEN - 1]).is_none());
+        assert!(decode_evo(&[]).is_none());
+        // A block long enough for the older games' fields but not EVO's
+        // redline must not be decoded on the strength of the head alone.
+        assert!(decode_evo(&full[..MIN_PHYSICS_LEN]).is_none());
+        assert!(decode_evo(&physics_evo(0.0, 0, 0, 0)).is_none(), "menu");
+    }
+
+    /// The gear translation is shared with the older games precisely so it
+    /// cannot drift; this is what says so.
+    #[test]
+    fn evo_and_assetto_corsa_translate_gears_identically() {
+        for g in 0..=8 {
+            let ac = decode(&physics(0.5, g, 6000), &statics(7500), ID).unwrap();
+            let evo = decode_evo(&physics_evo(0.5, g, 6000, 7500)).unwrap();
+            assert_eq!(ac.gear, evo.gear, "gear {g} must mean the same in both");
+        }
     }
 
     /// Competizione is read by this decoder on the claim that its physics

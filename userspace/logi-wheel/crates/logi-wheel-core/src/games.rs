@@ -455,7 +455,12 @@ pub const GAMES: &[GameCompat] = &[
         linux: Linux::Proton,
         ffb: Ffb::TrueForceShim,
         native_trueforce: Support::Yes,
-        simulated_tf: SimTf::NotApplicableNative,
+        // Native TrueForce, and on a direct-drive wheel that is the
+        // route to use. This is here for the G923, which cannot receive the
+        // SDK's TrueForce at all. EVO renamed its sections and moved the
+        // redline into the physics block, so unlike Competizione it needed
+        // its own decoder rather than Assetto Corsa's unchanged.
+        simulated_tf: SimTf::LiveNow("ac-evo"),
         setup: "Install the TrueForce shim; set PROTON_ENABLE_HIDRAW=1; turn Steam Input off.",
         confidence: Confidence::Verified,
     },
@@ -810,6 +815,10 @@ mod tests {
             // decoder; listed separately because it is a separate game to
             // anyone setting an intensity.
             ("Assetto Corsa Competizione", "acc"),
+            // Same family, but not the same bytes: EVO renamed every section
+            // and dropped the static block's redline, so it reads
+            // `currentMaxRpm` out of the physics block instead.
+            ("Assetto Corsa EVO (early access)", "ac-evo"),
             // The rF2 family's layout comes from a community plugin rather
             // than a vendor, which is why it was written last. What makes it
             // decodable is that the format says whether a read was clean:

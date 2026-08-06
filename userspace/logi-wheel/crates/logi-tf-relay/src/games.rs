@@ -92,6 +92,17 @@ pub const GAMES: &[Game] = &[
         read_len: DEFAULT_READ_LEN,
     },
     Game {
+        id: crate::assettocorsa::ID_EVO,
+        name: "Assetto Corsa EVO",
+        // EVO renamed its sections and moved the redline into the physics
+        // block, so unlike Competizione it needs only one section.
+        section: crate::assettocorsa::SECTION_PHYSICS_EVO,
+        aux_section: None,
+        prerequisite: None,
+        decodable: true,
+        read_len: DEFAULT_READ_LEN,
+    },
+    Game {
         id: crate::rfactor2::ID_LMU,
         name: "Le Mans Ultimate",
         section: crate::rfactor2::SECTION_TELEMETRY,

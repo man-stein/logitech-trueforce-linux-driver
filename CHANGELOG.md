@@ -15,18 +15,19 @@ the contract is "it works on RS50 and G Pro as listed here".
   throttle and gear to the daemon. No Wine involved. See
   [`docs/SCS_PLUGIN.md`](docs/SCS_PLUGIN.md).
 - **Simulated TrueForce in every sim that publishes to shared memory**:
-  iRacing, RaceRoom Racing Experience, Assetto Corsa, Assetto Corsa
-  Competizione, rFactor 2 and Le Mans Ultimate. A small relay runs inside the game's Proton prefix and forwards
+  iRacing, RaceRoom Racing Experience, Assetto Corsa, Competizione, EVO,
+  rFactor 2 and Le Mans Ultimate. A small relay runs inside the game's Proton prefix and forwards
   what it reads to the daemon. rFactor 2 and Le Mans Ultimate also need the
   community `rF2SharedMemoryMapPlugin`. See
   [`docs/SHARED_MEMORY_RELAY.md`](docs/SHARED_MEMORY_RELAY.md).
-- **Simulated TrueForce in Assetto Corsa Competizione, for the G923.** ACC
-  has real TrueForce, and on a direct-drive wheel that is still the route to
-  use. But the G923 cannot receive it: the game hands its TrueForce to
-  Logitech's SDK, which that wheel does not answer. Synthesizing an engine
-  note from ACC's telemetry is the difference between haptics and silence
-  there. It needed no new decoder, because ACC publishes the same shared
-  memory as Assetto Corsa, byte for byte.
+- **Simulated TrueForce in Assetto Corsa Competizione and EVO, for the
+  G923.** Both have real TrueForce, and on a direct-drive wheel that is
+  still the route to use. But the G923 cannot receive it: the game hands its
+  TrueForce to Logitech's SDK, which that wheel does not answer. Synthesizing
+  an engine note from the game's own telemetry is the difference between
+  haptics and silence there. Competizione needed no new decoder, publishing
+  the same shared memory as Assetto Corsa byte for byte; EVO renamed its
+  sections and moved the redline, so it got one.
 - **Simulated TrueForce in GRID (2019) and GRID Legends.** No new code: both
   are the same Codemasters telemetry format the DiRT titles use and the
   parser already read them. What was missing was saying so, and telling you
