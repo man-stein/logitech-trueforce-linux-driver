@@ -479,9 +479,16 @@ pub const GAMES: &[GameCompat] = &[
         linux: Linux::Proton,
         ffb: Ffb::DirectInput,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Now Linux-playable; set PROTON_ENABLE_HIDRAW=0 or launch with logi-ffb %command%; Steam Input off.",
-        confidence: Confidence::Documented,
+        simulated_tf: SimTf::LiveNow("iracing"),
+        setup: "Now Linux-playable; set PROTON_ENABLE_HIDRAW=0 or launch with \
+logi-ffb %command%; Steam Input off. Simulated TrueForce needs logi-tf-relay \
+in the prefix (see docs/SHARED_MEMORY_RELAY.md).",
+        // Expected: the decoder reads iRacing's own self-describing variable
+        // table rather than guessed offsets, and is tested against the
+        // documented layout, but nobody has yet confirmed the game even
+        // publishes its shared memory under Proton. Listed as live so the
+        // per-game switch exists for whoever tries it first.
+        confidence: Confidence::Expected,
     },
     GameCompat {
         name: "RaceRoom Racing Experience",
@@ -569,18 +576,24 @@ pub const GAMES: &[GameCompat] = &[
         linux: Linux::Native,
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Plain force feedback on the native Linux build; no shim.",
-        confidence: Confidence::Documented,
+        simulated_tf: SimTf::LiveNow("ets2"),
+        setup: "Plain force feedback on the native Linux build; no shim. For \
+simulated TrueForce, install the logi-tf-scs plugin (see docs/SCS_PLUGIN.md).",
+        // Expected, not Verified: the plugin is built against the official
+        // SDK headers with its struct layouts pinned by tests, but nobody
+        // has yet loaded it into a running game and felt the result.
+        confidence: Confidence::Expected,
     },
     GameCompat {
         name: "American Truck Simulator",
         linux: Linux::Native,
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Plain force feedback on the native Linux build; no shim.",
-        confidence: Confidence::Documented,
+        simulated_tf: SimTf::LiveNow("ats"),
+        setup: "Plain force feedback on the native Linux build; no shim. For \
+simulated TrueForce, install the logi-tf-scs plugin (see docs/SCS_PLUGIN.md).",
+        // See the Euro Truck Simulator 2 entry: same plugin, same caveat.
+        confidence: Confidence::Expected,
     },
     GameCompat {
         name: "KartKraft",
@@ -710,6 +723,8 @@ mod tests {
             .filter_map(|g| g.simulated_tf.live_id().map(|id| (g.name, id)))
             .collect();
         let expected: BTreeSet<(&str, &str)> = [
+            // Native UDP telemetry: the daemon parses the game's own
+            // broadcast directly.
             ("Automobilista 2", "ams2-pcars2"),
             ("Project CARS 2", "ams2-pcars2"),
             ("DiRT Rally 2.0", "dirt-rally-2"),
@@ -717,6 +732,16 @@ mod tests {
             ("BeamNG.drive", "beamng"),
             ("EA Sports F1 (F1 22-25)", "f1"),
             ("EA Sports WRC", "ea-wrc"),
+            // Plugin sources: no UDP of their own, so a plugin inside the
+            // game speaks the relay format instead. Live in the same sense,
+            // and gated by the same per-game switches.
+            ("Euro Truck Simulator 2", "ets2"),
+            ("American Truck Simulator", "ats"),
+            // Shared memory, read by the in-prefix relay. iRacing only: its
+            // telemetry is self-describing, so a decoder can be written
+            // without a captured fixture. rFactor 2 and Le Mans Ultimate are
+            // fixed-layout structs and still wait for one.
+            ("iRacing", "iracing"),
         ]
         .into_iter()
         .collect();

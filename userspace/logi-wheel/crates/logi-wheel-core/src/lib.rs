@@ -31,6 +31,9 @@ pub mod device;
 pub use device::{Device, DeviceInfo, WheelModel};
 pub mod games;
 
+pub mod relay;
+pub mod telemetry;
+
 /// Project home, shown in the Info view of both front-ends so users know
 /// where to find the documentation and source.
 pub const PROJECT_URL: &str = "https://github.com/mescon/logitech-trueforce-linux-driver";

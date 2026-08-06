@@ -1990,6 +1990,14 @@ mod tests {
     fn sim_tf_app() -> App<FakeSysfs> {
         use crossterm::event::KeyCode;
         let mut a = setup_view_app();
+        // Pin the config these tests render, rather than inheriting whatever
+        // is in the developer's own ~/.config/logi-wheel/tf-sim.conf. App::new
+        // loads that file, so with `effects=0` in it the layer list correctly
+        // stays hidden and these assertions failed - on this machine only,
+        // and only after something happened to write that key. A test whose
+        // result depends on the home directory it runs in is not testing the
+        // code.
+        a.tf_cfg = logi_wheel_core::tfsim::Config { effects: true, ..Default::default() };
         a.focus = Focus::Content;
         for _ in 0..3 {
             a.on_key(KeyCode::Down);

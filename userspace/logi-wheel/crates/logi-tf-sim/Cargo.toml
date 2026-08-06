@@ -12,9 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-# Test-only: pins the front-ends' format-compatible tf-sim.conf
-# reader/writer (logi_wheel_core::tfsim) against this crate's own writer;
-# see tests/frontend_compat.rs.
+# Delade wire-format- och telemetrimodeller (relay, telemetry) bor i core
+# så SCS-pluginet och Windows-relayn kan använda samma encoder utan att dra
+# in libtrueforce-länkningen; tf-sim re-exporterar dem under sina gamla
+# sökvägar.
 logi-wheel-core = { path = "../logi-wheel-core" }
+

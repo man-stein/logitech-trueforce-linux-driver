@@ -2846,6 +2846,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "logi-tf-relay"
+version = "0.28.0"
+dependencies = [
+ "logi-wheel-core",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "logi-tf-scs"
+version = "0.28.0"
+dependencies = [
+ "logi-wheel-core",
+]
+
+[[package]]
 name = "logi-tf-sim"
 version = "0.28.0"
 dependencies = [

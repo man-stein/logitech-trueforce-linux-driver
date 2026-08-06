@@ -289,6 +289,14 @@ The summary below is the shape of it.
   it) lets you feel the effect without launching a game.
   Hardware-verified with those test sweeps; in-game reports welcome.
 
+  Two kinds of game need a helper before they can feed it, both documented:
+  Euro Truck Simulator 2 and American Truck Simulator use a native Linux
+  plugin ([docs/SCS_PLUGIN.md](docs/SCS_PLUGIN.md)), and iRacing publishes to
+  shared memory that a small in-prefix relay forwards
+  ([docs/SHARED_MEMORY_RELAY.md](docs/SHARED_MEMORY_RELAY.md)). Both are new
+  and not yet confirmed by anyone driving them, which is why those titles
+  carry the provisional marker in the table.
+
   Beyond the engine note there is a **haptic effects layer**: both limiters,
   gear shifts, the ABS pump, traction loss, surface texture, impacts and DRS.
   Tune it in Setup, under "Simulated TrueForce": in the GUI, "Extra effects"

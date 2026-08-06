@@ -1,0 +1,26 @@
+[package]
+name = "logi-tf-relay"
+description = "Wine-side telemetry relay: reads shared-memory sims (iRacing, rF2/LMU) inside the Proton prefix and forwards over the relay wire format"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "logi-tf-relay"
+path = "src/main.rs"
+
+[dependencies]
+# Relay-wire-formatet - samma encoder som daemonens lyssnare avkodar.
+logi-wheel-core = { path = "../logi-wheel-core" }
+
+# Win32-API:t (OpenFileMappingW/MapViewOfFile) bara när målet är Windows;
+# host-bygget (Linux) kompilerar en stub-main så arbetsytan alltid bygger
+# utan Windows-toolchain. Riktiga bygget:
+#   rustup target add x86_64-pc-windows-gnu
+#   cargo build --release -p logi-tf-relay --target x86_64-pc-windows-gnu
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+] }

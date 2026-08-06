@@ -40,10 +40,10 @@ pub mod f1;
 pub mod g923;
 pub mod leds;
 pub mod pcars;
-pub mod relay;
+pub use logi_wheel_core::relay;
 pub mod sweep;
 pub mod synth;
-pub mod telemetry;
+pub use logi_wheel_core::telemetry;
 pub mod tf;
 pub mod wrc;
 

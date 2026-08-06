@@ -24,7 +24,7 @@ instead of wrapping it.
 
 | Game | Runs on Linux | Force feedback | On RS50 / G PRO | On G923 |
 |---|---|---|---|---|
-| American Truck Simulator | Native Linux | Native FFB | Nothing to do | Nothing to do |
+| American Truck Simulator * | Native Linux | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | Assetto Corsa (original) | Proton | Native FFB | Nothing to do | Nothing to do |
 | Assetto Corsa Competizione | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Nothing to do<br>no TrueForce on this wheel; leave `PROTON_ENABLE_HIDRAW` unset |
 | Assetto Corsa EVO (early access) | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Nothing to do<br>no TrueForce on this wheel; leave `PROTON_ENABLE_HIDRAW` unset |
@@ -37,13 +37,13 @@ instead of wrapping it.
 | DiRT Rally 2.0 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | EA Sports F1 (F1 22-25) * | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | EA Sports WRC | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
-| Euro Truck Simulator 2 | Native Linux | Native FFB | Nothing to do | Nothing to do |
+| Euro Truck Simulator 2 * | Native Linux | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | Forza Horizon 5 | Not on Linux | Not on Linux | - | - |
 | Forza Motorsport (2023) | Not on Linux | Not on Linux | - | - |
 | Gran Turismo 7 | Not on Linux | Not on Linux | - | - |
 | GRID (2019) | Proton | Native FFB | Nothing to do | Nothing to do |
 | GRID Legends | Proton | Native FFB | Nothing to do | Nothing to do |
-| iRacing | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
+| iRacing * | Proton | logi-ffb | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | KartKraft * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Le Mans Ultimate | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Project CARS 2 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
@@ -67,7 +67,7 @@ the game in the app's Setup page.
 
 | Game | Simulated TrueForce |
 |---|---|
-| American Truck Simulator | possible, needs a telemetry parser first |
+| American Truck Simulator | supported today |
 | Assetto Corsa (original) | no usable telemetry |
 | Assetto Corsa Competizione | not needed: the game has real TrueForce |
 | Assetto Corsa EVO (early access) | not needed: the game has real TrueForce |
@@ -80,10 +80,10 @@ the game in the app's Setup page.
 | DiRT Rally 2.0 | supported today |
 | EA Sports F1 (F1 22-25) | supported today |
 | EA Sports WRC | supported today |
-| Euro Truck Simulator 2 | possible, needs a telemetry parser first |
+| Euro Truck Simulator 2 | supported today |
 | GRID (2019) | possible, needs a telemetry parser first |
 | GRID Legends | possible, needs a telemetry parser first |
-| iRacing | possible, needs a telemetry parser first |
+| iRacing | supported today |
 | KartKraft | possible, needs a telemetry parser first |
 | Le Mans Ultimate | possible, needs a telemetry parser first |
 | Project CARS 2 | supported today |
@@ -103,6 +103,6 @@ the game in the app's Setup page.
 ## Confidence
 
 - **verified** (3 titles): confirmed end to end by this project
-- **documented** (18 titles): documented by the vendor or a reliable community source
-- **expected** (3 titles): expected to work, not confirmed
+- **documented** (15 titles): documented by the vendor or a reliable community source
+- **expected** (6 titles): expected to work, not confirmed
 - **unknown** (4 titles): genuinely unknown

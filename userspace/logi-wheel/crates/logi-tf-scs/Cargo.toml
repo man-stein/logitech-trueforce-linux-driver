@@ -1,0 +1,18 @@
+[package]
+name = "logi-tf-scs"
+description = "SCS telemetry plugin (ETS2/ATS): forwards engine telemetry to logi-tf-sim over the relay wire format"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license = "GPL-2.0-only"
+
+[lib]
+# Spelet laddar plugin-biblioteket med dlopen från bin/linux_x64/plugins/;
+# cdylib ger den .so:n. rlib behålls så enhetstesterna kan länka mot samma
+# kod som vanligt bibliotek.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Relay-wire-formatet (LTFR) - samma encoder som logi-tf-sim:s lyssnare
+# avkodar, så pluginet kan aldrig glida ur synk med daemonen.
+logi-wheel-core = { path = "../logi-wheel-core" }

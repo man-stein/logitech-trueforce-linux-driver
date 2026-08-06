@@ -5,6 +5,33 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Added
+
+- **Simulated TrueForce in Euro Truck Simulator 2 and American Truck
+  Simulator.** These publish telemetry through a plugin interface rather
+  than over UDP, so a small native Linux plugin now forwards engine speed,
+  throttle and gear to the daemon. No Wine involved. See
+  [`docs/SCS_PLUGIN.md`](docs/SCS_PLUGIN.md).
+- **Simulated TrueForce in iRacing**, via a relay that runs inside the game's
+  Proton prefix and reads the shared memory the game publishes to. See
+  [`docs/SHARED_MEMORY_RELAY.md`](docs/SHARED_MEMORY_RELAY.md).
+- Groundwork for rFactor 2 and Le Mans Ultimate: the relay can capture the
+  byte fixture their decoders need, but it will not stream from them until
+  someone provides one. Guessing struct offsets produces numbers that look
+  right and are not.
+
+Both are new and unconfirmed by anyone actually driving them, so those
+titles carry the provisional marker in
+[`docs/GAME_SETUP.md`](docs/GAME_SETUP.md) until someone reports back.
+
+### Changed
+
+- Each telemetry source now carries its own game id, so Euro Truck Simulator
+  2, American Truck Simulator and iRacing get separate enable switches and
+  separate intensities instead of sharing one.
+
 ## 0.28.0 - 2026-08-06
 
 **If you use computer profiles and have a custom pedal or steering curve
