@@ -309,7 +309,8 @@ The summary below is the shape of it.
 
   Two kinds of game need a helper before they can feed it. **`sudo
   ./tools/setup.sh` installs both for you**, into every Proton prefix and
-  into both truck sims, so there is normally nothing to fetch or copy. They
+  into both truck sims, and the settings app can install the relay per game
+  from its Setup page, so there is normally nothing to fetch or copy. They
   are also packaged and downloadable if you would rather place them
   yourself:
   Euro Truck Simulator 2 and American Truck Simulator use a native Linux

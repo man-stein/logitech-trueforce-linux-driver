@@ -44,8 +44,12 @@ deliver their own TrueForce through the shim with
   are the same Codemasters telemetry format the DiRT titles use and the
   parser already read them. What was missing was saying so, and telling you
   to switch the game's UDP output on.
-- The relay and the truck-sim plugin are **attached to each release**, so
-  neither needs a Rust cross-toolchain to obtain.
+- **The helpers install themselves.** `sudo ./tools/setup.sh` places the
+  relay in every Proton prefix and the truck-sim plugin in both truck sims,
+  and the settings app has a per-game "Install relay" button (`h` in the
+  terminal app). Both are also packaged and attached to each release. The
+  intent is that installing this project leaves you needing only Logitech's
+  own DLLs, which cannot be redistributed.
 
 The Assetto Corsa family's decoders were confirmed against running games on
 2026-08-06, including the two offsets most likely to be wrong: the redline
@@ -79,6 +83,12 @@ provisional marker in [`docs/GAME_SETUP.md`](docs/GAME_SETUP.md).
   a wheel that was not being driven.
 - **Assetto Corsa was listed as having no usable telemetry.** It publishes
   both a documented UDP protocol and a shared-memory block.
+- **Simulated TrueForce could not be switched on in the GUI for any game the
+  relay serves.** A row only carried its per-game switch when simulated
+  TrueForce was the game's *primary* setup action, and it never is for these:
+  Competizione and EVO want the shim, and iRacing, RaceRoom, rFactor 2 and Le
+  Mans Ultimate want logi-ffb. All six had working simulated TrueForce and no
+  way to enable it.
 - A crate declaring a minimum Rust of 1.74 used an API stable only since
   1.82, so it would not have built on the version this project claims to
   support.

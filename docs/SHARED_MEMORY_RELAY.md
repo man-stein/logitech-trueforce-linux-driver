@@ -88,8 +88,10 @@ than sending a wrong number, but that is a design argument, not evidence.
 
 ## Get it
 
-**`sudo ./tools/setup.sh` puts it in every Proton prefix for you**, so there
-is usually nothing to do here. It lands at the prefix's drive root, which
+**You normally do not have to place this yourself.** `sudo ./tools/setup.sh`
+puts it in every Proton prefix, and the settings app has an "Install relay"
+button on each game that needs one (in the terminal app, `h` on the selected
+game). It lands at the prefix's drive root, which
 makes the in-prefix path `C:\logi-tf-relay.exe`.
 
 If you installed from a package (Debian, Arch, Fedora, openSUSE), the master
