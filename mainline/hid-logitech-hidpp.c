@@ -8297,6 +8297,22 @@ static void hidpp_dd_ff_init_work(struct work_struct *work)
 	ret = hid_hw_open(ff_hdev);
 	if (ret) {
 		dd_err(hid, "Cannot open FFB interface (error %d) - FFB disabled\n", ret);
+		/*
+		 * Detach before destroying. input_ff_destroy() does
+		 * kfree(ff->private), and ff->private is our own
+		 * hidpp_dd_ff_data - the same allocation hidpp->private_data
+		 * points at and every wheel_* sysfs handler dereferences. Left
+		 * attached, this path freed it here and hidpp_dd_ff_destroy()
+		 * freed it again on unplug, with every sysfs read in between
+		 * touching freed memory.
+		 *
+		 * The struct stays alive deliberately: force feedback is what
+		 * failed, not the wheel, and the settings surface has no reason
+		 * to go with it. `initialized` is still 0, so nothing tries to
+		 * send forces, and the normal teardown remains the single owner
+		 * that frees it.
+		 */
+		input->ff->private = NULL;
 		input_ff_destroy(input);
 		return;
 	}

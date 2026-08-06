@@ -32,6 +32,19 @@ pub enum Value {
     Text(String),
     Rgb(Vec<Color>),
     Curve(Vec<(u16, u16)>),
+    /// A curve is loaded on the wheel, with this many points, but the points
+    /// themselves are not readable back.
+    ///
+    /// The driver reports curves as `"<loaded>/<max> points loaded (0 =
+    /// built-in curve)"`. The phrase "built-in" is part of that legend, not a
+    /// statement about the current state, and treating any string containing
+    /// it as "no curve" made a loaded curve indistinguishable from none. That
+    /// mattered because a computer profile then recorded the attribute as
+    /// `reset`, so applying the profile later wiped the curve the user had
+    /// tuned. Keeping the count means "loaded" and "not loaded" are
+    /// different values again, and the one that cannot be reproduced refuses
+    /// to be written into a profile rather than being downgraded to `reset`.
+    CurveLoaded(u16),
     /// A `(lower, upper)` percent pair, e.g. a pedal deadzone.
     Pair(u8, u8),
     Trigger,

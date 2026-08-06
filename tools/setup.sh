@@ -39,7 +39,13 @@ WHEEL_PIDS="$WHEEL_PIDS_DD $WHEEL_PIDS_G923"
 # G HUB revises the SDK and the version is a directory name, so never assume
 # one: a current install ships 1_3_12 and 9_1_1, and hardcoding the older
 # pair made those invisible with no explanation (issue #54).
-TF_PFX_GLOB="drive_c/Program Files/Logi/Trueforce/*"
+# Where the SDK DLLs live inside a wine prefix, above the version directory.
+# Deliberately NOT carrying the trailing "/*": held as one string with the
+# glob in it, this could only be used unquoted, and unquoted it word-split on
+# the space in "Program Files" into two arguments that matched nothing. The
+# check that depends on it had therefore never once fired. Callers append
+# their own glob to the quoted path.
+TF_PFX_DIR_REL="drive_c/Program Files/Logi/Trueforce"
 
 # Steam appids grouped by what the game actually needs, mirroring the app's
 # compatibility registry (logi-wheel-core/src/games.rs).
@@ -51,11 +57,17 @@ TF_PFX_GLOB="drive_c/Program Files/Logi/Trueforce/*"
 # those owners to break the force feedback they had. The other two needed
 # nothing and were pure noise (#54).
 #
+# Kept in step with the registry by
+# logi-wheel-core/tests/shell_appid_sync.rs, which fails when these lists and
+# `games::launch_option_appid_groups()` disagree. The lists have drifted twice
+# already, both times leaving an owner unwarned about the setting that stopped
+# their force feedback, so the copy is guarded rather than trusted.
+#
 # Sims that load Logitech's TrueForce SDK: ACC, AC EVO.
 SDK_SIM_APPIDS="805550 3058630"
-# Sims driven through DirectInput, i.e. logi-ffb: Le Mans Ultimate,
-# rFactor 2. PROTON_ENABLE_HIDRAW must NOT be set for these.
-DINPUT_SIM_APPIDS="2399420 365960"
+# Sims driven through DirectInput, i.e. logi-ffb: rFactor 2, Le Mans Ultimate,
+# iRacing, RaceRoom. PROTON_ENABLE_HIDRAW must NOT be set for these.
+DINPUT_SIM_APPIDS="365960 2399420 266410 211500"
 
 pass=0; warn=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -74,13 +86,27 @@ find_shim_installer() {
 	fi
 }
 
-# The SDK directory the installer would actually read, asked of the
-# installer rather than guessed. Prints nothing when it cannot be found.
+# The SDK directory the installer would actually read, asked of the installer
+# rather than guessed. Prints nothing when it cannot be found.
+#
+# Resolved as the invoking user, never as root. The installer's fallback is
+# under $HOME, so asking it as root answers /root/.local/share/... while the
+# install itself runs under the user via runuser and uses theirs. The setup
+# flow gated the install on this, so a user who had staged the DLLs exactly
+# where the README says was told "SDK DLLs not staged - skipped" and then,
+# seconds later, told by doctor that all four were staged. Same run, opposite
+# answers, no shim. runuser without -m sets HOME for us, which is the whole
+# point of routing through it.
 resolved_sdk_dir() {
 	local inst
 	inst="$(find_shim_installer)"
 	[ -n "$inst" ] || return 0
-	"$inst" --print-sdk-dir 2>/dev/null | sed -n 's/^sdk_dir=//p'
+	if [ "$EUID" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+		runuser -u "$SUDO_USER" -- "$inst" --print-sdk-dir 2>/dev/null \
+			| sed -n 's/^sdk_dir=//p'
+	else
+		"$inst" --print-sdk-dir 2>/dev/null | sed -n 's/^sdk_dir=//p'
+	fi
 }
 
 # The direct-drive wheels expose wheel_*; the G923 exposes the classic set
@@ -402,7 +428,7 @@ doctor() {
 		local proxied=0 orphaned=0
 		while IFS= read -r root; do
 			for appid in $SDK_SIM_APPIDS; do
-				local d; d=$(ls -d "$root/steamapps/compatdata/$appid/pfx/"$TF_PFX_GLOB 2>/dev/null | tail -1)
+				local d; d=$(ls -d "$root/steamapps/compatdata/$appid/pfx/$TF_PFX_DIR_REL/"*/ 2>/dev/null | tail -1)
 				[ -n "$d" ] && [ -f "$d/trueforce_sdk_x64.dll" ] || continue
 				# -a: it is a binary, and without it grep declines to match.
 				# The string only appears in our proxy (it is the forward

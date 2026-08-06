@@ -164,6 +164,55 @@ pub enum SetupAction {
     WorksOutOfBox,
 }
 
+/// Steam appids for the titles whose setup advice depends on knowing which
+/// game is installed.
+///
+/// This exists because `tools/setup.sh` kept its own hand-written copy of the
+/// same knowledge and it drifted twice: first as one undifferentiated list
+/// that told DirectInput sims to set `PROTON_ENABLE_HIDRAW=1` (the setting
+/// that stops force feedback reaching them), and then, after that was split,
+/// as a DirectInput list carrying two of the four titles. The registry knows
+/// which game needs what; the appid is the only piece it was missing, so it
+/// lives here now and the shell lists are checked against it by a test.
+///
+/// Only titles that run on Linux and whose `Ffb` implies a launch-option
+/// check are listed. A title nobody can install on Linux needs no appid, and
+/// inventing one would be inventing a fact.
+pub const STEAM_APPIDS: &[(&str, u32)] = &[
+    ("Assetto Corsa Competizione", 805550),
+    ("Assetto Corsa EVO (early access)", 3058630),
+    ("rFactor 2", 365960),
+    ("Le Mans Ultimate", 2399420),
+    ("iRacing", 266410),
+    ("RaceRoom Racing Experience", 211500),
+];
+
+/// The appid for a registry entry, when one is recorded.
+pub fn appid_for(name: &str) -> Option<u32> {
+    STEAM_APPIDS.iter().find(|(n, _)| *n == name).map(|(_, id)| *id)
+}
+
+/// Steam appids of the installed-title groups the shell tooling checks
+/// launch options for, as (sdk_sims, directinput_sims).
+///
+/// Derived from the registry rather than listed, so a title changing its
+/// `Ffb` moves between the groups on its own.
+pub fn launch_option_appid_groups() -> (Vec<u32>, Vec<u32>) {
+    let mut sdk = Vec::new();
+    let mut dinput = Vec::new();
+    for g in GAMES.iter().filter(|g| g.linux != Linux::Unsupported) {
+        let Some(id) = appid_for(g.name) else { continue };
+        match g.ffb {
+            Ffb::TrueForceShim => sdk.push(id),
+            Ffb::DirectInput => dinput.push(id),
+            Ffb::NativeEvdev => {}
+        }
+    }
+    sdk.sort_unstable();
+    dinput.sort_unstable();
+    (sdk, dinput)
+}
+
 /// The Steam launch options a DirectInput title needs: the logi-ffb
 /// helper wraps the game and gives it force feedback at all.
 pub const LAUNCH_LOGI_FFB: &str = "logi-ffb %command%";
