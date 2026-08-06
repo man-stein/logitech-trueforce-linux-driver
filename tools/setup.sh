@@ -36,13 +36,26 @@ WHEEL_PIDS_DD="c276 c272 c268"
 WHEEL_PIDS_G923="c266 c267 c26e"
 WHEEL_PID_G923_CONSOLE="c26d"
 WHEEL_PIDS="$WHEEL_PIDS_DD $WHEEL_PIDS_G923"
-# Steam appids of the Logitech-SDK sims for launch-option checks:
-#   ACC, AC EVO, AC, AMS2, Le Mans Ultimate, rFactor 2
 # G HUB revises the SDK and the version is a directory name, so never assume
 # one: a current install ships 1_3_12 and 9_1_1, and hardcoding the older
 # pair made those invisible with no explanation (issue #54).
 TF_PFX_GLOB="drive_c/Program Files/Logi/Trueforce/*"
-SDK_SIM_APPIDS="805550 3058630 244210 1066890 2399420 365960"
+
+# Steam appids grouped by what the game actually needs, mirroring the app's
+# compatibility registry (logi-wheel-core/src/games.rs).
+#
+# These used to be one undifferentiated list of six, and every game in it was
+# told to set PROTON_ENABLE_HIDRAW=1. Only the first two want that. For the
+# DirectInput pair it is actively harmful: the variable sends the game to raw
+# HID reports it cannot drive force feedback through, so doctor was telling
+# those owners to break the force feedback they had. The other two needed
+# nothing and were pure noise (#54).
+#
+# Sims that load Logitech's TrueForce SDK: ACC, AC EVO.
+SDK_SIM_APPIDS="805550 3058630"
+# Sims driven through DirectInput, i.e. logi-ffb: Le Mans Ultimate,
+# rFactor 2. PROTON_ENABLE_HIDRAW must NOT be set for these.
+DINPUT_SIM_APPIDS="2399420 365960"
 
 pass=0; warn=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -76,6 +89,22 @@ find_wheel_sysfs() {
 	ls -d /sys/class/hidraw/*/device/wheel_range 2>/dev/null | head -1 | xargs -r dirname
 }
 
+# Whether the attached wheel answers Logitech's TrueForce SDK. The
+# direct-drive family does; the G923 does not, and telling a G923 owner to
+# set PROTON_ENABLE_HIDRAW=1 costs them their force feedback. Mirrors
+# `games::WheelCaps` in the app. With no wheel plugged in this reports the
+# general case, the wheels this driver was written for.
+wheel_has_sdk_trueforce() {
+	local re
+	re="$(echo "$WHEEL_PIDS_G923 $WHEEL_PID_G923_CONSOLE" | tr ' ' '|')"
+	if lsusb 2>/dev/null | grep -qiE "046d:($re)"; then
+		re="$(echo "$WHEEL_PIDS_DD" | tr ' ' '|')"
+		lsusb 2>/dev/null | grep -qiE "046d:($re)"
+		return
+	fi
+	return 0
+}
+
 # Whether a G923 of any edition is on USB, including the Xbox one still in
 # console mode. Keyed on USB rather than on our sysfs, because the case the
 # rebind rule exists for is precisely the one where the in-tree driver won
@@ -98,12 +127,36 @@ find_g923_sysfs() {
 	done
 }
 
+# Every Steam library root, deduped by canonical path.
+#
+# Two bugs lived here. `sort -u` deduped the strings, but ~/.steam/steam is
+# normally a symlink to ~/.local/share/Steam, so the same library came back
+# twice and every count in sections 6 and 7 was doubled: "4 installed SDK
+# sims" for a machine with two. And libraries the user added on another
+# drive were skipped entirely, so a report from someone whose games live on
+# a second disk showed nothing installed while the shim installer, which
+# does read libraryfolders.vdf, was staging into them quite happily
+# (reported by @sugituber). Both are what install-tf-shim.sh and the app
+# already did; this is doctor catching up.
 steam_roots() {
-	local u_home
+	local u_home base vdf real
 	u_home="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
-	for d in "$u_home/.steam/steam" "$u_home/.local/share/Steam"; do
-		[ -d "$d/steamapps" ] && echo "$d"
-	done | sort -u
+	{
+		for base in "$u_home/.steam/steam" "$u_home/.local/share/Steam" \
+			    "$u_home/.steam/debian-installation"; do
+			[ -d "$base" ] || continue
+			printf '%s\n' "$base"
+			vdf="$base/steamapps/libraryfolders.vdf"
+			[ -f "$vdf" ] || continue
+			sed -nE 's/^[[:space:]]*"path"[[:space:]]+"(.*)"[[:space:]]*$/\1/p' "$vdf"
+		done
+	} | while IFS= read -r d; do
+		[ -d "$d/steamapps" ] || continue
+		# Resolve before deduping: the string forms differ, the directory
+		# does not.
+		real="$(readlink -f "$d" 2>/dev/null || echo "$d")"
+		printf '%s\n' "$real"
+	done | awk '!seen[$0]++'
 }
 
 # ---------------------------------------------------------------- doctor --
@@ -367,11 +420,16 @@ doctor() {
 	fi
 
 	echo
-	say "[7/7] Per-game launch options (PROTON_ENABLE_HIDRAW=1)"
+	say "[7/7] Per-game launch options"
 	local checked=0
 	local appid
-	for appid in $SDK_SIM_APPIDS; do
-		local installed=0 has_opt=0
+	# Each group gets the advice it actually needs. The SDK sims want
+	# PROTON_ENABLE_HIDRAW=1, and only on a wheel that answers the SDK; the
+	# DirectInput sims want it absent, because setting it there removes
+	# force feedback. Titles that need neither are not listed at all.
+	for appid in $SDK_SIM_APPIDS $DINPUT_SIM_APPIDS; do
+		local installed=0 has_opt=0 wants_hidraw=0
+		case " $SDK_SIM_APPIDS " in *" $appid "*) wants_hidraw=1;; esac
 		while IFS= read -r root; do
 			[ -d "$root/steamapps/compatdata/$appid" ] && installed=1
 			for cfg in "$root"/userdata/*/config/localconfig.vdf; do
@@ -399,13 +457,27 @@ doctor() {
 		done <<< "$(steam_roots)"
 		[ "$installed" -eq 1 ] || continue
 		checked=$((checked+1))
-		if [ "$has_opt" -eq 1 ]; then
-			ok "appid $appid has PROTON_ENABLE_HIDRAW=1"
+		if [ "$wants_hidraw" -eq 1 ]; then
+			if ! wheel_has_sdk_trueforce; then
+				# The shim cannot reach this wheel, so the variable buys
+				# nothing and costs the force feedback it already has.
+				if [ "$has_opt" -eq 1 ]; then
+					bad "appid $appid: PROTON_ENABLE_HIDRAW=1 is set, but this wheel has no SDK TrueForce - remove it, it is what is stopping force feedback"
+				else
+					ok "appid $appid correctly has no PROTON_ENABLE_HIDRAW (this wheel has no SDK TrueForce)"
+				fi
+			elif [ "$has_opt" -eq 1 ]; then
+				ok "appid $appid has PROTON_ENABLE_HIDRAW=1"
+			else
+				wrn "appid $appid: PROTON_ENABLE_HIDRAW=1 not found in launch options (needed for TrueForce; set it in Steam > Properties)"
+			fi
+		elif [ "$has_opt" -eq 1 ]; then
+			bad "appid $appid: PROTON_ENABLE_HIDRAW=1 is set on a DirectInput sim - it stops force feedback reaching the game; remove it and use 'logi-ffb %command%' instead"
 		else
-			wrn "appid $appid: PROTON_ENABLE_HIDRAW=1 not found in launch options (needed for TrueForce; set it in Steam > Properties)"
+			ok "appid $appid correctly has no PROTON_ENABLE_HIDRAW (DirectInput sim; launch it with 'logi-ffb %command%')"
 		fi
 	done
-	[ "$checked" -eq 0 ] && wrn "no known SDK sims found installed (nothing to check)"
+	[ "$checked" -eq 0 ] && wrn "no known SDK or DirectInput sims found installed (nothing to check)"
 
 	echo
 	say "Summary: $pass pass, $warn warn, $fail fail"

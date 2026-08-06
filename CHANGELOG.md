@@ -26,6 +26,17 @@ the contract is "it works on RS50 and G Pro as listed here".
   directory that does not exist yet, killing the script before its own
   fallback: no install, no error. A first-time user now gets the list of
   files it expected to find.
+- **`doctor` told DirectInput sims to set `PROTON_ENABLE_HIDRAW=1`.** One
+  undifferentiated list of six appids drove the launch-option check, so Le
+  Mans Ultimate and rFactor 2 owners were told to set the variable that stops
+  force feedback reaching those games, and two more titles that need nothing
+  were warned about for no reason. The list is split by what each game
+  actually needs now, and the check is wheel-aware: a G923 with the variable
+  set is told plainly that it is what is stopping its force feedback.
+- **`doctor` counted every Steam library twice** (`~/.steam/steam` is normally
+  a symlink to `~/.local/share/Steam`, and only the strings were deduped), and
+  **never read `libraryfolders.vdf`**, so games on a second drive were
+  invisible to it while the installer staged into them happily.
 - **A populated repo `sdk/` was passed over.** Its marker test compared a
   glob literally, so the check never matched and the installer fell through
   to the XDG directory even with the DLLs sitting in the checkout.
