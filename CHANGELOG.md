@@ -5,7 +5,7 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## Unreleased
+## 0.27.4 - 2026-08-06
 
 ### Fixed
 
@@ -33,6 +33,12 @@ the contract is "it works on RS50 and G Pro as listed here".
   were warned about for no reason. The list is split by what each game
   actually needs now, and the check is wheel-aware: a G923 with the variable
   set is told plainly that it is what is stopping its force feedback.
+- **The installer's closing advice told everyone to set
+  `PROTON_ENABLE_HIDRAW=1`**, with no mention of which wheels and games that
+  is right for. It is now printed only where it applies, and a wheel without
+  SDK TrueForce is told to leave the variable alone.
+- **Running the full setup from a packaged install failed several steps in**
+  on a missing script, instead of saying that the driver is already installed.
 - **`doctor` counted every Steam library twice** (`~/.steam/steam` is normally
   a symlink to `~/.local/share/Steam`, and only the strings were deduped), and
   **never read `libraryfolders.vdf`**, so games on a second drive were
@@ -40,6 +46,12 @@ the contract is "it works on RS50 and G Pro as listed here".
 - **A populated repo `sdk/` was passed over.** Its marker test compared a
   glob literally, so the check never matched and the installer fell through
   to the XDG directory even with the DLLs sitting in the checkout.
+
+### Added
+
+- **The README now says where the SDK files go**, with the directory layout
+  and the ways to point at a different one. Nothing documented this, which is
+  most of why it was hard to tell a wrong location from a bug.
 
 ## 0.27.3 - 2026-08-05
 
