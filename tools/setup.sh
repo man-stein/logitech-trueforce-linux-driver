@@ -50,6 +50,26 @@ wrn()  { printf '  \033[33mWARN\033[0m %s\n' "$1"; warn=$((warn+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 say()  { printf '\033[1m%s\033[0m\n' "$1"; }
 
+# Where the shim installer lives. In a checkout it sits beside this script;
+# a distro package installs it as logi-shim on PATH and ships no checkout at
+# all, which is why nothing here may assume $REPO_ROOT exists.
+find_shim_installer() {
+	if [ -x "$REPO_ROOT/tools/install-tf-shim.sh" ]; then
+		echo "$REPO_ROOT/tools/install-tf-shim.sh"
+	elif command -v logi-shim >/dev/null 2>&1; then
+		command -v logi-shim
+	fi
+}
+
+# The SDK directory the installer would actually read, asked of the
+# installer rather than guessed. Prints nothing when it cannot be found.
+resolved_sdk_dir() {
+	local inst
+	inst="$(find_shim_installer)"
+	[ -n "$inst" ] || return 0
+	"$inst" --print-sdk-dir 2>/dev/null | sed -n 's/^sdk_dir=//p'
+}
+
 # The direct-drive wheels expose wheel_*; the G923 exposes the classic set
 # (range, gain, autocenter) and no wheel_* at all. Look for either.
 find_wheel_sysfs() {
@@ -266,19 +286,30 @@ doctor() {
 
 	echo
 	say "[5/7] TrueForce SDK DLLs (only needed for TrueForce in Proton sims)"
-	local dll_missing=0
-	for f in "sdk/Logi/Trueforce/*/trueforce_sdk_x64.dll" \
-		 "sdk/Logi/Trueforce/*/trueforce_sdk_x86.dll" \
-		 "sdk/Logi/wheel_sdk/*/logi_steering_wheel_x64.dll" \
-		 "sdk/Logi/wheel_sdk/*/logi_steering_wheel_x86.dll"; do
-		ls "$REPO_ROOT"/$f >/dev/null 2>&1 || dll_missing=$((dll_missing+1))
-	done
-	if [ "$dll_missing" -eq 0 ]; then
-		local tf_ver
-		tf_ver="$(ls -1 "$REPO_ROOT"/sdk/Logi/Trueforce 2>/dev/null | grep -E '^[0-9_]+$' | sort -V | tail -1)"
-		ok "all four SDK DLLs staged in the repo${tf_ver:+ (Trueforce $tf_ver)}"
+	# Checked in the directory the installer resolves to, not in the repo.
+	# This used to look only inside $REPO_ROOT/sdk, so every user who
+	# installed from a package (no checkout, and the SDK lives under
+	# ~/.local/share) was told the DLLs were missing however correctly they
+	# had staged them, and the report gave no hint of where it had looked
+	# (#54).
+	local sdk_root dll_missing=0
+	sdk_root="$(resolved_sdk_dir)"
+	if [ -z "$sdk_root" ]; then
+		wrn "cannot locate the shim installer, so the SDK cannot be checked (expected tools/install-tf-shim.sh or logi-shim on PATH)"
 	else
-		wrn "$dll_missing of 4 SDK DLLs not staged (see the wiki's Force-feedback-in-games page; standard FFB works without them)"
+		for f in "Logi/Trueforce/*/trueforce_sdk_x64.dll" \
+			 "Logi/Trueforce/*/trueforce_sdk_x86.dll" \
+			 "Logi/wheel_sdk/*/logi_steering_wheel_x64.dll" \
+			 "Logi/wheel_sdk/*/logi_steering_wheel_x86.dll"; do
+			ls "$sdk_root"/$f >/dev/null 2>&1 || dll_missing=$((dll_missing+1))
+		done
+		if [ "$dll_missing" -eq 0 ]; then
+			local tf_ver
+			tf_ver="$(ls -1 "$sdk_root/Logi/Trueforce" 2>/dev/null | grep -E '^[0-9_]+$' | sort -V | tail -1)"
+			ok "all four SDK DLLs staged${tf_ver:+ (Trueforce $tf_ver)} in $sdk_root"
+		else
+			wrn "$dll_missing of 4 SDK DLLs not staged in $sdk_root - copy G HUB's Logi folder there so it becomes $sdk_root/Logi/Trueforce/<version>/ (standard FFB works without them)"
+		fi
 	fi
 
 	echo
@@ -386,13 +417,13 @@ doctor() {
 do_shim() {
 	if [ "$EUID" -eq 0 ]; then
 		if [ -n "${SUDO_USER:-}" ]; then
-			runuser -u "$SUDO_USER" -- "$REPO_ROOT/tools/install-tf-shim.sh" --all-steam
+			runuser -u "$SUDO_USER" -- "$(find_shim_installer)" --all-steam
 		else
 			echo "shim must run as the user owning the Steam prefixes; run: ./tools/setup.sh shim (no sudo)"
 			return 1
 		fi
 	else
-		"$REPO_ROOT/tools/install-tf-shim.sh" --all-steam
+		"$(find_shim_installer)" --all-steam
 	fi
 }
 
@@ -470,7 +501,7 @@ setup() {
 	"$REPO_ROOT/tools/rebind-wheel.sh" >/dev/null 2>&1 || true
 
 	say "[4/5] TrueForce shim (Steam prefixes)"
-	if ls "$REPO_ROOT"/sdk/Logi/Trueforce/*/trueforce_sdk_x64.dll >/dev/null 2>&1; then
+	if ls "$(resolved_sdk_dir)"/Logi/Trueforce/*/trueforce_sdk_x64.dll >/dev/null 2>&1; then
 		do_shim || true
 	else
 		echo "  SDK DLLs not staged - skipped (standard FFB works without them;"

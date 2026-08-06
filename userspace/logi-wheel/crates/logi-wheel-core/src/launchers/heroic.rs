@@ -5,7 +5,7 @@
 //! a JSON crate. Heroic games always run under Wine.
 
 use super::{DiscoveredGame, GameKind, Source};
-use crate::steam::SHIM_MARKER;
+use crate::steam::shim_installed_in;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -99,7 +99,7 @@ pub fn heroic_games(config_home: &Path) -> Vec<DiscoveredGame> {
             let Ok(config_content) = fs::read_to_string(&config_path) else { continue };
             let Some(prefix) = scrape_field(&config_content, "winePrefix") else { continue };
             let prefix = PathBuf::from(prefix);
-            let shim_installed = prefix.join(SHIM_MARKER).is_file();
+            let shim_installed = shim_installed_in(&prefix);
             games.push(DiscoveredGame {
                 name: entry.title,
                 source: Source::Heroic,

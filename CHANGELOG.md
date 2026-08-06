@@ -5,6 +5,31 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+### Fixed
+
+- **The app ignored any SDK version other than 1_3_11.** v0.27.1 taught the
+  shell installer to discover whichever version G HUB shipped, but the same
+  assumption was left hardcoded in the app: a 1_3_12 install had its SDK
+  folder marked invalid on the Setup page, and a prefix that had just been
+  staged still read as "shim not installed". The version is discovered on
+  both sides now.
+- **`doctor` looked for the SDK only inside a repo checkout.** It hardcoded
+  `$REPO_ROOT/sdk`, so anyone who installed from a package was told the DLLs
+  were missing however correctly they had staged them, and the report never
+  said where it had looked. It now asks the installer where the SDK actually
+  resolves to, via a new `install-tf-shim.sh --print-sdk-dir`, and names that
+  directory in both the pass and the warning.
+- **The shim installer could exit silently with nothing staged.** Under
+  `set -e`, the version lookup added in v0.27.1 returned non-zero for a
+  directory that does not exist yet, killing the script before its own
+  fallback: no install, no error. A first-time user now gets the list of
+  files it expected to find.
+- **A populated repo `sdk/` was passed over.** Its marker test compared a
+  glob literally, so the check never matched and the installer fell through
+  to the XDG directory even with the DLLs sitting in the checkout.
+
 ## 0.27.3 - 2026-08-05
 
 ### Fixed

@@ -9,15 +9,36 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The marker file the shim installer drops into a prefix, relative to the
-/// prefix root. Mirrors `tools/install-tf-shim.sh`'s `TF_PFX_DIR` layout.
-/// `pub(crate)` so the `launchers` backends can flag the shim the same way.
-pub(crate) const SHIM_MARKER: &str = "drive_c/Program Files/Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll";
+/// Where the TrueForce DLLs sit inside a wine prefix, above the version
+/// directory. Mirrors `tools/install-tf-shim.sh`'s `TF_PFX_DIR` layout.
+pub(crate) const SHIM_TF_DIR: &str = "drive_c/Program Files/Logi/Trueforce";
 
-/// The marker file a populated SDK directory must contain, relative to the
-/// SDK directory root. Same layout Logitech ships on Windows and the same
-/// marker `install-tf-shim.sh` checks (`SDK_MARKER` there).
-const SDK_MARKER: &str = "Logi/Trueforce/1_3_11/trueforce_sdk_x64.dll";
+/// Where the TrueForce DLLs sit inside an SDK directory, above the version
+/// directory. The same layout Logitech ships on Windows.
+const SDK_TF_DIR: &str = "Logi/Trueforce";
+
+/// Whether `trueforce_dir` holds `<some version>/trueforce_sdk_x64.dll`.
+///
+/// The version directory is whatever G HUB shipped, so it is discovered
+/// rather than assumed. Both checks used to hardcode `1_3_11`, which meant
+/// a G HUB carrying 1_3_12 was reported as no SDK at all: the Setup page
+/// marked a perfectly good folder invalid, and a prefix that had just been
+/// staged still read as "shim not installed" (#54). The shell installer was
+/// taught to discover the version in v0.27.1; this half was missed, so the
+/// app kept saying no while the installer said yes.
+fn trueforce_dll_under(trueforce_dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(trueforce_dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|e| e.path().join("trueforce_sdk_x64.dll").is_file())
+}
+
+/// Whether the shim is staged in `prefix`, at any SDK version.
+pub(crate) fn shim_installed_in(prefix: &Path) -> bool {
+    trueforce_dll_under(&prefix.join(SHIM_TF_DIR))
+}
 
 /// One installed Proton game: its Steam appid and display name, the wine
 /// prefix the shim installer targets (the `.../compatdata/<appid>/pfx`
@@ -134,7 +155,7 @@ pub fn installed_games(roots: &[PathBuf]) -> Vec<SteamGame> {
             if !prefix.is_dir() {
                 continue;
             }
-            let shim_installed = prefix.join(SHIM_MARKER).is_file();
+            let shim_installed = shim_installed_in(&prefix);
             games.push(SteamGame { appid, name, prefix, shim_installed });
         }
     }
@@ -142,11 +163,11 @@ pub fn installed_games(roots: &[PathBuf]) -> Vec<SteamGame> {
     games
 }
 
-/// Whether `dir` holds a populated SDK tree (the marker DLL exists under
-/// `<dir>/Logi/Trueforce/1_3_11/`). The Setup pages use this for the SDK
-/// folder field's live validity indicator.
+/// Whether `dir` holds a populated SDK tree: a `trueforce_sdk_x64.dll`
+/// under `<dir>/Logi/Trueforce/<any version>/`. The Setup pages use this
+/// for the SDK folder field's live validity indicator.
 pub fn sdk_dir_valid(dir: &Path) -> bool {
-    dir.join(SDK_MARKER).is_file()
+    trueforce_dll_under(&dir.join(SDK_TF_DIR))
 }
 
 /// Resolve the SDK directory the front-ends' Setup pages report and their
@@ -288,7 +309,7 @@ mod tests {
         write(&second.join("steamapps").join("appmanifest_400.acf"), &manifest(400, "Le Mans Ultimate"));
 
         let acc_pfx = main.join("steamapps").join("compatdata").join("100").join("pfx");
-        write(&acc_pfx.join(SHIM_MARKER), "dll");
+        write(&acc_pfx.join(SHIM_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
         fs::create_dir_all(main.join("steamapps").join("compatdata").join("300").join("pfx")).unwrap();
         fs::create_dir_all(second.join("steamapps").join("compatdata").join("400").join("pfx")).unwrap();
 
@@ -340,8 +361,43 @@ mod tests {
         let tree = TempTree::new();
         let sdk = tree.path().join("sdk");
         assert!(!sdk_dir_valid(&sdk), "missing tree is invalid");
-        write(&sdk.join(SDK_MARKER), "dll");
+        write(&sdk.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
         assert!(sdk_dir_valid(&sdk), "marker DLL makes it valid");
+    }
+
+    /// The bug from #54. A G HUB shipping 1_3_12 is just as valid as one
+    /// shipping 1_3_11, and both checks used to hardcode the latter: the
+    /// Setup page called the owner's perfectly good SDK folder invalid, and
+    /// a prefix he had just staged still read as "shim not installed".
+    /// Every other test here happens to use 1_3_11, so only this one would
+    /// notice the version being assumed again.
+    #[test]
+    fn any_sdk_version_counts_not_just_1_3_11() {
+        for version in ["1_3_12", "9_9_9", "2_0"] {
+            let tree = TempTree::new();
+
+            let sdk = tree.path().join("sdk");
+            write(&sdk.join(SDK_TF_DIR).join(version).join("trueforce_sdk_x64.dll"), "dll");
+            assert!(sdk_dir_valid(&sdk), "{version}: SDK folder must be valid");
+
+            let pfx = tree.path().join("pfx");
+            assert!(!shim_installed_in(&pfx), "{version}: nothing staged yet");
+            write(&pfx.join(SHIM_TF_DIR).join(version).join("trueforce_sdk_x64.dll"), "dll");
+            assert!(shim_installed_in(&pfx), "{version}: staged shim must be seen");
+        }
+    }
+
+    /// A version directory that exists but holds no DLL is not a valid SDK:
+    /// discovering the version must not become "any directory will do".
+    #[test]
+    fn an_empty_version_directory_is_not_a_populated_sdk() {
+        let tree = TempTree::new();
+        let sdk = tree.path().join("sdk");
+        std::fs::create_dir_all(sdk.join(SDK_TF_DIR).join("1_3_12")).unwrap();
+        assert!(!sdk_dir_valid(&sdk));
+        // A stray file where a version directory belongs is not one either.
+        write(&sdk.join(SDK_TF_DIR).join("readme.txt"), "x");
+        assert!(!sdk_dir_valid(&sdk));
     }
 
     #[test]
@@ -367,7 +423,7 @@ mod tests {
     /// exists), for the resolver tests.
     fn populated_sdk(tree: &TempTree, name: &str) -> PathBuf {
         let dir = tree.path().join(name);
-        write(&dir.join(SDK_MARKER), "dll");
+        write(&dir.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
         dir
     }
 
@@ -401,7 +457,7 @@ mod tests {
         let tree = TempTree::new();
         let repo = tree.path().join("repo");
         let sdk = repo.join("sdk");
-        write(&sdk.join(SDK_MARKER), "dll");
+        write(&sdk.join(SDK_TF_DIR).join("1_3_11/trueforce_sdk_x64.dll"), "dll");
         let installer = repo.join("tools").join("install-tf-shim.sh");
         write(&installer, "#!/bin/sh");
         let found = resolve_sdk_dir_in("", None, Some(&installer), None);

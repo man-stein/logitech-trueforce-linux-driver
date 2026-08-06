@@ -6,7 +6,7 @@
 //! the aggregator can show a complete library.
 
 use super::{DiscoveredGame, GameKind, Source};
-use crate::steam::{is_runtime_tooling, parse_manifest, SHIM_MARKER};
+use crate::steam::{is_runtime_tooling, parse_manifest, shim_installed_in};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -37,7 +37,7 @@ pub fn steam_games(roots: &[PathBuf]) -> Vec<DiscoveredGame> {
             let prefix = steamapps.join("compatdata").join(appid.to_string()).join("pfx");
             let kind = if prefix.is_dir() { GameKind::Wine { prefix } } else { GameKind::Native };
             let shim_installed = match &kind {
-                GameKind::Wine { prefix } => prefix.join(SHIM_MARKER).is_file(),
+                GameKind::Wine { prefix } => shim_installed_in(prefix),
                 GameKind::Native => false,
             };
             games.push(DiscoveredGame { name, source: Source::Steam, kind, shim_installed });

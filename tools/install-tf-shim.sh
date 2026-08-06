@@ -67,8 +67,14 @@ SDK_MARKER='Logi/Trueforce/*/trueforce_sdk_x64.dll'
 # not seen, with no hint as to why (issue #54). Discover whatever is there
 # and prefer the newest.
 newest_sdk_version() {
-	# $1 = parent directory holding version-named subdirectories
-	[ -d "$1" ] || return 1
+	# $1 = parent directory holding version-named subdirectories.
+	#
+	# Succeeds with empty output when there is nothing to report. "No
+	# versions installed" is a legitimate answer to "which is newest", not
+	# an error, and under `set -e` returning non-zero here killed the whole
+	# script at the assignment below before its own fallback could run: a
+	# user who had not staged the SDK yet got no install and no message.
+	[ -d "$1" ] || return 0
 	ls -1 "$1" 2>/dev/null | grep -E '^[0-9]+(_[0-9]+)*$' | sort -V | tail -1
 }
 
@@ -77,7 +83,10 @@ resolve_sdk_dir() {
 		SDK_DIR="$SDK_DIR_OVERRIDE"
 	elif [ -n "${LOGITECH_TRUEFORCE_SDK_DIR:-}" ]; then
 		SDK_DIR="$LOGITECH_TRUEFORCE_SDK_DIR"
-	elif [ -e "$REPO_ROOT/sdk/$SDK_MARKER" ]; then
+	# Globbed with ls, not `[ -e ]`: the marker carries a `*` for the
+	# version directory and `[ -e ]` compares it literally, so this branch
+	# never matched and a populated checkout was silently passed over.
+	elif ls "$REPO_ROOT/sdk/"$SDK_MARKER >/dev/null 2>&1; then
 		SDK_DIR="$REPO_ROOT/sdk"
 	else
 		SDK_DIR="$(default_sdk_dir)"
@@ -106,6 +115,7 @@ RANGE_PROXY=${RANGE_PROXY:-0}
 usage() {
 	cat <<EOF
 Usage:
+  $0 --print-sdk-dir           Print the resolved SDK directory and versions, then exit
   $0 --all-steam               Install into every Steam wine prefix, in every Steam
                                library (including libraries on other drives)
   $0 --prefix <path>           Install into a single wine prefix (the .../pfx directory)
@@ -338,7 +348,7 @@ MODE=""
 PREFIX_ARG=""
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--all-steam|--uninstall)
+	--all-steam|--uninstall|--print-sdk-dir)
 		MODE="$1"
 		;;
 	--prefix|--uninstall-prefix)
@@ -390,6 +400,17 @@ case "$MODE" in
 	;;
 --uninstall-prefix)
 	uninstall_in_prefix "$PREFIX_ARG"
+	;;
+--print-sdk-dir)
+	# Report where the SDK resolved to, and to which versions, without
+	# touching anything. This exists so `setup.sh doctor` can check the
+	# directory this script would actually read instead of keeping its own
+	# idea of where the files live: doctor used to look only inside the
+	# repo checkout, so for anyone who installed from a package it reported
+	# the SDK missing no matter where they put it (#54).
+	echo "sdk_dir=$SDK_DIR"
+	echo "tf_version=$TF_VER"
+	echo "wheel_version=$WHEEL_VER"
 	;;
 *) usage ;;
 esac

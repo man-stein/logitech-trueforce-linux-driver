@@ -4,7 +4,7 @@
 //! it needs rather than pulling in a YAML crate.
 
 use super::{DiscoveredGame, GameKind, Source};
-use crate::steam::SHIM_MARKER;
+use crate::steam::shim_installed_in;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,7 +59,7 @@ pub fn lutris_games(config_home: &Path) -> Vec<DiscoveredGame> {
             None => GameKind::Native,
         };
         let shim_installed = match &kind {
-            GameKind::Wine { prefix } => prefix.join(SHIM_MARKER).is_file(),
+            GameKind::Wine { prefix } => shim_installed_in(prefix),
             GameKind::Native => false,
         };
         games.push(DiscoveredGame { name, source: Source::Lutris, kind, shim_installed });
