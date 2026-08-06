@@ -18,7 +18,7 @@ daemon over localhost UDP.
 | RaceRoom Racing Experience | Decoder written. Unconfirmed against a live session. |
 | Assetto Corsa | Decoder written. Layout confirmed via Competizione, which shares it. |
 | Assetto Corsa Competizione | **Confirmed end to end on a G923** (2026-08-06). |
-| Assetto Corsa EVO | Decoder written. Unconfirmed against a live session. |
+| Assetto Corsa EVO | **Layout confirmed on a live session** (2026-08-06). |
 | rFactor 2 | Decoder written. Unconfirmed against a live session. |
 | Le Mans Ultimate | Decoder written. Unconfirmed against a live session. |
 
@@ -52,7 +52,13 @@ does not exist. Its replacement, `currentMaxRpm`, sits in the physics block
 and is republished every tick. That leaves EVO with one section and no layout
 guard, so the check is the value itself: a redline is a distinctive number,
 and a wrong offset in a physics block lands on a temperature, a pressure or a
-pedal, none of which comes near one. EVO goes quiet rather than wrong.
+pedal, none of which comes near one.
+
+Confirmed on a live session on 2026-08-06: `acevo_pmf_physics` opened while
+`acpmf_physics` stayed absent, which is itself evidence the rename is real,
+and offset 588 read 6200 next to an engine turning 4662 in first gear. A
+number that plausible, that consistent with its neighbours, is not a
+temperature read by accident.
 
 **rFactor 2 and Le Mans Ultimate say whether a read was good.** Their layout
 comes from a community plugin rather than a vendor, which is why they were
