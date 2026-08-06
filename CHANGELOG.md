@@ -7,37 +7,45 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ## 0.28.0 - 2026-08-06
 
-An adversarial review of the whole tree, prompted by six bugs in one night
-that all shared a shape: a rule learned in one component and never carried to
-the others. Thirty-odd findings, worked through in full. Three of the worst
-were introduced by the fixes for that very class, which is the clearest
-argument that the shape is real.
+**If you use computer profiles and have a custom pedal or steering curve
+loaded, update before saving another profile.** Saving one recorded the curve
+as "reset", so applying that profile later reverted the curve to the
+built-in one. Profiles saved by earlier versions may already carry that;
+check a profile file for `wheel_response_curve=reset` (or the
+`wheel_*_curve` equivalents) and delete the line if your wheel has a curve
+you want to keep.
 
-Minor rather than patch because `revlights` is removed and the Steam
-appid knowledge moved into the compatibility registry.
+Other things you may have run into, and no longer will: the shim installer
+exiting without printing anything, `sudo ./tools/setup.sh` skipping the
+TrueForce shim and then reporting in the same run that the files were staged,
+a re-run of setup quietly undoing the rotation fix for the 90 degree steering
+clamp, and being told to set `PROTON_ENABLE_HIDRAW=1` for games where that is
+exactly what stops force feedback.
+
+Removes the `revlights` tool, which is why this is a minor rather than a
+patch release.
 
 ### Fixed
 
-- **Saving a computer profile could wipe the wheel's response curve.** The
-  driver reports curves as `"<loaded>/<max> points loaded (0 = built-in
-  curve)"`, and the phrase "built-in" is part of that legend whatever the
-  count. Reading the words instead of the number made a loaded curve look like
-  no curve, so a profile recorded the attribute as `reset` and applying it
-  later reverted the curve. The count is read now, and a curve whose points
-  cannot be read back is left alone rather than downgraded.
-- **A failed force-feedback init freed memory the settings still used.**
-  `input_ff_destroy()` frees the driver's own state, which every `wheel_*`
-  sysfs handler dereferences and which the normal teardown frees again on
-  unplug. It is detached first now, and the settings survive a force-feedback
-  failure instead of going with it.
+- **Saving a computer profile could wipe the wheel's response curve.** A
+  loaded curve read back as "built-in" everywhere in the app, so the profile
+  recorded it as `reset` and applying that profile reverted the curve. A
+  curve the wheel cannot read back is now left out of the profile rather than
+  recorded as an instruction to erase it.
+- **Unplugging the wheel while force feedback was still starting up could
+  crash the kernel.** If force feedback failed to initialise, the driver
+  freed state it went on using for every settings read, and freed it a second
+  time on unplug. Force feedback failing now leaves the settings working
+  rather than taking them with it.
 - **The shim installer could exit with no output at all** when the SDK
   directory existed but held no version-named subdirectory: the exact result
   of copying G HUB's `Logi` folder but dropping the DLLs one level too high.
 - **Full setup skipped the shim for anyone who staged the SDK where the README
   says**, because the check ran as root while the install ran as the user. The
   same run then reported both "not staged" and "all four staged".
-- **The check for "shim installed but no force feedback at all" had never
-  fired**, its path splitting on the space in "Program Files".
+- **`doctor` could not detect the "wheel steers but produces no force at
+  all" state** it was written to catch, so it stayed silent through exactly
+  the failure people were reporting.
 - **Re-running setup silently reverted the rotation proxy**, restoring the
   90-degree steering clamp a user had deliberately fixed.
 - **iRacing and RaceRoom owners got no warning** that `PROTON_ENABLE_HIDRAW=1`
