@@ -10,7 +10,7 @@
 //!
 //! Two modes:
 //!
-//! - `logi-tf-relay --game <iracing|lmu|rf2> --dump <file>`: open the
+//! - `logi-tf-relay --game <id> --dump <file>`: open the
 //!   section, write its first bytes to `<file>`, exit. This produces the
 //!   REAL byte fixture each per-game decoder is written and unit-tested
 //!   against - the same discipline the native UDP parsers follow. Run it
@@ -24,21 +24,26 @@
 //! (`cargo build -p logi-tf-relay --target x86_64-pc-windows-gnu`), so the
 //! workspace always builds without a Windows toolchain.
 
+mod assettocorsa;
 mod games;
 mod iracing;
+mod raceroom;
 
 use std::process::ExitCode;
 
 const USAGE: &str = "logi-tf-relay: shared-memory telemetry for logi-tf-sim (runs inside the Proton prefix)
 
 USAGE:
-  logi-tf-relay --game <iracing|lmu|rf2> --dump <file>  write the section's bytes to <file>
-  logi-tf-relay --game <iracing|lmu|rf2>                stream telemetry (needs a decoder)
-  logi-tf-relay --section <name> --dump <file>          dump any named section
+  logi-tf-relay --game <id>                   stream telemetry to logi-tf-sim
+  logi-tf-relay --game <id> --dump <file>     write the section's bytes to <file>
+  logi-tf-relay --section <name> --dump <file>  dump any named section
+
+Games that stream today:  iracing, raceroom, assetto-corsa
+Games that need a dump:   rf2, lmu
 
 Take the dump while a session is actually RUNNING; sitting in the menus is
 not always enough. Send the dump file to the project and the game's decoder
-gets written against it. The rule here is a real byte fixture before every
+gets written against it. The rule here is a trustworthy layout before every
 decoder, never struct offsets from memory.";
 
 /// Max bytes `--dump` writes: enough for every header + descriptor table we
@@ -50,6 +55,10 @@ const DUMP_LIMIT: usize = 64 * 1024;
 #[derive(Debug)]
 struct Args {
     section: Option<String>,
+    /// The second section this game's decoder needs, when it needs one.
+    /// Only Assetto Corsa does: its redline lives in a different block from
+    /// its engine speed.
+    aux: Option<String>,
     dump: Option<String>,
     /// Which known game was named, when one was. `--section` alone leaves
     /// this `None`: an arbitrary section can be dumped but not decoded,
@@ -59,6 +68,7 @@ struct Args {
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut section = None;
+    let mut aux = None;
     let mut dump = None;
     let mut game_id = None;
     let mut it = argv.iter();
@@ -66,16 +76,25 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         match arg.as_str() {
             "--game" => {
                 let id = it.next().ok_or("--game needs a game id")?;
-                let game = games::by_id(id)
-                    .ok_or_else(|| format!("unknown game {id:?} (known: iracing, lmu, rf2)"))?;
+                // The known-ids list is derived rather than written out: a
+                // hardcoded copy went stale the first time a game was added.
+                let game = games::by_id(id).ok_or_else(|| {
+                    let known: Vec<&str> = games::GAMES.iter().map(|g| g.id).collect();
+                    format!("unknown game {id:?} (known: {})", known.join(", "))
+                })?;
                 if let Some(prerequisite) = game.prerequisite {
                     eprintln!("logi-tf-relay: note for {}: {}", game.name, prerequisite);
                 }
                 section = Some(game.section.to_string());
+                aux = game.aux_section.map(str::to_string);
                 game_id = Some(game.id);
             }
             "--section" => {
                 section = Some(it.next().ok_or("--section needs a name")?.clone());
+                // An explicitly named section is dumped, never decoded, so
+                // whatever a preceding --game set up no longer applies.
+                aux = None;
+                game_id = None;
             }
             "--dump" => {
                 dump = Some(it.next().ok_or("--dump needs a file path")?.clone());
@@ -84,7 +103,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
-    Ok(Args { section, dump, game: game_id })
+    Ok(Args { section, aux, dump, game: game_id })
 }
 
 fn main() -> ExitCode {
@@ -104,17 +123,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let decodable = args.game.and_then(games::by_id).is_some_and(|g| g.decodable);
     match args.dump {
         Some(path) => run_dump(&section, &path),
-        // iRacing is decodable without a captured fixture because its
-        // telemetry is self-describing: values are found by name in the
-        // game's own variable table, not at offsets guessed from a header.
-        // See `iracing`'s module docs.
-        None if args.game == Some("iracing") => run_stream(&section),
+        // Each decodable game earned that status a different way; see the
+        // `decodable` field in `games` and each decoder's module docs.
+        None if decodable => run_stream(&section, args.aux.as_deref(), args.game.unwrap_or("")),
         None => {
-            // Every other format is a fixed-layout struct with nothing
-            // in-band to catch a wrong offset, so its decoder waits for a
-            // real fixture. Being honest here beats streaming garbage.
+            // The rest are fixed-layout structs with nothing in-band to
+            // catch a wrong offset, so their decoders wait for a real
+            // fixture. Being honest here beats streaming garbage.
             eprintln!(
                 "logi-tf-relay: streaming for {section:?} is not built yet. \
                  It needs a dump fixture from a live session first.\n\
@@ -134,7 +152,7 @@ fn main() -> ExitCode {
 /// are skipped silently, since a menu, a replay or a paused session all
 /// legitimately produce them.
 #[cfg(windows)]
-fn run_stream(section: &str) -> ExitCode {
+fn run_stream(section: &str, aux: Option<&str>, game: &str) -> ExitCode {
     use std::net::UdpSocket;
 
     let port = std::env::var("LOGI_TF_SIM_RELAY_PORT")
@@ -158,7 +176,21 @@ fn run_stream(section: &str) -> ExitCode {
         match win::read_section(section, DUMP_LIMIT) {
             Ok(bytes) => {
                 warned = false;
-                if let Some(sample) = iracing::decode(&bytes) {
+                // Assetto Corsa's redline is in a second section, read on
+                // the same tick so a car change cannot pair a new engine
+                // speed with the previous car's redline.
+                let aux_bytes = match aux {
+                    Some(name) => win::read_section(name, DUMP_LIMIT).ok(),
+                    None => None,
+                };
+                let sample = match game {
+                    raceroom::ID => raceroom::decode(&bytes),
+                    assettocorsa::ID => {
+                        aux_bytes.and_then(|s| assettocorsa::decode(&bytes, &s))
+                    }
+                    _ => iracing::decode(&bytes),
+                };
+                if let Some(sample) = sample {
                     let _ = socket.send(&logi_wheel_core::relay::encode(&sample));
                 }
             }
@@ -177,7 +209,7 @@ fn run_stream(section: &str) -> ExitCode {
 
 /// Linux stub: the relay only means anything inside the prefix.
 #[cfg(not(windows))]
-fn run_stream(_section: &str) -> ExitCode {
+fn run_stream(_section: &str, _aux: Option<&str>, _game: &str) -> ExitCode {
     eprintln!(
         "logi-tf-relay: this is the Linux stub. The relay has to be \
          cross-compiled and run inside the game's Proton prefix:\n  \

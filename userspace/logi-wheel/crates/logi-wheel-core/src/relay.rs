@@ -50,7 +50,8 @@ pub const ID: &str = "relay";
 /// falls back to [`ID`] for anything it does not recognise, so a newer
 /// sender against an older daemon degrades to the shared switch instead of
 /// going silent.
-pub const GAME_IDS: &[&str] = &["ets2", "ats", "iracing", "lmu", "rf2", ID];
+pub const GAME_IDS: &[&str] =
+    &["ets2", "ats", "iracing", "raceroom", "assetto", "lmu", "rf2", ID];
 
 /// Width of the on-wire game id field. Eight bytes holds every id above
 /// with room to spare, and keeps the packet a round 28 bytes.

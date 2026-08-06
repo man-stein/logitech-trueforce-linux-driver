@@ -6,11 +6,12 @@
 //! (rFactor 2 and Le Mans Ultimate share the engine and the community
 //! `rF2SharedMemoryMapPlugin`) publishes globally named `$...$` sections.
 //!
-//! Decoders are deliberately absent: the project rule is a real captured
-//! byte fixture before any wire-format decoder ships, and no `--dump` from
-//! a live Proton session exists yet for any of these. `--dump` is exactly
-//! how that fixture gets made; each game's decoder lands here once its
-//! dump does.
+//! A game gets a decoder here once its layout can be trusted, which happens
+//! one of three ways: the format is self-describing (iRacing), the vendor
+//! publishes the layout and owns both ends of it (RaceRoom), or the fields
+//! needed sit in a part of the struct that provably has not moved and the
+//! risky part carries an in-band check (Assetto Corsa). Anything else waits
+//! for a real captured fixture, which is what `--dump` is for.
 
 /// One shared-memory sim the relay can open.
 pub struct Game {
@@ -20,8 +21,16 @@ pub struct Game {
     pub name: &'static str,
     /// The Windows named-section name to open.
     pub section: &'static str,
+    /// A second section this game's decoder also needs, if any.
+    ///
+    /// Assetto Corsa is the reason this exists: engine speed is in its
+    /// per-tick physics block but the redline is in its per-session static
+    /// block, and a sample needs both.
+    pub aux_section: Option<&'static str>,
     /// Extra prerequisite the user must have installed, if any.
     pub prerequisite: Option<&'static str>,
+    /// Whether a decoder exists, or `--dump` is all this game can do yet.
+    pub decodable: bool,
 }
 
 /// Every game the relay knows the section name for.
@@ -30,23 +39,45 @@ pub const GAMES: &[Game] = &[
         id: "iracing",
         name: "iRacing",
         section: "Local\\IRSDKMemMapFileName",
+        aux_section: None,
         prerequisite: None,
+        decodable: true,
+    },
+    Game {
+        id: crate::raceroom::ID,
+        name: "RaceRoom Racing Experience",
+        section: crate::raceroom::SECTION,
+        aux_section: None,
+        prerequisite: None,
+        decodable: true,
+    },
+    Game {
+        id: crate::assettocorsa::ID,
+        name: "Assetto Corsa",
+        section: crate::assettocorsa::SECTION_PHYSICS,
+        aux_section: Some(crate::assettocorsa::SECTION_STATIC),
+        prerequisite: None,
+        decodable: true,
     },
     Game {
         id: "lmu",
         name: "Le Mans Ultimate",
         section: "$rFactor2SMMP_Telemetry$",
+        aux_section: None,
         prerequisite: Some(
             "needs the community rF2SharedMemoryMapPlugin in the game's Plugins directory",
         ),
+        decodable: false,
     },
     Game {
         id: "rf2",
         name: "rFactor 2",
         section: "$rFactor2SMMP_Telemetry$",
+        aux_section: None,
         prerequisite: Some(
             "needs the community rF2SharedMemoryMapPlugin in the game's Plugins directory",
         ),
+        decodable: false,
     },
 ];
 
@@ -78,5 +109,32 @@ mod tests {
     #[test]
     fn iracing_section_is_session_local() {
         assert!(by_id("iracing").unwrap().section.starts_with("Local\\"));
+    }
+
+    /// A game the relay can decode sends samples tagged with its id, and the
+    /// daemon drops any id it does not know. Adding a decoder here without
+    /// adding the id there produces a relay that streams into a void, which
+    /// looks exactly like a game that is not publishing.
+    #[test]
+    fn every_decodable_game_has_an_id_the_daemon_accepts() {
+        for game in GAMES.iter().filter(|g| g.decodable) {
+            assert!(
+                logi_wheel_core::relay::GAME_IDS.contains(&game.id),
+                "{} decodes but its id {:?} is not in relay::GAME_IDS",
+                game.name,
+                game.id
+            );
+        }
+    }
+
+    /// Only Assetto Corsa needs two sections, and it must actually name the
+    /// second: without the static block there is no redline, and the
+    /// decoder would refuse every sample.
+    #[test]
+    fn assetto_corsa_is_the_only_two_section_game() {
+        for game in GAMES {
+            let expected = game.id == crate::assettocorsa::ID;
+            assert_eq!(game.aux_section.is_some(), expected, "{}", game.name);
+        }
     }
 }

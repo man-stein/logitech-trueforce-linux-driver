@@ -442,16 +442,15 @@ pub const GAMES: &[GameCompat] = &[
         linux: Linux::Proton,
         ffb: Ffb::NativeEvdev,
         native_trueforce: Support::No,
-        // Kunos publish a UDP remote-telemetry protocol (port 9996) and a
-        // shared-memory block, so the data exists; what is missing is a
-        // decoder for either. Both differ from every format the daemon
-        // currently speaks: the UDP one needs a handshake before the game
-        // will send anything, and the shared memory lives inside the Proton
-        // prefix, so it belongs in `logi-tf-relay` rather than the daemon's
-        // passive listener.
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Plain force feedback; no shim; turn Steam Input off.",
-        confidence: Confidence::Documented,
+        simulated_tf: SimTf::LiveNow("assetto"),
+        setup: "Plain force feedback; no shim; turn Steam Input off. \
+Simulated TrueForce needs logi-tf-relay in the prefix (see \
+docs/SHARED_MEMORY_RELAY.md); nothing to switch on in the game.",
+        // Expected: the decoder reads only the head of Kunos' physics block,
+        // which has not moved since AC 1.0, and checks the static block's
+        // layout in-band before trusting the redline. Unconfirmed in a live
+        // session under Proton.
+        confidence: Confidence::Expected,
     },
     GameCompat {
         name: "Automobilista 2",
@@ -510,9 +509,14 @@ in the prefix (see docs/SHARED_MEMORY_RELAY.md).",
         linux: Linux::Proton,
         ffb: Ffb::DirectInput,
         native_trueforce: Support::No,
-        simulated_tf: SimTf::PossibleWithParser,
-        setup: "Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off.",
-        confidence: Confidence::Documented,
+        simulated_tf: SimTf::LiveNow("raceroom"),
+        setup: "Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; \
+Steam Input off. Simulated TrueForce needs logi-tf-relay in the prefix (see \
+docs/SHARED_MEMORY_RELAY.md); nothing to switch on in the game.",
+        // Expected: the decoder is written against KW Studios' own published
+        // `r3e.h`, whose major version it checks in-band before reading, but
+        // nobody has yet confirmed the game publishes `$R3E` under Proton.
+        confidence: Confidence::Expected,
     },
     GameCompat {
         name: "BeamNG.drive",
@@ -763,11 +767,17 @@ mod tests {
             // and gated by the same per-game switches.
             ("Euro Truck Simulator 2", "ets2"),
             ("American Truck Simulator", "ats"),
-            // Shared memory, read by the in-prefix relay. iRacing only: its
-            // telemetry is self-describing, so a decoder can be written
-            // without a captured fixture. rFactor 2 and Le Mans Ultimate are
-            // fixed-layout structs and still wait for one.
+            // Shared memory, read by the in-prefix relay. Each of these three
+            // earned a decoder a different way: iRacing's telemetry is
+            // self-describing, RaceRoom's layout is published by KW Studios
+            // themselves and version-stamped in-band, and Assetto Corsa's
+            // needed fields sit in the part of its struct that has not moved
+            // since 1.0, with an in-band check on the one risky offset.
+            // rFactor 2 and Le Mans Ultimate have none of those properties
+            // and still wait for a captured fixture.
             ("iRacing", "iracing"),
+            ("RaceRoom Racing Experience", "raceroom"),
+            ("Assetto Corsa (original)", "assetto"),
         ]
         .into_iter()
         .collect();

@@ -33,7 +33,7 @@ instead of wrapping it.
 | Game | Runs on Linux | Force feedback | On RS50 / G PRO | On G923 |
 |---|---|---|---|---|
 | American Truck Simulator * | Native Linux | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
-| Assetto Corsa (original) | Proton | Native FFB | Nothing to do | Nothing to do |
+| Assetto Corsa (original) * | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | Assetto Corsa Competizione | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Install the shim with `--proxy`<br>and leave `PROTON_ENABLE_HIDRAW` unset |
 | Assetto Corsa EVO (early access) | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Install the shim with `--proxy`<br>and leave `PROTON_ENABLE_HIDRAW` unset |
 | Assetto Corsa Rally (early access) * | Proton | Native FFB | Nothing to do | Nothing to do |
@@ -55,7 +55,7 @@ instead of wrapping it.
 | KartKraft * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Le Mans Ultimate | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Project CARS 2 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
-| RaceRoom Racing Experience | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
+| RaceRoom Racing Experience * | Proton | logi-ffb | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | Rennsport * | Proton | Native FFB | Nothing to do | Nothing to do |
 | rFactor 2 | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Richard Burns Rally * | Proton | Native FFB | Nothing to do | Nothing to do |
@@ -83,7 +83,7 @@ app's Setup page afterwards.
 | Game | Simulated TrueForce |
 |---|---|
 | American Truck Simulator | supported today |
-| Assetto Corsa (original) | possible, needs a telemetry parser first |
+| Assetto Corsa (original) | supported today |
 | Assetto Corsa Competizione | not needed: the game has real TrueForce |
 | Assetto Corsa EVO (early access) | not needed: the game has real TrueForce |
 | Assetto Corsa Rally (early access) | no usable telemetry |
@@ -102,7 +102,7 @@ app's Setup page afterwards.
 | KartKraft | possible, needs a telemetry parser first |
 | Le Mans Ultimate | possible, needs a telemetry parser first |
 | Project CARS 2 | supported today |
-| RaceRoom Racing Experience | possible, needs a telemetry parser first |
+| RaceRoom Racing Experience | supported today |
 | Rennsport | no usable telemetry |
 | rFactor 2 | possible, needs a telemetry parser first |
 | Richard Burns Rally | possible, needs a telemetry parser first |
@@ -118,6 +118,6 @@ app's Setup page afterwards.
 ## Confidence
 
 - **verified** (3 titles): confirmed end to end by this project
-- **documented** (15 titles): documented by the vendor or a reliable community source
-- **expected** (6 titles): expected to work, not confirmed
+- **documented** (13 titles): documented by the vendor or a reliable community source
+- **expected** (8 titles): expected to work, not confirmed
 - **unknown** (4 titles): genuinely unknown
