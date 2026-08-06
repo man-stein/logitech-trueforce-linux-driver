@@ -203,6 +203,22 @@ The summary below is the shape of it.
   not work and `PROTON_ENABLE_HIDRAW` must stay unset - see
   [G923 support](#g923-support).
 
+  **Where the SDK files go.** Copy the `Logi` folder out of a Windows G HUB
+  install into `~/.local/share/logitech-trueforce/sdk`, keeping its own
+  layout, so you end up with:
+
+  ```
+  ~/.local/share/logitech-trueforce/sdk/Logi/Trueforce/<version>/trueforce_sdk_x64.dll
+  ~/.local/share/logitech-trueforce/sdk/Logi/wheel_sdk/<version>/logi_steering_wheel_x64.dll
+  ```
+
+  Whatever version numbers your G HUB shipped are the right ones; nothing
+  here assumes a particular pair. To keep them somewhere else, set
+  `LOGITECH_TRUEFORCE_SDK_DIR` to that directory, or pass `--sdk-dir` to the
+  installer, or set the folder on the app's Setup page. `setup.sh doctor`
+  prints the directory it checked, so if it disagrees with you, that line
+  tells you where it looked.
+
   One side effect to know about: with `PROTON_ENABLE_HIDRAW=1` some games
   read the wheel's raw HID reports instead of the normal Linux input layer,
   and read the pedals the other way up - resting reads as fully pressed. If

@@ -504,6 +504,15 @@ setup() {
 		echo "error: full setup needs root (sudo $0). For diagnosis only: $0 doctor" >&2
 		exit 1
 	fi
+	# The install path builds from source and needs the sibling scripts a
+	# checkout has. A distro package ships this file without them, and its
+	# driver is already installed, so say that rather than failing on a
+	# missing path several steps in.
+	if [ ! -x "$REPO_ROOT/tools/dkms-update.sh" ]; then
+		echo "error: full setup runs from a git checkout; this looks like a packaged install." >&2
+		echo "       The driver is already installed by your package manager. Use: $0 doctor" >&2
+		exit 1
+	fi
 
 	say "[1/5] Kernel module (DKMS) + udev rule"
 	"$REPO_ROOT/tools/dkms-update.sh" || exit 1
@@ -583,16 +592,30 @@ setup() {
 	say "[5/5] Doctor"
 	# diagnosis runs best as the real user (permission checks)
 	if [ -n "${SUDO_USER:-}" ]; then
-		runuser -u "$SUDO_USER" -- "$REPO_ROOT/tools/setup.sh" doctor || true
+		runuser -u "$SUDO_USER" -- "$(readlink -f "$0")" doctor || true
 	else
 		doctor || true
 	fi
 
 	echo
 	say "Remaining manual steps (per game, in Steam):"
-	echo "  1. Properties > Launch Options:  PROTON_ENABLE_HIDRAW=1 %command%"
+	# Advice that depends on the wheel must not be printed as though it
+	# does not. Told to every reader, "set PROTON_ENABLE_HIDRAW=1" removes
+	# force feedback for G923 owners and for anyone playing a DirectInput
+	# sim, which is the opposite of what they came here for (#54).
+	if wheel_has_sdk_trueforce; then
+		echo "  1. Properties > Launch Options:  PROTON_ENABLE_HIDRAW=1 %command%"
+		echo "     (only for sims with built-in TrueForce: ACC, Assetto Corsa EVO.)"
+		echo "     For DirectInput sims such as Le Mans Ultimate and rFactor 2 use"
+		echo "     'logi-ffb %command%' instead, and leave PROTON_ENABLE_HIDRAW unset:"
+		echo "     setting it there stops force feedback reaching the game."
+	else
+		echo "  1. Leave PROTON_ENABLE_HIDRAW unset. This wheel has no SDK TrueForce,"
+		echo "     and setting it stops force feedback reaching the game."
+		echo "     For DirectInput sims use 'logi-ffb %command%'."
+	fi
 	echo "  2. Properties > Controller:     Disable Steam Input"
-	echo "  (both needed for TrueForce; see the wiki's Force-feedback-in-games page)"
+	echo "  (per-game recipes: docs/GAME_SETUP.md, or the app's Setup page)"
 }
 
 case "${1:-setup}" in
