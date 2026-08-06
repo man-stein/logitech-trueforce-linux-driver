@@ -13,6 +13,7 @@ use logi_wheel_core::launchers::DiscoveredGame;
 use logi_wheel_core::tfsim;
 
 use crate::viewmodel::Row;
+use logi_wheel_core::telemetry_helpers as th;
 use crate::{AddableGame, CurvePoint, LedColor, SettingRow, SetupEffect, SetupGame, SlotNameRow};
 
 // Stable `SettingRow.kind` tag numbering; keep in sync with the doc comment
@@ -939,15 +940,23 @@ pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config, caps: games::W
         .filter_map(|g| match games::match_title(&g.name) {
             Some(compat) => {
                 let action = compat.setup_action(caps);
-                let sim_id = if action == SetupAction::SimulatedTrueForce {
-                    compat.simulated_tf.live_id().unwrap_or("")
-                } else {
-                    ""
-                };
+                // Every title with a live decoder carries its id, not just
+                // the ones whose PRIMARY action is simulated TrueForce.
+                // Gating on the action hid the controls for every game the
+                // relay serves: iRacing, RaceRoom, rFactor 2 and Le Mans
+                // Ultimate are DirectInput titles, so their action is
+                // "launch via logi-ffb", and Competizione and EVO are shim
+                // titles. All six have working simulated TrueForce, and all
+                // six had no way to switch it on here.
+                let sim_id = compat.simulated_tf.live_id().unwrap_or("");
                 let sim = cfg.game(sim_id);
+                let prefix = prefix_of(g);
+                let needs_relay = th::needs_relay(sim_id);
+                let relay_installed =
+                    needs_relay && th::relay_installed_in(std::path::Path::new(&prefix));
                 Some(SetupGame {
                     name: g.name.as_str().into(),
-                    prefix: prefix_of(g).into(),
+                    prefix: prefix.as_str().into(),
                     summary: compat.setup_line(caps).into(),
                     action: action_tag(action),
                     launch: compat.launch_options(caps).unwrap_or_default().into(),
@@ -955,6 +964,8 @@ pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config, caps: games::W
                     sim_id: sim_id.into(),
                     sim_enabled: sim.enabled,
                     sim_intensity: i32::from(sim.intensity),
+                    needs_relay,
+                    relay_installed,
                     source: g.source.label().into(),
                 })
             }
@@ -971,6 +982,8 @@ pub fn setup_games(games: &[DiscoveredGame], cfg: &tfsim::Config, caps: games::W
                 sim_id: String::new().into(),
                 sim_enabled: false,
                 sim_intensity: 0,
+                needs_relay: false,
+                relay_installed: false,
                 source: g.source.label().into(),
             }),
             None => None,
@@ -1094,13 +1107,25 @@ mod tests {
         let acc = &rows[0];
         assert_eq!(acc.action, ACTION_SHIM);
         assert!(acc.installed);
-        assert!(acc.sim_id.is_empty());
         assert!(!acc.summary.is_empty());
         assert_eq!(acc.source, "Steam");
+        // ...and it still carries its simulated-TrueForce id. The id used
+        // to be blanked for anything whose primary action was not simulated
+        // TrueForce, which hid the controls for every game the relay serves:
+        // Competizione and EVO are shim titles, and iRacing, RaceRoom,
+        // rFactor 2 and Le Mans Ultimate are DirectInput ones. All six have
+        // working simulated TrueForce and none of them could be switched on.
+        assert_eq!(acc.sim_id, "acc");
+        assert!(acc.needs_relay, "its telemetry arrives through the relay");
 
-        // DirectInput -> logi-ffb action.
+        // DirectInput -> logi-ffb action, and the same is true here.
         assert_eq!(rows[1].action, ACTION_LOGI_FFB);
         assert_eq!(rows[1].launch, games::LAUNCH_LOGI_FFB, "the row carries its own launch options");
+        assert_eq!(rows[1].sim_id, "lmu");
+        assert!(rows[1].needs_relay);
+
+        // A UDP title needs no relay: the daemon hears it directly.
+        assert!(!rows[2].needs_relay, "DiRT Rally 2.0 broadcasts over UDP");
 
         // Live simulated-TF -> the game's own switch, from tf-sim.conf.
         let dr2 = &rows[2];

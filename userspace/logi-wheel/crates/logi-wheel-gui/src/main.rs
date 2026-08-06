@@ -2177,6 +2177,34 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let games_cache = games_cache.clone();
+        let app_weak = app.as_weak();
+        app.on_setup_install_relay(move |prefix| {
+            // A file copy, so it runs inline: unlike the shim installer
+            // there is no script to wait on, and a spinner for something
+            // that finishes instantly reads as a hang.
+            use logi_wheel_core::telemetry_helpers as th;
+            let Some(app) = app_weak.upgrade() else { return };
+            let message = match th::relay_source() {
+                None => "Relay not found. Install the package, or run tools/setup.sh from a checkout."
+                    .to_string(),
+                Some(src) => match th::install_relay(&src, std::path::Path::new(&prefix.to_string())) {
+                    Ok(th::Installed::Fresh) => {
+                        "Relay installed. Run it in this game's prefix while you play; \
+                         see docs/SHARED_MEMORY_RELAY.md."
+                            .to_string()
+                    }
+                    Ok(th::Installed::Replaced) => "Relay updated to this version.".to_string(),
+                    Err(e) => format!("Could not install the relay: {e}"),
+                },
+            };
+            app.set_setup_shim_output(message.into());
+            // Rebuild the rows so the per-game "installed" line reflects
+            // what just happened, the same way the shim install does.
+            refresh_games(&app, &games_cache);
+        });
+    }
+    {
         let sdk_dir = sdk_dir.clone();
         let installer_path = installer_path.clone();
         let shim_binary = shim_binary.clone();

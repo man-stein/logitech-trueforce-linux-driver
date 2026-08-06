@@ -795,7 +795,7 @@ fn setup_sections<S: SysfsIo>(
             }
             SetupSection::Games => {
                 let hint = if inside {
-                    "[i/u install/remove  c copy launch  g sim TF  a add  Esc back]"
+                    "[i/u install/remove  h helper  c copy launch  g sim TF  a add  Esc back]"
                 } else {
                     "[Enter opens the list]"
                 };

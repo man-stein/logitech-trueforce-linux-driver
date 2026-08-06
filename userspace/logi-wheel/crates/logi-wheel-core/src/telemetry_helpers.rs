@@ -67,6 +67,28 @@ const REPO_SCS: &str = "userspace/logi-wheel/target/release/liblogi_tf_scs.so";
 pub const SCS_APPIDS: [(u32, &str); 2] =
     [(227300, "Euro Truck Simulator 2"), (270880, "American Truck Simulator")];
 
+/// The daemon game ids fed by the in-prefix relay.
+///
+/// A subset of [`crate::relay::GAME_IDS`], because that list covers every
+/// sender of the relay *wire format*, and two of them are not the relay:
+/// Euro Truck Simulator 2 and American Truck Simulator speak it from the
+/// SCS plugin, running natively inside the game. Offering to install a
+/// Windows executable into a native game's non-existent Proton prefix is
+/// exactly the kind of confident wrong answer worth spending a constant to
+/// avoid.
+pub const RELAY_GAME_IDS: [&str; 7] =
+    ["iracing", "raceroom", "assetto", "acc", "ac-evo", "rf2", "lmu"];
+
+/// Whether a game gated by `game_id` is fed by the relay.
+pub fn needs_relay(game_id: &str) -> bool {
+    RELAY_GAME_IDS.contains(&game_id)
+}
+
+/// Whether a game gated by `game_id` is fed by the SCS plugin.
+pub fn needs_scs_plugin(game_id: &str) -> bool {
+    matches!(game_id, "ets2" | "ats")
+}
+
 /// Find `name` in the staged locations, then in a repo checkout.
 ///
 /// `exe` is the running executable's path, used to locate the checkout when
@@ -297,6 +319,41 @@ mod tests {
         assert!(cmd.contains("WINEPREFIX=/games/pfx"), "{cmd}");
         assert!(cmd.contains("--game acc"), "{cmd}");
         assert!(cmd.contains(RELAY_BIN), "{cmd}");
+    }
+
+    /// Every relay-fed id must be a real wire id, or the app offers to set
+    /// up a game the daemon would ignore.
+    #[test]
+    fn every_relay_game_id_is_a_real_wire_id() {
+        for id in RELAY_GAME_IDS {
+            assert!(
+                crate::relay::GAME_IDS.contains(&id),
+                "{id} is offered the relay but is not a relay wire id"
+            );
+        }
+    }
+
+    /// The truck sims speak the relay wire format from a native plugin, not
+    /// from the relay. Offering them a Windows executable would send someone
+    /// looking for a Proton prefix that does not exist.
+    #[test]
+    fn the_truck_sims_are_plugin_fed_not_relay_fed() {
+        for id in ["ets2", "ats"] {
+            assert!(crate::relay::GAME_IDS.contains(&id), "{id} is a wire id");
+            assert!(!needs_relay(id), "{id} must not be offered the relay");
+            assert!(needs_scs_plugin(id), "{id} is fed by the plugin");
+        }
+        assert!(!needs_scs_plugin("acc"));
+        assert!(needs_relay("acc"));
+    }
+
+    /// A UDP game needs neither helper: the daemon hears it directly.
+    #[test]
+    fn a_udp_game_needs_no_helper_at_all() {
+        for id in ["dirt-rally-2", "codemasters", "ams2-pcars2", "f1", "beamng", "ea-wrc"] {
+            assert!(!needs_relay(id), "{id} is heard over UDP");
+            assert!(!needs_scs_plugin(id), "{id} is heard over UDP");
+        }
     }
 
     /// Both truck sims are native Linux titles, so they never appear in the

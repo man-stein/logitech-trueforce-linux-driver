@@ -109,6 +109,9 @@ export component App inherits Window {
     // Per-game shim install/remove; the argument is the row's wine prefix.
     callback setup-install-game(string);
     callback setup-remove-game(string);
+    // Copy the telemetry relay into a game's wine prefix; the argument is
+    // the row's prefix.
+    callback setup-install-relay(string);
     callback setup-rescan-games();
     callback setup-tf-set-enabled(bool);
     callback setup-tf-set-intensity(int);
@@ -528,6 +531,7 @@ export component App inherits Window {
                     ffb-launch-options: root.setup-ffb-launch-options;
                     sdk-dir-edited(dir) => { root.setup-sdk-dir-edited(dir); }
                     install-game(pfx) => { root.setup-install-game(pfx); }
+                    install-relay(pfx) => { root.setup-install-relay(pfx); }
                     remove-game(pfx) => { root.setup-remove-game(pfx); }
                     rescan-games() => { root.setup-rescan-games(); }
                     add-game(pfx) => { root.add-game(pfx); }

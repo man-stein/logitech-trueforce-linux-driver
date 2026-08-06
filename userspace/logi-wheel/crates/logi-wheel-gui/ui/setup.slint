@@ -24,6 +24,10 @@ export struct SetupGame {
     sim-id: string,
     sim-enabled: bool,
     sim-intensity: int,
+    // Whether this game's telemetry reaches the daemon through the
+    // in-prefix relay, and whether that relay is already in its prefix.
+    needs-relay: bool,
+    relay-installed: bool,
     // The Steam launch options this title wants ON THIS WHEEL, or ""
     // when it needs none. Resolved per (game, wheel) pair on the Rust
     // side; the row shows and copies it, and never writes it.
@@ -274,6 +278,7 @@ export component Setup inherits Rectangle {
     // wine prefix path. `shim-output` and `shim-running` are pushed back
     // once the run finishes, followed by a rescan.
     callback install-game(string);
+    callback install-relay(string);
     callback remove-game(string);
     callback rescan-games();
     // Opens a URL in the user's browser; wired to the same `open-url`
@@ -459,6 +464,33 @@ export component Setup inherits Rectangle {
                                         } else {
                                             root.install-game(game.prefix);
                                         }
+                                    }
+                                }
+                            }
+
+                            // The telemetry relay, for games that publish
+                            // to Windows shared memory instead of
+                            // broadcasting over UDP. It goes inside the
+                            // game's own wine prefix, so it is per game
+                            // rather than a one-time install.
+                            if game.needs-relay: HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: game.relay-installed
+                                        ? "Telemetry relay installed in this game's prefix"
+                                        : (game.prefix == ""
+                                            ? "Launch it once under Proton so its prefix exists, then install the relay."
+                                            : "Telemetry relay not installed; simulated TrueForce needs it for this game");
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                    color: game.relay-installed ? Theme.ok-color : Theme.muted-text-color;
+                                }
+                                if game.prefix != "": Button {
+                                    text: game.relay-installed ? "Reinstall relay" : "Install relay";
+                                    clicked => {
+                                        root.install-relay(game.prefix);
                                     }
                                 }
                             }
