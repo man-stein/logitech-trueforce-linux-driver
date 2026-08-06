@@ -116,6 +116,60 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" out/*.deb --clobber
 
+  telemetry-helpers:
+    name: Telemetry helpers (relay + SCS plugin)
+    needs: validate
+    runs-on: ubuntu-latest
+    # Attaches the built helpers to the release.
+    permissions:
+      contents: write
+    # These two are the only pieces of the project a user cannot install
+    # from a package. The relay is a Windows executable that runs inside a
+    # Proton prefix and the SCS plugin is a shared object the game loads,
+    # so neither belongs in a distro package that installs into /usr. Left
+    # unbuilt, every shared-memory sim and both truck sims were documented
+    # but reachable only by someone with a Rust cross-toolchain.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Install the MinGW linker
+        # The windows-gnu target links with MinGW. Neither helper needs the
+        # GUI's fontconfig, so nothing else is pulled in.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - name: Install Rust with the Windows target
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-gnu
+          rustup default stable
+      - name: Build the shared-memory relay for Windows
+        working-directory: userspace/logi-wheel
+        run: cargo build --release --locked -p logi-tf-relay --target x86_64-pc-windows-gnu
+      - name: Build the SCS telemetry plugin for Linux
+        working-directory: userspace/logi-wheel
+        run: cargo build --release --locked -p logi-tf-scs
+      - name: Collect the helpers
+        run: |
+          set -eu
+          mkdir -p out
+          cp userspace/logi-wheel/target/x86_64-pc-windows-gnu/release/logi-tf-relay.exe out/
+          cp userspace/logi-wheel/target/release/liblogi_tf_scs.so out/
+          # Named so a downloaded file still says what it is and which
+          # release it came from once it is sitting in somebody's
+          # Downloads folder next to five other things.
+          mv out/logi-tf-relay.exe "out/logi-tf-relay-${TAG#v}.exe"
+          mv out/liblogi_tf_scs.so "out/liblogi_tf_scs-${TAG#v}.so"
+          ls -l out
+      - name: Attach the helpers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "out/logi-tf-relay-${TAG#v}.exe" \
+            "out/liblogi_tf_scs-${TAG#v}.so" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
   copr:
     name: Fedora COPR (akmod)
     needs: validate

@@ -10,11 +10,15 @@ It is a native Linux plugin. No Wine, no Proton, nothing to cross-compile.
 
 ## Install
 
-Build it, then drop it into the game's plugin directory:
+Download `liblogi_tf_scs-<version>.so` from the
+[latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest)
+and rename it to `liblogi_tf_scs.so`, or build it yourself:
 
 ```bash
 cargo build --release -p logi-tf-scs
 ```
+
+Then drop it into the game's plugin directory.
 
 Euro Truck Simulator 2:
 

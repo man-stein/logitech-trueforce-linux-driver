@@ -38,6 +38,12 @@ jobs:
         working-directory: userspace/logi-wheel
     steps:
       - uses: actions/checkout@v4
+      - name: Install the MinGW linker
+        # The windows-gnu target links with MinGW; without it every build
+        # here fails at the link step rather than on anything we wrote.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
       - name: Install Rust with the Windows target
         run: rustup toolchain install stable --profile minimal --component clippy --target x86_64-pc-windows-gnu
       - name: Build the relay for Windows

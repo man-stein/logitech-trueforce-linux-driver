@@ -60,18 +60,22 @@ read is bounds checked and range gated, and each drops a sample it cannot
 vouch for rather than sending a wrong number, but a report from someone who
 has actually run one is what moves it from "should work" to "known to work".
 
-## Build it
+## Get it
 
-The relay is a Windows binary, so it needs the Windows target:
+Download `logi-tf-relay-<version>.exe` from the
+[latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest).
+It is not in the distro packages: it is a Windows executable that runs inside
+a Proton prefix, so it has no business in `/usr`.
+
+To build it yourself instead, it needs the Windows target and a MinGW linker:
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
 cargo build --release -p logi-tf-relay --target x86_64-pc-windows-gnu
 ```
 
-The result is `target/x86_64-pc-windows-gnu/release/logi-tf-relay.exe`.
-
-If `cargo` says the target is unavailable, your distribution's Rust probably
+The result is `target/x86_64-pc-windows-gnu/release/logi-tf-relay.exe`. If
+`cargo` says the target is unavailable, your distribution's Rust probably
 cannot cross-compile; a rustup-managed toolchain can. The build needs no
 Windows machine and no Wine.
 
