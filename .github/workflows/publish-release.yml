@@ -11,6 +11,10 @@ name: Publish release packages
 #   * Arch AUR            -> logitech-trueforce-dkms/logi-wheel/logi-wheel-gui
 #                            pushed to the split package repo (needs secret
 #                            AUR_SSH_KEY)
+#   * Arch binary repo    -> the same three packages, signed, attached to the
+#                            release as a pacman repository (needs secrets
+#                            GPG_SIGNING_KEY and GPG_PASSPHRASE). Independent
+#                            of the AUR, which has had long outages.
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   COPR_CONFIG  the contents of your ~/.config/copr
@@ -18,6 +22,19 @@ name: Publish release packages
 #   AUR_SSH_KEY  a dedicated AUR CI SSH private key; the public half is
 #                added to the maintainer's AUR account as an authorized
 #                key, so it can be revoked independently of the personal key
+#   GPG_SIGNING_KEY  an ASCII-armoured private key used only to sign the Arch
+#                    binary repository. Generate a dedicated one, never reuse
+#                    a personal key: it lives in CI and signs whatever is
+#                    built there.
+#                      gpg --batch --passphrase '<pass>' --quick-gen-key \
+#                        'logitech-trueforce packaging <5875228+mescon@users.noreply.github.com>' \
+#                        default default 3y
+#                      gpg --armor --export-secret-keys <KEYID>   # -> this secret
+#                      gpg --armor --export <KEYID>               # publish this half
+#                    Send the public half to a keyserver so users can import
+#                    it, and put the key id in the README's pacman-key step:
+#                      gpg --send-keys --keyserver keyserver.ubuntu.com <KEYID>
+#   GPG_PASSPHRASE   the passphrase for that key
 
 on:
   release:
@@ -296,11 +313,22 @@ jobs:
           ' > out/.SRCINFO
           cp /home/builder/pkg/PKGBUILD out/PKGBUILD
           grep -E "^\s+(pkgver|pkgrel|source|sha256sums) =" out/.SRCINFO
+      - name: Keep the built packages for the pacman repo
+        run: |
+          set -eu
+          mkdir -p pkgs
+          cp /home/builder/pkg/*.pkg.tar.* pkgs/
+          ls -1 pkgs/
       - uses: actions/upload-artifact@v4
         with:
           name: aur-package
           path: out/
           include-hidden-files: true
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-packages
+          path: pkgs/
           retention-days: 1
 
   aur:
@@ -356,3 +384,83 @@ jobs:
               -c user.email="5875228+mescon@users.noreply.github.com" \
               commit -m "Update to ${VERSION}"
           git push
+
+  # A signed pacman repository, published as release assets.
+  #
+  # The AUR is the normal route and stays the normal route, but it went down
+  # for an extended maintenance window with no ETA and Arch users had no way
+  # to get anything newer than whatever was last pushed. This does not depend
+  # on the AUR being up: pacman reads the database from the release, and
+  # `releases/latest/download/<file>` always resolves to the newest release,
+  # so a single Server line keeps working across versions.
+  #
+  # The packages come from aur-build, so this publishes exactly the artifacts
+  # that job already builds and checks rather than a second recipe that could
+  # drift from it.
+  archrepo:
+    name: Arch repo (signed)
+    needs: [validate, aur-build]
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-packages
+          path: repo
+      - name: Install tooling
+        run: pacman -Syu --noconfirm --needed git github-cli
+      - name: Sign the packages and build the database
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -eu
+          if [ -z "${GPG_SIGNING_KEY:-}" ]; then
+            echo "::error::GPG_SIGNING_KEY is not set; see README 'Arch Linux repository'." >&2
+            exit 1
+          fi
+          # Import to a scratch keyring so nothing is left behind, and use
+          # loopback pinentry because there is no tty to prompt on.
+          export GNUPGHOME
+          GNUPGHOME=$(mktemp -d)
+          chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$GPG_SIGNING_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          echo "signing with $KEYID"
+
+          cd repo
+          for f in *.pkg.tar.*; do
+            case "$f" in *.sig) continue;; esac
+            gpg --batch --yes --pinentry-mode loopback \
+                --passphrase "$GPG_PASSPHRASE" \
+                --detach-sign --no-armor -u "$KEYID" "$f"
+            gpg --verify "$f.sig" "$f"
+          done
+
+          # repo-add builds the database pacman reads. --sign signs the
+          # database itself, which is what makes SigLevel Required meaningful:
+          # without it a tampered database could point at anything.
+          repo-add --sign --key "$KEYID" logitech-trueforce.db.tar.gz *.pkg.tar.zst
+          # The .db/.files symlinks repo-add creates are what pacman fetches;
+          # release assets cannot be symlinks, so publish real files.
+          for l in logitech-trueforce.db logitech-trueforce.files; do
+            [ -L "$l" ] && cp --remove-destination "$(readlink "$l")" "$l"
+            [ -L "$l.sig" ] && cp --remove-destination "$(readlink "$l.sig")" "$l.sig"
+          done
+          ls -1
+      - name: Attach the repository to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          cd repo
+          gh release upload "$TAG" \
+            *.pkg.tar.zst *.pkg.tar.zst.sig \
+            logitech-trueforce.db logitech-trueforce.db.sig \
+            logitech-trueforce.files logitech-trueforce.files.sig \
+            --clobber
+

@@ -172,7 +172,7 @@ wiki page, and the one-time TrueForce SDK setup is on
 
 | Distribution | Install |
 |---|---|
-| Arch, CachyOS, Manjaro | `paru -S logi-wheel-gui` (AUR, or your AUR helper; pulls `logi-wheel` and the driver. Headless box: `paru -S logi-wheel`) |
+| Arch, CachyOS, Manjaro | `paru -S logi-wheel-gui` (AUR, or your AUR helper; pulls `logi-wheel` and the driver. Headless box: `paru -S logi-wheel`). Or the [signed binary repo](#arch-linux-binary-repository) below, which does not depend on the AUR being reachable. |
 | Debian, Ubuntu, Mint, Pop!_OS | download the `.deb`s from [Releases](https://github.com/mescon/logitech-trueforce-linux-driver/releases), then `sudo apt install ./logitech-trueforce-dkms_*.deb ./logi-wheel_*.deb ./logi-wheel-gui_*.deb` (skip the gui one on a headless box) |
 | Fedora, Nobara | COPR akmod: `sudo dnf copr enable mescon/logitech-trueforce && sudo dnf install akmod-logitech-trueforce logi-wheel-gui` (headless box: `logi-wheel` instead of `logi-wheel-gui`) |
 | openSUSE | OBS repo `home:mescon` (see the [Installation](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Installation) page) |
@@ -182,6 +182,40 @@ The AUR and Debian packages are DKMS-based and rebuild automatically on kernel
 upgrades. After installing, plug in the wheel and check `dmesg` for a line naming
 your wheel model. The packages install a udev rule, so settings are writable
 right away, no group membership needed.
+
+### Arch Linux binary repository
+
+The AUR is the normal route, and when it is up nothing here is needed. It has
+had extended outages during which no Arch user could get anything newer than
+whatever was last pushed, so every release also publishes a signed pacman
+repository as release assets. It is served by GitHub, so it works whenever
+GitHub does.
+
+Import the signing key, then add the repository:
+
+```bash
+sudo pacman-key --recv-keys <KEYID> --keyserver keyserver.ubuntu.com
+sudo pacman-key --lsign-key <KEYID>
+```
+
+```ini
+# /etc/pacman.conf, at the end
+[logitech-trueforce]
+Server = https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest/download
+```
+
+```bash
+sudo pacman -Sy logi-wheel-gui    # headless box: logi-wheel
+```
+
+Updates then arrive through `pacman -Syu` like anything else. `latest/download`
+always resolves to the newest release, so the `Server` line never needs
+changing.
+
+The packages are the same ones the AUR recipe builds, from the same tag, built
+and signed in public CI. If you would rather not add a third-party repository,
+the individual `.pkg.tar.zst` files are attached to every release and install
+with `sudo pacman -U <url>`.
 
 ## Force feedback in games
 
