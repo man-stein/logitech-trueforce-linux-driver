@@ -5,12 +5,12 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## 0.27.5 - 2026-08-06
+## Unreleased
 
-An adversarial review of the whole tree, prompted by six bugs in one night
-that all shared a shape: a rule learned in one component and never carried to
-the others. Seven serious defects, three of them introduced by the fixes for
-that very class.
+The P0 half of an adversarial review of the whole tree, prompted by six bugs
+in one night that all shared a shape: a rule learned in one component and
+never carried to the others. Seven serious defects, three of them introduced
+by the fixes for that very class.
 
 ### Fixed
 
