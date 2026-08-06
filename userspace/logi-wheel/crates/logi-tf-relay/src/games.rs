@@ -23,12 +23,19 @@ pub struct Game {
     pub name: &'static str,
     /// The Windows named-section name to open.
     pub section: &'static str,
-    /// A second section this game's decoder also needs, if any.
+    /// A second section this game's decoder also needs, and how much of it
+    /// to read.
     ///
     /// Assetto Corsa is the reason this exists: engine speed is in its
     /// per-tick physics block but the redline is in its per-session static
-    /// block, and a sample needs both.
-    pub aux_section: Option<&'static str>,
+    /// block, and a sample needs both. The rF2 family needs one too, for
+    /// "which car is the player".
+    ///
+    /// The size travels with the name because the two sections are not the
+    /// same size: rF2's scoring buffer is 75 KiB against telemetry's 236
+    /// KiB. Reading one with the other's length is what left `SCORING_LEN`
+    /// declared and unused, which only the Windows build ever noticed.
+    pub aux_section: Option<(&'static str, usize)>,
     /// Extra prerequisite the user must have installed, if any.
     pub prerequisite: Option<&'static str>,
     /// Whether a decoder exists, or `--dump` is all this game can do yet.
@@ -75,7 +82,7 @@ pub const GAMES: &[Game] = &[
         id: crate::assettocorsa::ID,
         name: "Assetto Corsa",
         section: crate::assettocorsa::SECTION_PHYSICS,
-        aux_section: Some(crate::assettocorsa::SECTION_STATIC),
+        aux_section: Some((crate::assettocorsa::SECTION_STATIC, DEFAULT_READ_LEN)),
         prerequisite: None,
         decodable: true,
         read_len: DEFAULT_READ_LEN,
@@ -86,7 +93,7 @@ pub const GAMES: &[Game] = &[
         // Identical section names and identical layout to Assetto Corsa, so
         // the same decoder reads it; only the settings id differs.
         section: crate::assettocorsa::SECTION_PHYSICS,
-        aux_section: Some(crate::assettocorsa::SECTION_STATIC),
+        aux_section: Some((crate::assettocorsa::SECTION_STATIC, DEFAULT_READ_LEN)),
         prerequisite: None,
         decodable: true,
         read_len: DEFAULT_READ_LEN,
@@ -106,7 +113,7 @@ pub const GAMES: &[Game] = &[
         id: crate::rfactor2::ID_LMU,
         name: "Le Mans Ultimate",
         section: crate::rfactor2::SECTION_TELEMETRY,
-        aux_section: Some(crate::rfactor2::SECTION_SCORING),
+        aux_section: Some((crate::rfactor2::SECTION_SCORING, crate::rfactor2::SCORING_LEN)),
         prerequisite: Some(RF2_PLUGIN),
         decodable: true,
         read_len: crate::rfactor2::TELEMETRY_LEN,
@@ -115,7 +122,7 @@ pub const GAMES: &[Game] = &[
         id: crate::rfactor2::ID_RF2,
         name: "rFactor 2",
         section: crate::rfactor2::SECTION_TELEMETRY,
-        aux_section: Some(crate::rfactor2::SECTION_SCORING),
+        aux_section: Some((crate::rfactor2::SECTION_SCORING, crate::rfactor2::SCORING_LEN)),
         prerequisite: Some(RF2_PLUGIN),
         decodable: true,
         read_len: crate::rfactor2::TELEMETRY_LEN,
