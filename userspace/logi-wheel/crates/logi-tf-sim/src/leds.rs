@@ -174,6 +174,41 @@ impl RevLeds {
     /// for a `leds` subdirectory shaped like a classdev quintet); otherwise
     /// the first classdev quintet found under `/sys/class/leds` (the G923's
     /// rev strip) is used.
+    /// The rev display belonging to one specific wheel, named by its HID
+    /// device id (`0003:046D:C266.0004`).
+    ///
+    /// [`RevLeds::discover`] takes the first rev display it finds anywhere in
+    /// sysfs, which is wrong the moment two wheels are attached: on a rig
+    /// with a G923 and an RS50 it drove the RS50's lights while the haptic
+    /// stream was driving the G923, and reported success while doing it.
+    /// Caught on hardware 2026-08-06, by the lights simply not coming on.
+    ///
+    /// There is deliberately no fallback to the global scan. If the wheel
+    /// being driven has no rev display, the answer is that it has none, not
+    /// somebody else's.
+    pub fn discover_for(hid_id: &str) -> Option<RevLeds> {
+        RevLeds::discover_for_at(hid_id, Path::new(SYSFS_ROOT), Path::new(LEDS_ROOT))
+    }
+
+    /// [`RevLeds::discover_for`] against caller-supplied sysfs roots, so the
+    /// scoping can be tested against a fabricated two-wheel tree rather than
+    /// only on a rig that happens to have two wheels plugged in.
+    pub fn discover_for_at(hid_id: &str, sysfs_root: &Path, leds_root: &Path) -> Option<RevLeds> {
+        let attr = sysfs_root.join(hid_id).join(ATTR);
+        if attr.exists() {
+            return Some(RevLeds::at(attr));
+        }
+        let mut brightness = Vec::with_capacity(RPM_SUFFIXES.len());
+        for suffix in RPM_SUFFIXES {
+            let path = leds_root.join(format!("{hid_id}{suffix}")).join("brightness");
+            if !path.exists() {
+                return None;
+            }
+            brightness.push(path);
+        }
+        brightness.try_into().ok().map(RevLeds::at_classdevs)
+    }
+
     pub fn discover() -> Option<RevLeds> {
         if let Some(dir) = sysfs_dir_override() {
             let dir = PathBuf::from(dir);
@@ -309,6 +344,64 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Build a two-wheel rig: a DD wheel exposing `wheel_rev_level` and a
+    /// G923 exposing the five RPM classdevs, exactly the shape of the
+    /// development machine on 2026-08-06.
+    fn two_wheel_rig() -> (PathBuf, PathBuf, &'static str, &'static str) {
+        let root = tempdir();
+        let sysfs = root.join("hid");
+        let leds = root.join("leds");
+        let dd = "0003:046D:C276.0030";
+        let g923 = "0003:046D:C266.0004";
+        fs::create_dir_all(sysfs.join(dd)).unwrap();
+        fs::write(sysfs.join(dd).join(ATTR), "0").unwrap();
+        for suffix in RPM_SUFFIXES {
+            let d = leds.join(format!("{g923}{suffix}"));
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("brightness"), "0").unwrap();
+        }
+        (sysfs, leds, dd, g923)
+    }
+
+    /// The bug this exists for, found on hardware: with two wheels attached
+    /// the daemon drove the G923's haptics and the RS50's rev lights, and
+    /// said it had found "the wheel's rev display" while doing it. Asking
+    /// for one wheel must never return the other's display.
+    #[test]
+    fn a_rev_display_is_scoped_to_the_wheel_that_was_asked_for() {
+        let (sysfs, leds, dd, g923) = two_wheel_rig();
+
+        let found = RevLeds::discover_for_at(g923, &sysfs, &leds).expect("the G923 has classdevs");
+        match found.backend {
+            Backend::Classdevs { brightness, .. } => {
+                for path in &brightness {
+                    let s = path.to_string_lossy();
+                    assert!(s.contains(g923), "took another wheel's LED: {s}");
+                    assert!(!s.contains(dd), "took the DD wheel's LED: {s}");
+                }
+            }
+            Backend::Attr(p) => panic!("the G923 has no wheel_rev_level, got {}", p.display()),
+        }
+
+        let found = RevLeds::discover_for_at(dd, &sysfs, &leds).expect("the DD wheel has the attr");
+        match found.backend {
+            Backend::Attr(path) => assert!(path.to_string_lossy().contains(dd)),
+            Backend::Classdevs { .. } => panic!("the DD wheel must use its own attribute"),
+        }
+    }
+
+    /// A wheel with no rev display of its own gets none. Falling back to a
+    /// global scan is what produced the cross-wired bug in the first place,
+    /// so the absence of a fallback is the fix and needs holding in place.
+    #[test]
+    fn a_wheel_without_a_rev_display_does_not_borrow_someone_elses() {
+        let (sysfs, leds, _dd, _g923) = two_wheel_rig();
+        assert!(
+            RevLeds::discover_for_at("0003:046D:CAFE.0001", &sysfs, &leds).is_none(),
+            "an unknown wheel must get nothing, not the first display in sysfs"
+        );
     }
 
     fn read(path: &Path) -> String {

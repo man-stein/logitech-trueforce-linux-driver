@@ -11,6 +11,7 @@
 //! telemetry and torn down (with a clear) on silence, error, or exit,
 //! so no force is ever left queued.
 
+use std::path::Path;
 use std::net::UdpSocket;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,13 +87,38 @@ impl WheelStream {
 /// libtrueforce's own RS50-family discovery; otherwise fall back to the DD
 /// wheels' libtrueforce-backed [`TfStream`].
 pub(crate) fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
+    open_wheel_stream_with_leds(cfg).map(|(stream, _)| stream)
+}
+
+/// Open a wheel, and say which HID device its rev display belongs to.
+///
+/// The second half exists because the two used to be found independently:
+/// the stream picked a wheel and the rev display picked whichever wheel
+/// sysfs listed first. With one wheel attached those always agree. With two
+/// they need not, and on the development rig they did not: the G923 got the
+/// haptics and the RS50 got the lights.
+///
+/// For a G923 the answer comes free from discovery, which already
+/// correlates the TrueForce interface with its interface-0 sibling to find
+/// `ffb_output`. That sibling is the device carrying the rev LEDs.
+pub(crate) fn open_wheel_stream_with_leds(cfg: &Config) -> Result<(WheelStream, Option<String>)> {
     if let Some(paths) = g923::discover() {
+        let led_owner = paths
+            .ffb_output
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned());
         let sign = g923::Sign::resolve(cfg.g923_ffb_invert);
         let stream = g923::G923Stream::open(&paths, sign)
             .map_err(|e| Error::Io("open G923 TrueForce stream".into(), e))?;
-        return Ok(WheelStream::G923(stream));
+        return Ok((WheelStream::G923(stream), led_owner));
     }
-    TfStream::open(0).map(WheelStream::Dd)
+    // The DD wheels are opened through libtrueforce, which does not hand
+    // back a sysfs path, so their rev display is still found by scanning.
+    // That is safe for them: `wheel_rev_level` is the DD surface, and a
+    // G923 does not expose it.
+    TfStream::open(0).map(|s| (WheelStream::Dd(s), None))
 }
 
 /// A live wheel stream plus the state that feeds it.
@@ -264,13 +290,17 @@ pub fn run(cfg: &Config) -> Result<()> {
                         a.tel = tel;
                         a.last_telemetry = now;
                     }
-                    None if now >= next_open_attempt => match open_wheel_stream(cfg) {
-                        Ok(stream) => {
+                    None if now >= next_open_attempt => match open_wheel_stream_with_leds(cfg) {
+                        Ok((stream, led_owner)) => {
                             eprintln!(
                                 "logi-tf-sim: stream start ({id}, rpm {:.0}/{:.0}, speed {:.0} m/s)",
                                 tel.rpm, tel.max_rpm, tel.speed
                             );
-                            let leds = if cfg.leds { RevLeds::discover() } else { None };
+                            let leds = match (cfg.leds, led_owner.as_deref()) {
+                                (false, _) => None,
+                                (true, Some(owner)) => RevLeds::discover_for(owner),
+                                (true, None) => RevLeds::discover(),
+                            };
                             if leds.is_some() {
                                 eprintln!("logi-tf-sim: driving the wheel's rev display");
                             }

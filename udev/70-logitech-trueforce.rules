@@ -56,6 +56,22 @@ SUBSYSTEM=="input", KERNEL=="event*", \
   ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c262|c266|c267|c26d|c26e|c268|c272|c276", \
   GROUP="input", MODE="0660", TAG+="uaccess"
 
+# The G923's rev strip: five LED classdevs, `<hiddev>::RPM1`..`RPM5`.
+#
+# The DD wheels' rev display is the `wheel_rev_level` attribute handled
+# below, which this file already makes world-writable. The G923 has no such
+# attribute; its strip is five standard LED classdevs, and those come up
+# 0644 root:root with nothing granting a desktop user access. So every
+# rev-light write from logi-tf-sim failed silently on a G923 while the
+# daemon reported it was driving the display. Found on hardware 2026-08-06,
+# by the lights simply never coming on.
+#
+# Matched on the classdev name plus the parent wheel's USB ids, so this
+# cannot touch an unrelated device's LEDs.
+SUBSYSTEM=="leds", KERNEL=="*::RPM[1-5]", \
+  ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c262|c266|c267|c26d|c26e|c268|c272|c276", \
+  RUN+="/bin/sh -c 'f=/sys/class/leds/%k/brightness; [ -e \"$$f\" ] && chmod 0666 \"$$f\"'"
+
 SUBSYSTEM!="hidraw", GOTO="trueforce_end"
 
 # One alternation instead of a GOTO per PID: adding a wheel is a
