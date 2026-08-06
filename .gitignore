@@ -213,3 +213,11 @@ __pycache__/
 # cross compiler to build a Windows DLL with. Rebuild and commit it whenever
 # tools/tf-range-proxy.c changes: make -C tools
 tools/*.exe
+
+# ...with one exception. The relay is a Windows executable that runs inside
+# a game's Proton prefix, and NO distro builder can produce one: none of them
+# ship a Rust Windows target. So the built artifact is committed and
+# installed by every packaging channel, the same bargain tf-range-proxy.dll
+# makes. Refresh it with tools/build-relay.sh, never by hand; CI fails if it
+# falls behind its sources.
+!tools/logi-tf-relay.exe

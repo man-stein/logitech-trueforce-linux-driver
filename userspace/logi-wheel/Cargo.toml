@@ -7,3 +7,22 @@ edition = "2021"
 rust-version = "1.74"
 version = "0.29.0"
 license = "GPL-2.0"
+
+# The shipped build of logi-tf-relay.
+#
+# The relay is a Windows executable that no distro builder can produce (none
+# ship a Rust Windows target), so a prebuilt copy lives in `tools/` and is
+# installed by every packaging channel, exactly as `tf-range-proxy.dll` is.
+# A binary in git is a permanent cost per refresh, so it is built for size:
+# this profile takes it from 1.2 MB to under 300 KB, which is the difference
+# between a defensible artifact and a bad habit.
+#
+# Refresh it with `tools/build-relay.sh`, which uses this profile. CI checks
+# the committed copy is not older than the sources it was built from.
+[profile.relay-dist]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
