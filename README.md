@@ -194,14 +194,20 @@ GitHub does.
 Import the signing key, then add the repository:
 
 ```bash
-sudo pacman-key --recv-keys 4B5BDD7802723B289FA934CACD77C00A443B9E79 \
-  --keyserver keyserver.ubuntu.com
+curl -fsSL -O https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest/download/logitech-trueforce-signing-key.asc
+sudo pacman-key --add logitech-trueforce-signing-key.asc
 sudo pacman-key --lsign-key 4B5BDD7802723B289FA934CACD77C00A443B9E79
 ```
 
-The full fingerprint, not a short id: short ids can be collided, and this is
-the key your package manager will trust. It signs nothing but this
-repository's packages.
+Check the fingerprint printed by `--lsign-key` matches the one above before
+signing it. The full fingerprint rather than a short id, because short ids can
+be collided and this is a key you are telling your package manager to trust.
+It signs nothing but this repository's packages.
+
+The key is served from the release rather than a keyserver so that installing
+depends on nothing beyond GitHub. If you would rather use a keyserver,
+`sudo pacman-key --recv-keys 4B5BDD7802723B289FA934CACD77C00A443B9E79
+--keyserver keyserver.ubuntu.com` works once it has propagated.
 
 ```ini
 # /etc/pacman.conf, at the end

@@ -436,6 +436,13 @@ jobs:
           KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
           echo "signing with $KEYID"
 
+          # Publish the public half beside the packages. The README can
+          # then tell users to import it from the release rather than from a
+          # keyserver: keyservers are a third-party dependency that can be
+          # slow to propagate or simply down, which is the exact failure this
+          # whole repository exists to route around.
+          gpg --armor --export "$KEYID" > repo/logitech-trueforce-signing-key.asc
+
           cd repo
           for f in *.pkg.tar.*; do
             case "$f" in *.sig) continue;; esac
@@ -466,5 +473,6 @@ jobs:
             *.pkg.tar.zst *.pkg.tar.zst.sig \
             logitech-trueforce.db logitech-trueforce.db.sig \
             logitech-trueforce.files logitech-trueforce.files.sig \
+            logitech-trueforce-signing-key.asc \
             --clobber
 
