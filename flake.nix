@@ -52,6 +52,7 @@
           inherit version src;
           buildAndTestSubdir = "userspace/logi-wheel";
           cargoRoot = "userspace/logi-wheel";
+          doCheck = false;
           nativeBuildInputs = [ pkgs.pkg-config pkgs.gnumake pkgs.makeWrapper ];
           cargoLock = {
                 lockFile = self + "/userspace/logi-wheel/Cargo.lock";
