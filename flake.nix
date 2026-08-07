@@ -61,6 +61,13 @@
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.libxkbcommon pkgs.wayland ]
             ++ [ pkgs.libx11 pkgs.libxcursor pkgs.libxi pkgs.libxrandr ];
 
+          postInstall = ''
+                install -Dm644 desktop/logi-wheel-gui.desktop \
+                        $out/share/applications/logi-wheel-gui.desktop
+                install -Dm644 userspace/logi-wheel/crates/logi-wheel-gui/ui/assets/logo-mark.png \
+                        $out/share/pixmaps/logi-wheel-gui.png
+                '';
+
           postFixup = ''
             wrapProgram $out/bin/logi-wheel-gui \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
