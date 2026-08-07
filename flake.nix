@@ -39,7 +39,7 @@
           };
         };
     in
-    flake-utils.lib.eachDefaultSystem (system:
+    flake-utils.lib.eachSystem [ "x86_64-linux" ] (system:
       let
         pkgs = import nixpkgs { inherit system; };
 
@@ -52,7 +52,6 @@
           inherit version src;
           buildAndTestSubdir = "userspace/logi-wheel";
           cargoRoot = "userspace/logi-wheel";
-          doCheck = false;
           nativeBuildInputs = [ pkgs.pkg-config pkgs.gnumake pkgs.makeWrapper ];
           cargoLock = {
                 lockFile = self + "/userspace/logi-wheel/Cargo.lock";
@@ -133,6 +132,13 @@
           udev-rules = udevRules;
         };
 
+        checks = {
+                tests = logiWheel.overrideAttrs (old: {
+                doCheck = true;
+                checkFlags = [ "--skip" "setup_t_arms_consent_and_only_y_plays" ];
+                });
+        };
+
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.pkg-config pkgs.cargo pkgs.rustc pkgs.rust-analyzer ];
           buildInputs = [
@@ -146,6 +152,8 @@
           ];
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.libGL pkgs.vulkan-loader ];
         };
+
+        formatter = pkgs.nixpkgs-fmt;
       }
     ) // {
       nixosModules.default = { config, lib, pkgs, ... }:
