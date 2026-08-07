@@ -4558,6 +4558,20 @@ static int g920_get_config(struct hidpp_device *hidpp,
 #define HIDPP_FF_MAX_INIT_RETRIES	20
 #define HIDPP_FF_INIT_RETRY_MS		50
 
+/*
+ * A separate, slower cadence for the case where g920_get_config itself
+ * fails, rather than the sibling inputs not being ready.
+ *
+ * The two are different waits. Sibling inputs appear within a tick or two,
+ * so 50 ms suits them. A wheel whose HID++ is not answering yet is waiting
+ * on the device's own connect handshake, which the in-tree driver waits for
+ * explicitly before it touches force feedback; polling that every 50 ms
+ * just burns twenty attempts inside one second and gives up before the
+ * wheel is ready. 250 ms across the same attempt budget covers five
+ * seconds instead.
+ */
+#define HIDPP_FF_CONFIG_RETRY_MS	250
+
 static void hidpp_ff_retry_work(struct work_struct *work)
 {
 	struct hidpp_device *hidpp =
@@ -4568,6 +4582,21 @@ static void hidpp_ff_retry_work(struct work_struct *work)
 
 	ret = g920_get_config(hidpp, &data);
 	if (ret) {
+		/*
+		 * Keep waiting rather than giving up on the first failure.
+		 * On a G923 Xbox (c26e) this read fails at probe and then
+		 * succeeds once the wheel finishes its HID++ handshake, so
+		 * treating the first error as final is what left that wheel
+		 * with no force feedback at all while the in-tree driver,
+		 * which waits for the connect notification before going
+		 * near force feedback, drove it fine. Issues #27 and #52.
+		 */
+		if (hidpp->ff_retries++ < HIDPP_FF_MAX_INIT_RETRIES) {
+			queue_delayed_work(system_long_wq,
+					   &hidpp->ff_retry_work,
+					   msecs_to_jiffies(HIDPP_FF_CONFIG_RETRY_MS));
+			return;
+		}
 		hid_warn(hidpp->hid_dev,
 			 "FF retry %d: g920_get_config failed: %d (giving up)\n",
 			 hidpp->ff_retries, ret);
@@ -16154,9 +16183,22 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 				 * wheel: steering, buttons and pedals all work
 				 * from the input side alone. Keep the device.
 				 */
+				/*
+				 * Not the end of it: schedule the retry.
+				 * Previously nothing was scheduled here, so a
+				 * wheel whose HID++ was merely not ready yet
+				 * never got force feedback at all, however
+				 * briefly it would have had to wait. The
+				 * device is kept either way (see above), so
+				 * the worst case is the same wheel-without-FFB
+				 * this already produced.
+				 */
 				hid_warn(hidpp->hid_dev,
-					 "g920_get_config failed: errno %d (continuing without force feedback)\n",
+					 "g920_get_config failed: errno %d (retrying in background)\n",
 					 cfg_ret);
+				queue_delayed_work(system_long_wq,
+						   &hidpp->ff_retry_work,
+						   msecs_to_jiffies(HIDPP_FF_CONFIG_RETRY_MS));
 			} else {
 				hid_info(hidpp->hid_dev,
 					 "g920_get_config ok: num_effects=%d range=%u gain=0x%04x\n",
