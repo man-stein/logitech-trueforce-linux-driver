@@ -19,7 +19,7 @@ FULL := $(SONAME).3.11
 LIB  := libtrueforce.so
 STATIC := libtrueforce.a
 
-TESTS := tests/discover tests/init_session tests/sine tests/kf tests/angle tests/unit
+TESTS := tests/discover tests/init_session tests/sine tests/kf tests/angle tests/unit tests/motorlog
 
 .PHONY: all clean install udev-install tests check
 
@@ -56,6 +56,9 @@ tests/kf: tests/kf.c $(FULL)
 
 tests/angle: tests/angle.c $(FULL)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -L. -o $@ $< -ltrueforce -Wl,-rpath,'$$ORIGIN/..'
+
+tests/motorlog: tests/motorlog.c $(FULL)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -L. -o $@ $< -ltrueforce -lm -Wl,-rpath,'$$ORIGIN/..' 
 
 tests/unit: tests/unit.c $(FULL)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -L. -o $@ $< -ltrueforce -Wl,-rpath,'$$ORIGIN/..'

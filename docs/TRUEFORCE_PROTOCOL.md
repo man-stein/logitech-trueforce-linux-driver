@@ -234,7 +234,7 @@ type-`0x09` carrying floats `1.0` and `350.0`.
 byte[0-3]:   01 00 00 00           Report header
 byte[4]:     02                    Response type
 byte[5]:     sequence              Echoes command sequence
-byte[6-7]:   u16 LE                Motor current or temperature?
+byte[6-7]:   u16 LE                NOT current or temperature (see below)
 byte[8]:     0x03                  Status byte?
 byte[9-10]:  wheel_position (LE16) Matches joystick axis data
 byte[11-12]: wheel_position2       Slightly delayed (~1 sample behind)
@@ -243,6 +243,27 @@ byte[17]:    varying                Checksum-like
 byte[18-32]: status/counters
 byte[33-63]: zeros
 ```
+
+**Bytes 6-7 are not a motor load reading.** They were guessed to be current
+or temperature, which would have made them the only route this project has to
+answering "how hard is it safe to drive this motor". Tested on an RS50
+(2026-08-08) with `tests/motorlog`, which drives a known amplitude and then
+pushes exact silence while still sampling, because current collapses with the
+force and temperature decays over tens of seconds:
+
+- The value slides steadily downward at the same rate whether the wheel is
+  being driven hard or sitting silent, which neither hypothesis allows.
+- It wraps through zero to 0xFFFF and then goes flat exactly when the status
+  byte changes 3 -> 2, so it is tied to stream state rather than to load.
+- Across amplitudes 0.05, 0.30 and 0.60 its range overlaps almost completely
+  (min 1105 to max 62794 at the *lowest* amplitude), so per-amplitude
+  statistics are dominated by the wrapping.
+
+Counter-like, and still undecoded. What matters for anyone arriving with the
+same idea: there is currently **no known telemetry from these wheels that
+reports motor load, current or temperature**, so amplitude limits have to be
+argued from what the motor is commanded to do, not measured from what it
+reports.
 
 Responses arrive at the same cadence as the host's packet rate, giving real-time wheel-position feedback for synchronisation. libtrueforce's stream thread consumes them while a stream is active and exposes the latest snapshot via the Linux-native `logitf_get_stream_feedback()` API (wheel position, device counter, and the still-undecoded motor/status fields); the kernel driver ignores them.
 
