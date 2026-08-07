@@ -115,24 +115,34 @@ impl Default for Config {
         Config {
             enabled: true,
             intensity: DEFAULT_INTENSITY,
-            // 25 with the default four cylinders reproduces exactly what
-            // this daemon emitted before the firing rate was modelled:
-            // rpm/60 * (4/2) * 0.25 == rpm/120, the old rpm/60 * 0.5.
+            // 35, chosen on hardware rather than by arithmetic.
             //
-            // Deliberately not the physically correct 100. The old model
-            // was missing the cylinder term, but the value people settled
-            // on was chosen by feel on real hardware: at the old 100 the
-            // feel-test read as "an alarmingly fast engine" (2026-07-20),
-            // and correcting the maths does not retroactively make that
-            // observation wrong. Changing the default would silently alter
-            // the feel for every existing user on the strength of theory.
+            // This read 25 for a long time, which reproduced exactly what
+            // the daemon emitted before the firing rate was modelled
+            // (rpm/60 * 4/2 * 0.25 == the old rpm/60 * 0.5). That was the
+            // right way to correct the maths without changing anyone's
+            // feel, and the note here said moving it wanted a hardware
+            // feel-test rather than theory. That test has now happened
+            // (RS50, 2026-08-07) and it says 25 is the wrong end of the
+            // range:
             //
-            // What the fix buys immediately is that pitch now means the
-            // same thing on every engine: a V8 and a four at the same
-            // setting are correct relative to each other, which they were
-            // not before. Whether the honest default should move toward
-            // 100 wants a hardware feel-test, not arithmetic.
-            pitch_pct: 25,
+            // - By feel: 25 was reported jerky, 40 noticeably smoother.
+            // - By measurement: sampling the steering axis through a sweep,
+            //   25 moved the wheel 854 degrees and as far as 377 off
+            //   centre, 40 moved it 552, and 60 through 100 settled around
+            //   410. Lower pitch means a lower note, and a direct-drive
+            //   wheel can physically follow a lower note further per half
+            //   cycle, so the texture starts becoming steering input.
+            //
+            // 35 rather than 40 or higher because the wheel is only half
+            // the audience: the note also has to sound like an engine, and
+            // pitch above the firing rate makes a four sound like something
+            // it is not. 35 takes most of the smoothness while staying
+            // nearer the physically honest end.
+            //
+            // Existing users who have saved a config are unaffected: this
+            // is the value for a config that does not set one.
+            pitch_pct: 35,
             cylinders: crate::synth::DEFAULT_CYLINDERS,
             effects: true,
             effect_gains: crate::effects::EffectGains::default(),

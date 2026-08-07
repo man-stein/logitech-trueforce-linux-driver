@@ -272,12 +272,14 @@ mod tests {
     }
 
     #[test]
-    fn the_default_config_emits_exactly_what_it_did_before_the_fix() {
+    fn pitch_25_still_reproduces_the_model_that_predated_the_firing_rate() {
         // The old model was rpm/60 * pitch with pitch defaulting to 0.5.
-        // The new one is rpm/60 * cyl/2 * pitch with cyl 4 and pitch 0.25.
-        // These must agree: the maths was corrected without changing what
-        // anyone feels, because the old default was chosen by feel on real
-        // hardware and correcting the model does not invalidate that.
+        // The new one is rpm/60 * cyl/2 * pitch, so cyl 4 and pitch 0.25
+        // must agree with it. This was the default for as long as the goal
+        // was correcting the maths without changing anyone's feel; the
+        // default has since moved to 35 on hardware evidence, but the
+        // equivalence is what proves the model change itself was neutral,
+        // so it is still worth asserting at the value it held for.
         for rpm in [800.0f32, 3000.0, 7500.0] {
             let old = rpm / 60.0 * 0.5;
             let new = firing_frequency(rpm, DEFAULT_CYLINDERS, 0.25);
