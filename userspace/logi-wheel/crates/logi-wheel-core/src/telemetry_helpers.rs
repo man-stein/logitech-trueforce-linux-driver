@@ -36,6 +36,20 @@ pub const SHARED_DIR: &str = "/usr/share/logitech-trueforce";
 /// The same, for a `/usr/local` install.
 const SHARED_DIR_LOCAL: &str = "/usr/local/share/logitech-trueforce";
 
+/// The shared directory relative to the running executable's own `bin`
+/// directory, i.e. `<prefix>/share/logitech-trueforce` for a binary at
+/// `<prefix>/bin/…`.
+///
+/// This is what makes the lookup work on a distribution that does not put
+/// anything at `/usr`. On NixOS a package lives at
+/// `/nix/store/<hash>-logi-wheel/{bin,share}`, so the absolute paths above
+/// match nothing and the app would report the helpers missing on a machine
+/// where its own package had just installed them. Deriving the prefix from
+/// the executable is the ordinary relocatable-install answer and costs
+/// nothing on a normal FHS system, where it resolves to the same
+/// `/usr/share` the constant already names.
+const SHARED_SUBDIR: &str = "share/logitech-trueforce";
+
 /// Where the relay is placed inside a game's wine prefix.
 ///
 /// The drive root, so the in-prefix path is `C:\logi-tf-relay.exe`: short,
@@ -96,6 +110,13 @@ pub fn needs_scs_plugin(game_id: &str) -> bool {
 fn resolve(name: &str, repo_rel: &str, roots: &[&Path], exe: Option<&Path>) -> Option<PathBuf> {
     for root in roots {
         let candidate = root.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    // `<prefix>/bin/<exe>` -> `<prefix>/share/logitech-trueforce/<name>`.
+    if let Some(prefix) = exe.and_then(Path::parent).and_then(Path::parent) {
+        let candidate = prefix.join(SHARED_SUBDIR).join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -257,6 +278,24 @@ mod tests {
 
         touch(&root.join("repo").join(REPO_SCS), "plugin");
         assert!(resolve_scs(&[missing.as_path()], Some(&exe)).is_some());
+    }
+
+    /// A package that installs to its own prefix rather than to `/usr` must
+    /// still be found. NixOS is the case that forced this: its store paths
+    /// match none of the absolute roots, so without it the app reported the
+    /// helpers missing on a machine whose own package had just installed
+    /// them.
+    #[test]
+    fn a_helper_beside_the_executables_own_prefix_is_found() {
+        let root = tempdir();
+        let prefix = root.join("nix/store/abc123-logi-wheel");
+        let exe = prefix.join("bin/logi-wheel-gui");
+        touch(&exe, "");
+        touch(&prefix.join(SHARED_SUBDIR).join(RELAY_BIN), "packaged-in-prefix");
+
+        let nowhere = root.join("nope");
+        let found = resolve_relay(&[nowhere.as_path()], Some(&exe)).expect("found beside the exe");
+        assert_eq!(fs::read_to_string(found).unwrap(), "packaged-in-prefix");
     }
 
     #[test]
