@@ -8,7 +8,7 @@
 
   outputs = { self, nixpkgs, flake-utils }:
       let
-        version = "0.28.0";
+        version = (builtins.fromTOML (builtins.readFile (self + "/userspace/logi-wheel/Cargo.toml"))).workspace.package.version; 
 
         logitechTrueforceModuleFor = pkgs: { kernel, debug ? false }:
         let
@@ -54,7 +54,9 @@
           cargoRoot = "userspace/logi-wheel";
           doCheck = false;
           nativeBuildInputs = [ pkgs.pkg-config pkgs.gnumake pkgs.makeWrapper ];
-          cargoHash = "sha256-p7EmluFjHrSC9une2qdq3sKkpNbIWdtOnx3ndLpblFs=";
+          cargoLock = {
+                lockFile = self + "/userspace/logi-wheel/Cargo.lock";
+                };
 
           buildInputs = [ pkgs.fontconfig ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.libxkbcommon pkgs.wayland ]
