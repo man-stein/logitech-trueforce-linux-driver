@@ -67,9 +67,45 @@
                         $out/share/applications/logi-wheel-gui.desktop
                 install -Dm644 userspace/logi-wheel/crates/logi-wheel-gui/ui/assets/logo-mark.png \
                         $out/share/pixmaps/logi-wheel-gui.png
+
+                # The pieces a game loads rather than the user running, which
+                # every other packaging channel installs here (see
+                # packaging/debian/rules). Without them the Setup page's
+                # "Install TrueForce" and "Install relay" buttons find
+                # nothing to copy, and the truck sims and every shared-memory
+                # sim stay silent, so leaving them out makes the install
+                # quietly incomplete rather than obviously broken.
+                #
+                # The relay is a prebuilt Windows executable: it runs inside
+                # a game's Proton prefix, and no Linux toolchain here can
+                # produce one. The proxy DLL is prebuilt for the same reason.
+                install -Dm644 tools/tf-range-proxy.dll \
+                        $out/share/logitech-trueforce/tf-range-proxy.dll
+                install -Dm644 tools/logi-tf-relay.exe \
+                        $out/share/logitech-trueforce/logi-tf-relay.exe
+                # Built from this workspace as a cdylib, so it is already in
+                # $out/lib; the games load it by path from share/.
+                install -Dm644 $out/lib/liblogi_tf_scs.so \
+                        $out/share/logitech-trueforce/liblogi_tf_scs.so
+
+                # The TrueForce shim installer, under the name the app looks
+                # for first (logi_wheel_core::helpers::INSTALLER_BINS).
+                install -Dm755 tools/install-tf-shim.sh $out/bin/logi-shim
                 '';
 
           postFixup = ''
+            # install-tf-shim.sh is a bash script that shells out; give it
+            # its tools rather than relying on the user's PATH.
+            patchShebangs $out/bin/logi-shim
+            wrapProgram $out/bin/logi-shim \
+              --prefix PATH : ${pkgs.lib.makeBinPath [
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnused
+                pkgs.gnugrep
+                pkgs.gawk
+              ]}
+
             wrapProgram $out/bin/logi-wheel-gui \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
                 pkgs.wayland
@@ -87,7 +123,9 @@
           meta = with pkgs.lib; {
             description = "Userspace CLI/TUI/GUI tools for the Logitech TrueForce driver";
             homepage = "https://github.com/mescon/logitech-trueforce-linux-driver";
-            license = licenses.gpl2Only;
+            # Mixed by design: the Slint GUI is GPL-3.0-or-later, everything
+            # else in the workspace is GPL-2.0-only.
+            license = [ licenses.gpl2Only licenses.gpl3Plus ];
             platforms = platforms.linux;
             mainProgram = "logi-wheel";
           };

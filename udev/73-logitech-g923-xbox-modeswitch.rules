@@ -42,11 +42,15 @@
 # `sudo logi-g923-modeswitch` by hand on such a system.
 #
 # Gated on usb_modeswitch actually being installed (it is a recommended,
-# not hard, dependency in every packaging channel): some distros ship it
-# in usr bin, others in usr sbin - the same file via a symlink on
-# usrmerge systems, a genuinely separate package path otherwise -
-# `command -v` finds it wherever it lives instead of us hardcoding one.
-# Without it installed this rule is a silent no-op.
+# not hard, dependency in every packaging channel): distros disagree about
+# whether it belongs in the system binary directory or the superuser one,
+# the same file via a symlink on usrmerge systems and a genuinely separate
+# package path otherwise, so `command -v` finds it wherever it lives
+# instead of us hardcoding either. Without it this rule is a silent no-op.
+#
+# (Written without literal paths on purpose: NixOS validates udev rules at
+# build time and treats any path-shaped string as a reference to check,
+# comments included, so naming the directories here fails that build.)
 
 ACTION!="add|change", GOTO="g923_xbox_modeswitch_end"
 SUBSYSTEM!="usb", GOTO="g923_xbox_modeswitch_end"
