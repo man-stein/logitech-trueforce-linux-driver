@@ -84,10 +84,10 @@
                 install -Dm644 tools/logi-tf-relay.exe \
                         $out/share/logitech-trueforce/logi-tf-relay.exe
                 # Built from this workspace as a cdylib, so it is already in
-                # $out/lib; the games load it by path from share/.
-                install -Dm644 $out/lib/liblogi_tf_scs.so \
+                # $out/lib; the games load it by path from share/. Symlinked
+                # rather than copied to avoid duplicating.
+                ln -s $out/lib/liblogi_tf_scs.so \
                         $out/share/logitech-trueforce/liblogi_tf_scs.so
-
                 # The TrueForce shim installer, under the name the app looks
                 # for first (logi_wheel_core::helpers::INSTALLER_BINS).
                 install -Dm755 tools/install-tf-shim.sh $out/bin/logi-shim
