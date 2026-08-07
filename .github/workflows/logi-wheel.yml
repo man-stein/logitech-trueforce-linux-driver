@@ -1,5 +1,10 @@
 name: logi-wheel
 on:
+  # Manually runnable. GitHub does not retroactively run workflows for
+  # pushes made while Actions was down, so after the outage of 2026-08-06
+  # there was no way to get CI onto the current commit except an empty
+  # commit purely to trigger it. This is that way.
+  workflow_dispatch:
   push:
     paths: ["userspace/logi-wheel/**", ".github/workflows/logi-wheel.yml"]
   pull_request:
