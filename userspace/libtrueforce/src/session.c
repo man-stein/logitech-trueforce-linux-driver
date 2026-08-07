@@ -5,8 +5,8 @@
  * On first use, opens /dev/hidrawN for the wheel's interface 2 and
  * sends the canonical Trueforce init sequence extracted from
  * captures of a BeamNG session on Windows G HUB (issue #5). The
- * 68-packet sequence sets up parameters (type 0x05), frequency
- * (type 0x0e), a handshake (type 0x07), six slot configs (type
+ * 68-packet sequence sets up parameters (type 0x05), the operating
+ * range (type 0x0e), a handshake (type 0x07), six slot configs (type
  * 0x06), runtime state (type 0x09), and a start/stop pair to arm
  * streaming (types 0x03 / 0x04).
  *
@@ -49,6 +49,57 @@ static int write_all(int fd, const void *buf, size_t len)
 	return 0;
 }
 
+/* Packet type byte, and the payload of a type-0x0e packet. */
+#define TF_INIT_TYPE_OFFSET   4
+#define TF_INIT_TYPE_RANGE    0x0e
+#define TF_INIT_RANGE_OFFSET  6
+
+/*
+ * Rewrite the operating range a type-0x0e packet carries.
+ *
+ * The captured sequence pushes 2700 degrees, because that is what the
+ * wheel happened to be set to when G HUB was recorded. Replayed
+ * verbatim it silently overwrites whatever range the user configured,
+ * and the wheel sweeps to apply it: this is the same type-0x0e push
+ * identified as the cause of the 90-degree range resets, arriving from
+ * our own init rather than from a game. The init runs twice per
+ * session, so it lands twice.
+ *
+ * Faithful replay is right for the parts of this sequence nobody has
+ * decoded, but a packet carrying user state has to carry the user's
+ * state. Rewriting keeps the sequence's shape and length identical and
+ * makes the push a no-op.
+ *
+ * Left untouched when the range cannot be read, which is no worse than
+ * before: the kernel's wheel_range_restore still heals it.
+ */
+static void patch_range_packet(struct logitf_device *dev, uint8_t *pkt)
+{
+	uint32_t bits;
+	float deg;
+	int v;
+
+	if (pkt[TF_INIT_TYPE_OFFSET] != TF_INIT_TYPE_RANGE)
+		return;
+	/* Same attribute pair logiWheelGetOperatingRangeDegrees() reads:
+	 * the DD wheels expose wheel_range, the G923 calls it range. */
+	if (logitf_sysfs_read_int(dev, "wheel_range", &v) != 0 &&
+	    logitf_sysfs_read_int(dev, "range", &v) != 0)
+		return;
+	if (v <= 0 || v > 2700)
+		return;
+
+	/* IEEE754 single, little-endian on the wire. Written byte by byte
+	 * rather than memcpy'd so the encoding does not depend on the
+	 * host's byte order. */
+	deg = (float)v;
+	memcpy(&bits, &deg, sizeof(bits));
+	pkt[TF_INIT_RANGE_OFFSET + 0] = (uint8_t)(bits);
+	pkt[TF_INIT_RANGE_OFFSET + 1] = (uint8_t)(bits >> 8);
+	pkt[TF_INIT_RANGE_OFFSET + 2] = (uint8_t)(bits >> 16);
+	pkt[TF_INIT_RANGE_OFFSET + 3] = (uint8_t)(bits >> 24);
+}
+
 /*
  * Send one init packet with the session-local sequence counter
  * written into offset 5. Returns 0 on success, negative errno-like
@@ -60,6 +111,7 @@ static int send_init_packet(struct logitf_device *dev, size_t i, uint8_t seq)
 
 	memcpy(pkt, tf_init_packets[i], TF_INIT_PACKET_LEN);
 	pkt[TF_INIT_SEQ_OFFSET] = seq;
+	patch_range_packet(dev, pkt);
 	return write_all(dev->hidraw_fd, pkt, TF_INIT_PACKET_LEN);
 }
 

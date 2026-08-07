@@ -102,6 +102,15 @@ pub(crate) fn open_wheel_stream(cfg: &Config) -> Result<WheelStream> {
 /// correlates the TrueForce interface with its interface-0 sibling to find
 /// `ffb_output`. That sibling is the device carrying the rev LEDs.
 pub(crate) fn open_wheel_stream_with_leds(cfg: &Config) -> Result<(WheelStream, Option<String>)> {
+    // A G923 is preferred whenever one is present, which is right for the
+    // overwhelmingly common case of a single wheel and wrong for a rig with
+    // both: the direct-drive wheel becomes unreachable, because nothing
+    // below is ever consulted. LOGI_TF_SIM_WHEEL=dd forces the DD path so
+    // that rig can still be driven and measured.
+    let forced = std::env::var("LOGI_TF_SIM_WHEEL").unwrap_or_default();
+    if forced.eq_ignore_ascii_case("dd") {
+        return TfStream::open(0).map(|s| (WheelStream::Dd(s), None));
+    }
     if let Some(paths) = g923::discover() {
         let led_owner = paths
             .ffb_output

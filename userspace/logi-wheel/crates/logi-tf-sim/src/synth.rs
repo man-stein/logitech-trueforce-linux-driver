@@ -23,8 +23,6 @@ pub const SAMPLES_PER_PACKET: usize = 4;
 
 /// Relative gains for the fundamental and the 2x / 3x harmonics.
 const HARMONIC_GAINS: [f32; 3] = [1.0, 0.5, 0.25];
-/// Sum of [`HARMONIC_GAINS`]; normalizes the mix so |sample| <= amplitude.
-const GAIN_NORM: f32 = 1.75;
 
 /// Cylinder count assumed when a game or car tells us nothing. A modern
 /// four is the commonest thing anyone drives, and it is the value the old
@@ -50,6 +48,35 @@ pub const DEFAULT_CYLINDERS: u8 = 4;
 pub fn firing_frequency(rpm: f32, cylinders: u8, pitch_scale: f32) -> f32 {
     let cyl = cylinders.max(1) as f32;
     (rpm.max(0.0) / 60.0 * (cyl / 2.0) * pitch_scale.clamp(0.1, 2.0)).min(SAMPLE_RATE_HZ * 0.45)
+}
+
+/// RMS-to-peak scale that reproduces the level the fixed normaliser gave
+/// when all of [`HARMONIC_GAINS`] are present: `sqrt(sum g^2) / sum g`.
+/// Applying it after RMS normalisation keeps the peak within `amplitude`
+/// and leaves the default configuration emitting exactly what it did
+/// before band-limiting existed.
+const FULL_MIX_LEVEL: f32 = 0.654_653_7;
+
+/// Nyquist for the 1 kHz sample stream.
+const NYQUIST_HZ: f32 = SAMPLE_RATE_HZ / 2.0;
+/// Where a harmonic starts fading out. Below this it is passed at full
+/// gain; between here and Nyquist it fades to nothing, so a partial
+/// crossing the limit does so smoothly instead of switching off mid-note.
+const ROLLOFF_START_HZ: f32 = NYQUIST_HZ * 0.8;
+
+/// Gain multiplier (1.0 .. 0.0) for a partial at `hz`.
+///
+/// Anything at or above Nyquist is silenced: it cannot be represented at
+/// [`SAMPLE_RATE_HZ`] and would alias to `|hz - SAMPLE_RATE_HZ|`, an
+/// inharmonic tone unrelated to the engine.
+pub fn harmonic_rolloff(hz: f32) -> f32 {
+    if hz <= ROLLOFF_START_HZ {
+        1.0
+    } else if hz >= NYQUIST_HZ {
+        0.0
+    } else {
+        (NYQUIST_HZ - hz) / (NYQUIST_HZ - ROLLOFF_START_HZ)
+    }
 }
 
 /// Amplitude at closed throttle (the engine is still running).
@@ -109,15 +136,38 @@ impl EngineSynth {
         let amplitude = (IDLE_FLOOR + THROTTLE_GAIN * throttle) * intensity;
         let step = freq / SAMPLE_RATE_HZ;
 
+        // Band-limit before synthesising, not after. Each harmonic is
+        // faded out as it nears Nyquist, because a partial above it does
+        // not simply vanish: it folds back down as an inharmonic tone. At
+        // pitch 1.0 the third harmonic crosses Nyquist at 5000 rpm and
+        // lands on top of the fundamental, which is felt as a buzz rather
+        // than an engine (hardware, RS50, 2026-08-07).
+        //
+        // Renormalised to constant RMS, so losing a partial thins the
+        // timbre without changing how hard the wheel is driven.
+        //
+        // Normalising by the sum of gains instead (which is what bounds
+        // the peak) does not do this: a lone sine reaches its bound where
+        // a three-harmonic mix does not, so the note would grow ~50%
+        // stronger in RMS exactly as the engine climbs into the region
+        // where partials start dropping.
+        let mut gains = [0.0f32; HARMONIC_GAINS.len()];
+        let mut sumsq = 0.0f32;
+        for (k, gain) in HARMONIC_GAINS.iter().enumerate() {
+            gains[k] = gain * harmonic_rolloff(freq * (k + 1) as f32);
+            sumsq += gains[k] * gains[k];
+        }
+        let norm = sumsq.sqrt() / FULL_MIX_LEVEL;
+
         out.reserve(count);
         for _ in 0..count {
-            let sample = if amplitude > 0.0 && freq > 0.0 {
+            let sample = if amplitude > 0.0 && freq > 0.0 && norm > 0.0 {
                 let mut acc = 0.0f32;
-                for (k, gain) in HARMONIC_GAINS.iter().enumerate() {
+                for (k, gain) in gains.iter().enumerate() {
                     let harmonic = (k + 1) as f32;
                     acc += gain * (std::f32::consts::TAU * harmonic * self.phase).sin();
                 }
-                acc / GAIN_NORM * amplitude
+                acc / norm * amplitude
             } else {
                 0.0
             };
@@ -252,8 +302,76 @@ mod tests {
         assert_eq!(firing_frequency(-1.0, 4, 1.0), 0.0, "negative rpm reads as stopped");
         assert_eq!(firing_frequency(6000.0, 0, 1.0), firing_frequency(6000.0, 1, 1.0),
                    "zero cylinders is treated as one rather than silencing the engine");
-        // Never above Nyquist for the 1 kHz stream.
+        // The FUNDAMENTAL is bounded here. That is not the same as the
+        // signal being below Nyquist, which is what this test used to
+        // claim while only ever checking this line: the synth adds two
+        // more harmonics on top, so the bandwidth is 3x this. The real
+        // property is asserted in no_partial_survives_above_nyquist().
         assert!(firing_frequency(20000.0, 16, 2.0) <= SAMPLE_RATE_HZ * 0.45);
+    }
+
+    #[test]
+    fn no_partial_survives_above_nyquist() {
+        // Every harmonic the synth can emit, across the whole input
+        // space, must be silent at or above Nyquist. A partial above it
+        // folds down to |f - 1000| Hz and is felt as an inharmonic buzz
+        // rather than an engine.
+        for rpm in [1000.0f32, 5000.0, 7500.0, 12000.0, 20000.0] {
+            for cyl in [1u8, 4, 6, 8, 16] {
+                for pitch in [0.1f32, 0.25, 0.4, 0.8, 1.0, 2.0] {
+                    let f0 = firing_frequency(rpm, cyl, pitch);
+                    for k in 0..HARMONIC_GAINS.len() {
+                        let hz = f0 * (k + 1) as f32;
+                        if hz >= NYQUIST_HZ {
+                            assert_eq!(
+                                harmonic_rolloff(hz),
+                                0.0,
+                                "harmonic {} at {hz} Hz (rpm {rpm}, {cyl} cyl, pitch {pitch}) \
+                                 would alias to {} Hz",
+                                k + 1,
+                                (hz - SAMPLE_RATE_HZ).abs(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rolloff_is_a_smooth_fade_not_a_cliff() {
+        assert_eq!(harmonic_rolloff(0.0), 1.0);
+        assert_eq!(harmonic_rolloff(ROLLOFF_START_HZ), 1.0, "full gain up to the fade point");
+        assert_eq!(harmonic_rolloff(NYQUIST_HZ), 0.0, "silent at Nyquist");
+        assert_eq!(harmonic_rolloff(NYQUIST_HZ + 100.0), 0.0, "and above it");
+        let mid = harmonic_rolloff((ROLLOFF_START_HZ + NYQUIST_HZ) / 2.0);
+        assert!((mid - 0.5).abs() < 1e-6, "halfway through the fade, got {mid}");
+        // Monotonically decreasing: no step that would click.
+        let mut prev = 1.0;
+        for i in 0..=100 {
+            let hz = ROLLOFF_START_HZ + (NYQUIST_HZ - ROLLOFF_START_HZ) * (i as f32 / 100.0);
+            let g = harmonic_rolloff(hz);
+            assert!(g <= prev + 1e-6, "gain rose at {hz} Hz");
+            prev = g;
+        }
+    }
+
+    #[test]
+    fn band_limiting_holds_the_force_level_as_partials_drop_out() {
+        // Thinning the timbre must not also quieten the wheel: the
+        // renormalisation is what keeps amplitude constant, and losing it
+        // would read as the engine fading out at high rpm.
+        let mut quiet = EngineSynth::new();
+        let mut loud = EngineSynth::new();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        // 3000 rpm: nothing is faded. 7500 at pitch 1.0: the third
+        // harmonic is gone entirely.
+        quiet.generate(&EngineNote { rpm: 3000.0, throttle: 1.0, cylinders: 4, pitch_scale: 1.0 }, 1.0, 2000, &mut a);
+        loud.generate(&EngineNote { rpm: 7500.0, throttle: 1.0, cylinders: 4, pitch_scale: 1.0 }, 1.0, 2000, &mut b);
+        let peak = |v: &[f32]| v.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        let (pa, pb) = (peak(&a), peak(&b));
+        assert!((pa - pb).abs() < 0.2, "peak force moved from {pa} to {pb} when a partial dropped");
     }
 
     #[test]

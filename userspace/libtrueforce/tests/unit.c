@@ -15,8 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <string.h>
+
 #include <trueforce.h>
 #include "internal.h"
+#include "tf_init_data.h"
 
 #define EXPECT_EQ(label, got, want)					\
 	do {								\
@@ -56,6 +59,38 @@ static int test_s16_to_wire(void)
 	EXPECT_EQ("s16:neg_one",   logitf_s16_to_wire(-1),      0x7FFF);
 	EXPECT_EQ("s16:half_pos",  logitf_s16_to_wire(16384),   0xC000);
 	EXPECT_EQ("s16:half_neg",  logitf_s16_to_wire(-16384),  0x4000);
+	return 0;
+}
+
+/*
+ * The captured init sequence pushes an operating range, and it must stay
+ * findable: session.c rewrites it at send time so the replay stops
+ * overwriting the user's configured range. If the table is ever
+ * regenerated from a new capture, this fails rather than silently
+ * reintroducing a range push nobody is patching.
+ */
+static int test_init_carries_exactly_one_range_push(void)
+{
+	unsigned found = 0;
+	size_t i;
+
+	for (i = 0; i < TF_INIT_PACKET_COUNT; i++) {
+		uint32_t bits;
+		float deg;
+
+		if (tf_init_packets[i][4] != 0x0e)
+			continue;
+		found++;
+		bits = (uint32_t)tf_init_packets[i][6]
+		     | ((uint32_t)tf_init_packets[i][7] << 8)
+		     | ((uint32_t)tf_init_packets[i][8] << 16)
+		     | ((uint32_t)tf_init_packets[i][9] << 24);
+		memcpy(&deg, &bits, sizeof(deg));
+		/* 2700 degrees: what the recorded wheel was set to, and the
+		 * value that was resetting everyone else's range. */
+		EXPECT_NEAR("init:range_degrees", (int)deg, 2700, 0);
+	}
+	EXPECT_EQ("init:range_packet_count", found, 1);
 	return 0;
 }
 
@@ -114,6 +149,7 @@ int main(void)
 		{ "s16_to_wire",      test_s16_to_wire },
 		{ "float_to_wire",    test_float_to_wire },
 		{ "wire_monotonic",   test_wire_monotonic },
+		{ "init_range_push",  test_init_carries_exactly_one_range_push },
 	};
 	size_t i;
 
