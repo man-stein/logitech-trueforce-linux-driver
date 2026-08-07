@@ -307,6 +307,131 @@ pub fn query_g923_firmware(if0_dir: &Path) -> Option<String> {
     query_main_firmware(&mut io)
 }
 
+/// HID++ feature pages worth asking a wheel about, with what each one is
+/// for. Mirrors the `HIDPP_DD_PAGE_*` constants in the kernel driver.
+///
+/// The list exists because a wheel's capabilities are otherwise discovered
+/// one bug report at a time. The G923 Xbox edition takes the G920 code path,
+/// which never runs the direct-drive feature discovery, so nothing in this
+/// project has ever asked that wheel what it supports. See issue #27.
+pub const KNOWN_FEATURES: &[(u16, &str)] = &[
+    (0x8040, "LED brightness control"),
+    (0x807A, "LIGHTSYNC LED effects (rev lights)"),
+    (0x807B, "RGB zone config"),
+    (0x80A4, "Response curves"),
+    (0x80D0, "Profile-change notification"),
+    (0x8123, "Force feedback (G920 family)"),
+    (0x8133, "Damping"),
+    (0x8134, "Brake force threshold"),
+    (0x8136, "FFB strength"),
+    (0x8137, "Profile switching"),
+    (0x8138, "Rotation range"),
+    (0x8139, "TrueForce"),
+    (0x8140, "FFB filter"),
+    (0x1BC0, "Sync/prepare"),
+];
+
+/// Ask a wheel which of [`KNOWN_FEATURES`] it implements.
+///
+/// Returns one row per feature: its id, its description, and the index the
+/// device assigned it, or `None` when the device does not implement it.
+/// `if0_dir` is the interface-0 HID device directory, the same input
+/// [`query_g923_firmware`] takes.
+///
+/// This is the only way to find out what a wheel supports without owning
+/// one. Every query is a `Root.getFeature` read, the same transaction the
+/// firmware query already performs on this wheel family, so it changes
+/// nothing on the device.
+pub fn probe_features(if0_dir: &Path) -> Option<Vec<(u16, &'static str, Option<u8>)>> {
+    let node = find_hidpp_sibling(if0_dir)?;
+    let mut io = RealHidppIo::open(&node).ok()?;
+    Some(
+        KNOWN_FEATURES
+            .iter()
+            .map(|(id, what)| (*id, *what, resolve_feature_index(&mut io, *id)))
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------
+// Rev-light probing
+//
+// Which command lights a wheel's rev strip is not something the feature map
+// answers. The PlayStation G923 implements 0x807A and yet its strip is
+// driven by the classic lg4ff command instead, so at least two dialects
+// exist on wheels that both "have LIGHTSYNC". The only reliable way to find
+// out which one a given wheel obeys is to send each and watch the rim.
+//
+// See issue #27: the Xbox G923 takes the G920 code path, which never runs
+// feature discovery, so nothing here had ever asked that wheel anything.
+// ---------------------------------------------------------------------
+
+/// G HUB's software id, kept verbatim from the captures the driver's
+/// rev-light code was written from.
+const REV_SW_ID: u8 = 0x0d;
+
+/// Build a HID++ long report (20 bytes) the same way [`short_report`]
+/// builds a short one.
+fn long_report(device_index: u8, feature_index: u8, function: u8, params: &[u8]) -> [u8; 20] {
+    let mut r = [0u8; 20];
+    r[0] = REPORT_ID_LONG;
+    r[1] = device_index;
+    r[2] = feature_index;
+    r[3] = function | REV_SW_ID;
+    for (i, p) in params.iter().take(16).enumerate() {
+        r[4 + i] = *p;
+    }
+    r
+}
+
+/// One short 0x807A send in the level-based dialect: `fn` in the high
+/// nibble, G HUB's software id in the low one.
+fn rev_short<T: HidppIo>(io: &mut T, idx: u8, function: u8, p0: u8) -> io::Result<()> {
+    let mut r = [0u8; 7];
+    r[0] = REPORT_ID_SHORT;
+    r[1] = 0xff;
+    r[2] = idx;
+    r[3] = (function << 4) | REV_SW_ID;
+    r[4] = p0;
+    io.write_report(&r)
+}
+
+/// Drive the rev strip through the **level-based 0x807A dialect**, the one
+/// a real G PRO rim speaks.
+///
+/// The arm burst (fn0, fn1, fn2, fn0, a few ms apart) is what makes the
+/// wheel accept levels at all; the level itself is a short fn2 followed by
+/// a long fn6 carrying `00 01 00 0a 00 LL`. Both sequences are taken from
+/// the kernel driver's `hidpp_dd_rev_send_level`, which was written from
+/// G HUB captures.
+pub fn rev_level_via_lightsync<T: HidppIo>(io: &mut T, idx: u8, level: u8) -> io::Result<()> {
+    for (function, p0) in [(0u8, 0u8), (1, 0), (2, 0), (0, 0)] {
+        rev_short(io, idx, function, p0)?;
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+    rev_short(io, idx, 2, 0)?;
+    let long = long_report(0xff, idx, 6, &[0x00, 0x01, 0x00, 0x0a, 0x00, level.min(10)]);
+    io.write_report(&long)
+}
+
+/// Drive the rev strip through the **classic lg4ff command**, the one the
+/// PlayStation G923 obeys.
+///
+/// `mask` is a bitmask of the five LED pairs, so `0x1f` is all of them.
+/// This is not a HID++ transaction at all: it is a plain 7-byte output
+/// report, and it goes to the wheel's joystick interface rather than its
+/// HID++ one.
+pub fn rev_mask_via_lg4ff<T: HidppIo>(io: &mut T, mask: u8) -> io::Result<()> {
+    io.write_report(&[0xf8, 0x12, mask & 0x1f, 0x00, 0x00, 0x00, 0x00])
+}
+
+/// Open the wheel's joystick-interface hidraw node, where the classic
+/// lg4ff command is sent. That is the interface carrying the gamepad
+/// descriptor, not the HID++ one [`find_hidpp_sibling`] returns.
+pub fn open_joystick_node(if0_dir: &Path) -> Option<RealHidppIo> {
+    RealHidppIo::open(&hidraw_node(if0_dir)?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

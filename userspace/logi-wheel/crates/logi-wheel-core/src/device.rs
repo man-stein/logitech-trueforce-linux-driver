@@ -487,6 +487,26 @@ impl<S: SysfsIo> Device<S> {
         crate::hidpp::query_g923_firmware(self.hid_dir.as_deref()?)
     }
 
+    /// Ask the wheel which HID++ features it implements.
+    ///
+    /// Unlike [`Device::classic_firmware`] this is not restricted by model:
+    /// the point is to find out what an unfamiliar wheel supports, and
+    /// restricting it to wheels we already understand would defeat that.
+    /// `None` when there is no HID++ sibling node or it cannot be opened.
+    ///
+    /// A round trip per feature, so this belongs in a one-shot diagnostic
+    /// rather than anywhere near a redraw.
+    pub fn hidpp_features(&self) -> Option<Vec<(u16, &'static str, Option<u8>)>> {
+        crate::hidpp::probe_features(self.hid_dir.as_deref()?)
+    }
+
+    /// The wheel's interface-0 HID directory, when discovery found one.
+    /// Needed by the rev-light probe, which talks to both that interface
+    /// and its HID++ sibling.
+    pub fn hid_dir(&self) -> Option<&std::path::Path> {
+        self.hid_dir.as_deref()
+    }
+
     pub fn read(&self, attr: &str) -> Result<Value, Error> {
         let spec = Self::spec(attr).ok_or(Error::Invalid)?;
         // Action attributes are write-only triggers; reading the sysfs file

@@ -30,6 +30,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // A one-shot diagnostic, not part of the app. It exists because a
+    // wheel's capabilities are otherwise learned one bug report at a time:
+    // the G923 Xbox edition takes the G920 code path, which never runs the
+    // direct-drive feature discovery, so nothing here had ever asked that
+    // wheel what it supports (issue #27).
+    if std::env::args().any(|a| a == "--hidpp-features") {
+        return hidpp_features();
+    }
+    if std::env::args().any(|a| a == "--led-probe") {
+        return led_probe();
+    }
+
     // No wheel is not fatal: start the shell anyway (red header note,
     // Setup fully usable, the Info monitor's empty state) with a
     // placeholder device that reads as absent; `r` retries discovery.
@@ -147,4 +159,127 @@ fn run(mut app: App<RealSysfs>) -> Result<(), Box<dyn std::error::Error>> {
     let _ = execute!(term.backend_mut(), LeaveAlternateScreen);
     let _ = term.show_cursor();
     res
+}
+
+/// Print which HID++ features the attached wheel implements.
+///
+/// Every line is a `Root.getFeature` read, the same transaction the Info
+/// page already makes, so nothing on the wheel is changed. Needs read/write
+/// access to the wheel's HID++ hidraw node, which this project's udev rules
+/// grant; without them, run it with sudo.
+fn hidpp_features() -> Result<(), Box<dyn std::error::Error>> {
+    let device = Device::discover()?;
+    println!("wheel: {:?}", device.model());
+    match device.hidpp_features() {
+        None => {
+            println!();
+            println!("No HID++ interface could be opened.");
+            println!("Either this wheel has none, or the node is not readable:");
+            println!("try again with sudo, or check the udev rules are installed.");
+        }
+        Some(rows) => {
+            println!();
+            for (id, what, index) in rows {
+                match index {
+                    Some(i) => println!("  0x{id:04X}  index 0x{i:02X}  {what}"),
+                    None => println!("  0x{id:04X}  -           {what}"),
+                }
+            }
+            println!();
+            println!("A feature with an index is implemented by the wheel.");
+        }
+    }
+    Ok(())
+}
+
+/// Try each known way of driving a wheel's rev strip, one at a time, and
+/// let the person watching say which one worked.
+///
+/// Written because the feature map cannot answer this. The PlayStation G923
+/// implements 0x807A and yet obeys the classic lg4ff command instead, so
+/// "has LIGHTSYNC" does not imply "lights up when spoken to that way". On a
+/// wheel nobody here owns, watching the rim is the only reliable evidence.
+///
+/// This WRITES to the wheel, unlike `--hidpp-features`. It only ever sends
+/// LED commands: nothing here produces force, and every test turns the
+/// lights off again afterwards.
+fn led_probe() -> Result<(), Box<dyn std::error::Error>> {
+    use logi_wheel_core::hidpp;
+    use std::io::Write;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let device = Device::discover()?;
+    let Some(if0) = device.hid_dir() else {
+        println!("No wheel found.");
+        return Ok(());
+    };
+    println!("wheel: {:?}", device.model());
+    println!();
+    println!("Each test lights the rev strip for 4 seconds, then turns it off.");
+    println!("Watch the wheel. Note which test number lights it, if any.");
+    println!("Nothing here produces force feedback.");
+    println!();
+
+    let hold = Duration::from_secs(4);
+    let mut worked: Vec<&str> = Vec::new();
+
+    // Test 1: the classic lg4ff output report, on the joystick interface.
+    print!("TEST 1  classic lg4ff command ... ");
+    std::io::stdout().flush().ok();
+    match hidpp::open_joystick_node(if0) {
+        None => println!("could not open the joystick interface (try sudo)"),
+        Some(mut io) => {
+            let all_on = hidpp::rev_mask_via_lg4ff(&mut io, 0x1f);
+            sleep(hold);
+            let _ = hidpp::rev_mask_via_lg4ff(&mut io, 0x00);
+            match all_on {
+                Ok(()) => {
+                    println!("sent");
+                    worked.push("1 (classic lg4ff)");
+                }
+                Err(e) => println!("send failed: {e}"),
+            }
+        }
+    }
+
+    // Test 2: the level-based 0x807A dialect, on the HID++ interface.
+    print!("TEST 2  0x807A level dialect  ... ");
+    std::io::stdout().flush().ok();
+    match hidpp::probe_features(if0) {
+        None => println!("no HID++ interface could be opened (try sudo)"),
+        Some(rows) => {
+            let lightsync = rows.iter().find(|(id, _, _)| *id == 0x807A).and_then(|(_, _, i)| *i);
+            match lightsync {
+                None => println!("this wheel does not implement 0x807A, so this one cannot work"),
+                Some(idx) => match hidpp::find_hidpp_sibling(if0)
+                    .and_then(|n| hidpp::RealHidppIo::open(&n).ok())
+                {
+                    None => println!("could not open the HID++ interface (try sudo)"),
+                    Some(mut io) => {
+                        let on = hidpp::rev_level_via_lightsync(&mut io, idx, 10);
+                        sleep(hold);
+                        let _ = hidpp::rev_level_via_lightsync(&mut io, idx, 0);
+                        match on {
+                            Ok(()) => {
+                                println!("sent (feature index 0x{idx:02X})");
+                                worked.push("2 (0x807A level dialect)");
+                            }
+                            Err(e) => println!("send failed: {e}"),
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    println!();
+    if worked.is_empty() {
+        println!("Nothing could be sent. Run again with sudo, or report the errors above.");
+    } else {
+        println!("Sent successfully: {}", worked.join(", "));
+        println!("A command being sent does NOT mean the wheel obeyed it.");
+        println!("What matters is which test number actually lit the strip.");
+    }
+    Ok(())
 }
