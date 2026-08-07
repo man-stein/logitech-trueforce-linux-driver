@@ -10,7 +10,18 @@ It is a native Linux plugin. No Wine, no Proton, nothing to cross-compile.
 
 ## Install
 
-Download `liblogi_tf_scs-<version>.so` from the
+**`sudo ./tools/setup.sh` installs it into both games for you**, creating the
+`plugins` directory they look for but do not ship. If you have run that,
+skip to "Check it is working".
+
+If you installed from a package (Debian, Arch, Fedora, openSUSE), the master
+copy is at:
+
+```
+/usr/share/logitech-trueforce/liblogi_tf_scs.so
+```
+
+Otherwise download `liblogi_tf_scs-<version>.so` from the
 [latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest)
 and rename it to `liblogi_tf_scs.so`, or build it yourself:
 

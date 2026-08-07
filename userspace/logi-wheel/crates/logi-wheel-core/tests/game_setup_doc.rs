@@ -44,7 +44,7 @@ fn recipe_cell(g: &GameCompat, caps: WheelCaps) -> String {
     // having seen the other column say to set a variable, and needs telling
     // that doing so on their wheel is not merely pointless.
     if g.ffb == Ffb::TrueForceShim && !caps.sdk_trueforce {
-        return "Install the shim with `--proxy`<br>and leave \
+        return "Turn on simulated TrueForce<br>and leave \
                 `PROTON_ENABLE_HIDRAW` unset"
             .to_string();
     }
@@ -80,11 +80,16 @@ fn render() -> String {
          not add TrueForce, it diverts the game to raw HID reports the wheel\n\
          cannot drive force feedback through, so it costs you the force\n\
          feedback you already had. Leave it unset.\n\n\
-         That wheel is still capable of TrueForce, and gets it a different\n\
-         way: installing the shim with `--proxy` puts this project's own SDK\n\
-         proxy in the game's path, which copies the TrueForce the game is\n\
-         already producing and streams it to the wheel directly. Same\n\
-         haptics, carried by a route that does not need the SDK to cooperate.\n\n",
+         That wheel is still capable of haptics in those games, by a\n\
+         different route: `logi-tf-sim` synthesizes an engine note from the\n\
+         game's own telemetry, read out of its shared memory by a small relay\n\
+         (`docs/SHARED_MEMORY_RELAY.md`). Confirmed working on a G923 in\n\
+         Assetto Corsa Competizione and EVO.\n\n\
+         There is a second route that would be better if it worked: installing\n\
+         the shim with `--proxy` puts this project's own SDK proxy in the\n\
+         game's path to copy the TrueForce the game is already producing,\n\
+         which is the real thing rather than an imitation of it. Nobody has\n\
+         yet got the game to load that proxy, so it is not the recommendation.\n\n",
     );
     out.push_str(
         "Launch options go in Steam under the game's Properties. Paste them\n\
@@ -253,5 +258,8 @@ fn the_two_wheel_columns_actually_differ_for_sdk_titles() {
     // variable precisely in order to say to leave it alone.
     assert!(!classic.contains("PROTON_ENABLE_HIDRAW=1"), "{classic}");
     assert!(classic.contains("unset"), "{classic}");
-    assert!(classic.contains("--proxy"), "the G923 route must be named: {classic}");
+    assert!(
+        classic.contains("simulated TrueForce"),
+        "the G923 column must name the route that actually works: {classic}"
+    );
 }

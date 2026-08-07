@@ -18,7 +18,7 @@ daemon over localhost UDP.
 | RaceRoom Racing Experience | Decoder written. Unconfirmed against a live session. |
 | Assetto Corsa | Decoder written. Layout confirmed via Competizione, which shares it. |
 | Assetto Corsa Competizione | **Confirmed end to end on a G923** (2026-08-06). |
-| Assetto Corsa EVO | Decoder written. Unconfirmed against a live session. |
+| Assetto Corsa EVO | **Layout confirmed on a live session** (2026-08-06). |
 | rFactor 2 | Decoder written. Unconfirmed against a live session. |
 | Le Mans Ultimate | Decoder written. Unconfirmed against a live session. |
 
@@ -52,7 +52,13 @@ does not exist. Its replacement, `currentMaxRpm`, sits in the physics block
 and is republished every tick. That leaves EVO with one section and no layout
 guard, so the check is the value itself: a redline is a distinctive number,
 and a wrong offset in a physics block lands on a temperature, a pressure or a
-pedal, none of which comes near one. EVO goes quiet rather than wrong.
+pedal, none of which comes near one.
+
+Confirmed on a live session on 2026-08-06: `acevo_pmf_physics` opened while
+`acpmf_physics` stayed absent, which is itself evidence the rename is real,
+and offset 588 read 6200 next to an engine turning 4662 in first gear. A
+number that plausible, that consistent with its neighbours, is not a
+temperature read by accident.
 
 **rFactor 2 and Le Mans Ultimate say whether a read was good.** Their layout
 comes from a community plugin rather than a vendor, which is why they were
@@ -82,21 +88,40 @@ than sending a wrong number, but that is a design argument, not evidence.
 
 ## Get it
 
-Download `logi-tf-relay-<version>.exe` from the
-[latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest).
-It is not in the distro packages: it is a Windows executable that runs inside
-a Proton prefix, so it has no business in `/usr`.
+**You normally do not have to place this yourself.** `sudo ./tools/setup.sh`
+puts it in every Proton prefix, and the settings app has an "Install relay"
+button on each game that needs one (in the terminal app, `h` on the selected
+game). It lands at the prefix's drive root, which
+makes the in-prefix path `C:\logi-tf-relay.exe`.
 
-To build it yourself instead, it needs the Windows target and a MinGW linker:
+If you installed from a package (Debian, Arch, Fedora, openSUSE), the master
+copy is at:
+
+```
+/usr/share/logitech-trueforce/logi-tf-relay.exe
+```
+
+It is a Windows executable, so it lives in the shared data directory rather
+than in `bin`: you do not run it directly, you run it inside a game's Proton
+prefix. It ships prebuilt because no distro builder has a Rust Windows
+target, the same reason `tf-range-proxy.dll` is prebuilt.
+
+Otherwise download `logi-tf-relay-<version>.exe` from the
+[latest release](https://github.com/mescon/logitech-trueforce-linux-driver/releases/latest).
+
+To build it yourself, or to refresh the committed copy after changing the
+relay's sources:
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
-cargo build --release -p logi-tf-relay --target x86_64-pc-windows-gnu
+tools/build-relay.sh
 ```
 
-The result is `target/x86_64-pc-windows-gnu/release/logi-tf-relay.exe`. If
-`cargo` says the target is unavailable, your distribution's Rust probably
-cannot cross-compile; a rustup-managed toolchain can. The build needs no
+That uses the `relay-dist` cargo profile, which is what keeps the committed
+binary small, and writes `tools/logi-tf-relay.exe`. Refresh it that way
+rather than by hand: CI runs `tools/build-relay.sh --check` and fails if the
+committed binary is older than the sources it was built from, so a packaged
+relay cannot silently lag the code. The build needs a MinGW linker, no
 Windows machine and no Wine.
 
 ## Run it
@@ -116,8 +141,11 @@ running. The prefix is named after the game's Steam appid:
 
 ```bash
 WINEPREFIX=~/.steam/steam/steamapps/compatdata/244210/pfx \
-  wine logi-tf-relay.exe --game assetto
+  wine 'c:\logi-tf-relay.exe' --game assetto
 ```
+
+(That is where `setup.sh` installs it. If you put it somewhere else, use
+your own path instead.)
 
 Leave it running. It re-reads the section about 60 times a second and sends
 what it finds to `logi-tf-sim`, which must also be running. Then turn the

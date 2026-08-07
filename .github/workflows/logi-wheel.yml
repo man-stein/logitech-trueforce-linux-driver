@@ -1,5 +1,10 @@
 name: logi-wheel
 on:
+  # Manually runnable. GitHub does not retroactively run workflows for
+  # pushes made while Actions was down, so after the outage of 2026-08-06
+  # there was no way to get CI onto the current commit except an empty
+  # commit purely to trigger it. This is that way.
+  workflow_dispatch:
   push:
     paths: ["userspace/logi-wheel/**", ".github/workflows/logi-wheel.yml"]
   pull_request:
@@ -50,3 +55,9 @@ jobs:
         run: cargo build -p logi-tf-relay --locked --target x86_64-pc-windows-gnu --verbose
       - name: Clippy the relay for Windows
         run: cargo clippy -p logi-tf-relay --all-targets --locked --target x86_64-pc-windows-gnu -- -D warnings
+      - name: The committed relay binary must not be older than its sources
+        # Packaging installs tools/logi-tf-relay.exe, because no distro
+        # builder can produce a Windows binary. A prebuilt artifact is only
+        # safe if something notices when it falls behind the code.
+        working-directory: ${{ github.workspace }}
+        run: tools/build-relay.sh --check

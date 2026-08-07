@@ -5,60 +5,102 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## Unreleased
+## 0.29.0 - 2026-08-06
+
+**If you own a G923, this release is mostly for you.** Assetto Corsa
+Competizione and Assetto Corsa EVO now produce engine haptics on that wheel
+for the first time. Their real TrueForce goes through a Logitech SDK the
+G923 does not answer, so it never arrived; this synthesizes an engine note
+from the game's own telemetry instead and sends it by a route that needs no
+SDK cooperation. Confirmed on hardware, not just written: with the car
+stationary in the pit box and the engine revving, the wheel buzzes.
+
+**Two things need action.** The rev lights on a G923 have never worked for
+anyone, because their brightness files come up root-owned and no rule
+granted access; reinstalling the udev rules fixes that, and a reinstall or
+`sudo ./tools/setup.sh` does it. And the pieces that read telemetry out of a
+running game are not in the distro packages, because one is a Windows
+executable and the other is a plugin the game loads: both are now attached
+to this release as downloads.
+
+On a direct-drive wheel nothing here changes. Competizione and EVO still
+deliver their own TrueForce through the shim with
+`PROTON_ENABLE_HIDRAW=1`, exactly as before.
 
 ### Added
 
+- **Simulated TrueForce in every sim that publishes to shared memory**:
+  iRacing, RaceRoom Racing Experience, Assetto Corsa, Competizione, EVO,
+  rFactor 2 and Le Mans Ultimate. A small relay runs inside the game's
+  Proton prefix and forwards what it reads to the daemon. rFactor 2 and Le
+  Mans Ultimate also need the community `rF2SharedMemoryMapPlugin`. See
+  [`docs/SHARED_MEMORY_RELAY.md`](docs/SHARED_MEMORY_RELAY.md).
 - **Simulated TrueForce in Euro Truck Simulator 2 and American Truck
   Simulator.** These publish telemetry through a plugin interface rather
   than over UDP, so a small native Linux plugin now forwards engine speed,
   throttle and gear to the daemon. No Wine involved. See
   [`docs/SCS_PLUGIN.md`](docs/SCS_PLUGIN.md).
-- **Simulated TrueForce in every sim that publishes to shared memory**:
-  iRacing, RaceRoom Racing Experience, Assetto Corsa, Competizione, EVO,
-  rFactor 2 and Le Mans Ultimate. A small relay runs inside the game's Proton prefix and forwards
-  what it reads to the daemon. rFactor 2 and Le Mans Ultimate also need the
-  community `rF2SharedMemoryMapPlugin`. See
-  [`docs/SHARED_MEMORY_RELAY.md`](docs/SHARED_MEMORY_RELAY.md).
-- **Simulated TrueForce in Assetto Corsa Competizione and EVO, for the
-  G923.** Both have real TrueForce, and on a direct-drive wheel that is
-  still the route to use. But the G923 cannot receive it: the game hands its
-  TrueForce to Logitech's SDK, which that wheel does not answer. Synthesizing
-  an engine note from the game's own telemetry is the difference between
-  haptics and silence there. Competizione needed no new decoder, publishing
-  the same shared memory as Assetto Corsa byte for byte; EVO renamed its
-  sections and moved the redline, so it got one.
 - **Simulated TrueForce in GRID (2019) and GRID Legends.** No new code: both
   are the same Codemasters telemetry format the DiRT titles use and the
   parser already read them. What was missing was saying so, and telling you
   to switch the game's UDP output on.
+- **The helpers install themselves.** `sudo ./tools/setup.sh` places the
+  relay in every Proton prefix and the truck-sim plugin in both truck sims,
+  and the settings app has a per-game "Install relay" button (`h` in the
+  terminal app). Both are also packaged and attached to each release. The
+  intent is that installing this project leaves you needing only Logitech's
+  own DLLs, which cannot be redistributed.
 
-Each decoder is written against a layout its publisher documents, and every
-read is bounds checked and range gated so a sample that cannot be vouched for
-is dropped rather than sent as a wrong number. None has yet been confirmed by
-anyone actually driving the game, so these titles carry the provisional
-marker in [`docs/GAME_SETUP.md`](docs/GAME_SETUP.md) until someone reports
-back.
+The Assetto Corsa family's decoders were confirmed against running games on
+2026-08-06, including the two offsets most likely to be wrong: the redline
+behind five `wchar_t` arrays in the older titles, and EVO's `currentMaxRpm`,
+which has no structural guard at all. The rest are written against published
+layouts and range-gated, but nobody has driven them yet, so they carry the
+provisional marker in [`docs/GAME_SETUP.md`](docs/GAME_SETUP.md).
 
 ### Fixed
 
+- **A G923's rev lights could never light.** Their brightness files are
+  root-owned and nothing granted a desktop user access, so every write
+  failed silently while the daemon reported it was driving the display. The
+  direct-drive wheels use a different attribute that this project already
+  made writable, which is why it went unnoticed. Confirmed working after the
+  fix by sampling the five brightness files through a rev sweep: they fill
+  one at a time to all five and drain back in order.
+- **With two wheels attached, the rev display of the wrong one was driven.**
+  The daemon vibrated the wheel it had opened and lit whichever wheel sysfs
+  listed first.
+- **Engine haptics fell further behind the longer you drove.** On a G923 the
+  writer consumed samples fractionally slower than the daemon produced them
+  and the surplus accumulated without limit, so throttle response lagged
+  more with every minute. Roughly 110 ms of added delay per second of
+  driving. A steady idle felt fine throughout, which is why it survived: a
+  constant signal hides latency and a changing one exposes it.
 - **iRacing owners were told to turn on simulated TrueForce instead of being
   given their launch options.** iRacing needs `logi-ffb %command%` to have
   any force feedback at all, and the recipe dropped that the moment the game
   gained a telemetry decoder, so the advice was to enable an engine note for
-  a wheel that was not being driven. The two are not alternatives and are no
-  longer treated as such.
+  a wheel that was not being driven.
 - **Assetto Corsa was listed as having no usable telemetry.** It publishes
-  both a documented UDP protocol and a shared-memory block; it now has a
-  decoder for the latter.
+  both a documented UDP protocol and a shared-memory block.
+- **Simulated TrueForce could not be switched on in the GUI for any game the
+  relay serves.** A row only carried its per-game switch when simulated
+  TrueForce was the game's *primary* setup action, and it never is for these:
+  Competizione and EVO want the shim, and iRacing, RaceRoom, rFactor 2 and Le
+  Mans Ultimate want logi-ffb. All six had working simulated TrueForce and no
+  way to enable it.
+- A crate declaring a minimum Rust of 1.74 used an API stable only since
+  1.82, so it would not have built on the version this project claims to
+  support.
 
 ### Changed
 
 - Each telemetry source now carries its own game id, so every relayed title
   gets its own enable switch and intensity instead of sharing one.
-- The relay is now built for Windows in CI. Everything in it that touches
-  shared memory sits behind `cfg(windows)`, so nothing had ever compiled the
-  code users actually run.
+- The relay is now built and linted for Windows in CI. Everything in it that
+  touches shared memory sits behind `cfg(windows)`, so nothing had ever
+  compiled the code users actually run; the first run of that job found a
+  real defect.
 
 ## 0.28.0 - 2026-08-06
 

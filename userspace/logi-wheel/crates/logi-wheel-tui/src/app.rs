@@ -1386,6 +1386,56 @@ impl<S: SysfsIo> App<S> {
         self.selected_game().and_then(|g| games::match_title(&g.name)).map(|c| c.setup_action(caps))
     }
 
+    /// The daemon game id the selected game's telemetry arrives under, if
+    /// the registry knows it and it is live.
+    fn selected_game_sim_id(&self) -> Option<&'static str> {
+        self.selected_game()
+            .and_then(|g| games::match_title(&g.name))
+            .and_then(|c| c.simulated_tf.live_id())
+    }
+
+    /// Install the telemetry helper the selected game needs, and say what
+    /// happened. The two helpers go to different places for different
+    /// reasons, so which one applies is decided from the game rather than
+    /// asked of the user.
+    fn install_game_helper(&mut self) -> String {
+        use logi_wheel_core::telemetry_helpers as th;
+
+        let Some(game) = self.selected_game() else {
+            return "helper: no game selected".to_string();
+        };
+        let name = game.name.clone();
+        let Some(id) = self.selected_game_sim_id() else {
+            return format!("{name}: no simulated TrueForce, so no helper to install");
+        };
+
+        if th::needs_relay(id) {
+            let Some(prefix) = self.selected_game().and_then(|g| g.prefix()).map(PathBuf::from)
+            else {
+                return format!("{name}: no wine prefix to install the relay into");
+            };
+            let Some(src) = th::relay_source() else {
+                return "relay not found; install the package or run tools/setup.sh".to_string();
+            };
+            return match th::install_relay(&src, &prefix) {
+                Ok(th::Installed::Fresh) => {
+                    format!("{name}: relay installed; run it in the prefix while playing")
+                }
+                Ok(th::Installed::Replaced) => format!("{name}: relay updated"),
+                Err(e) => format!("{name}: relay install failed: {e}"),
+            };
+        }
+
+        if th::needs_scs_plugin(id) {
+            // The truck sims are native, so they never appear in the Proton
+            // game list this cursor walks; their plugin is installed by
+            // tools/setup.sh instead.
+            return format!("{name}: its plugin is installed by tools/setup.sh, not per prefix");
+        }
+
+        format!("{name}: telemetry arrives over UDP; no helper needed")
+    }
+
     /// What the attached wheel can do, for resolving a game's setup recipe
     /// (see [`games::WheelCaps`]). The recipe differs by wheel, and on the
     /// G923 the direct-drive advice is actively harmful, so every call that
@@ -2564,6 +2614,12 @@ impl<S: SysfsIo> App<S> {
                         }
                         (None, _) => self.status = "install: no game selected".to_string(),
                     }
+                }
+                // Install the telemetry helper the selected game needs.
+                // Done inline rather than queued like the shim: this is a
+                // file copy, not a script that can take seconds.
+                Char('h') if inside && section == SetupSection::Games => {
+                    self.status = self.install_game_helper();
                 }
                 Char('u') if inside && section == SetupSection::Games => {
                     match self.selected_game() {

@@ -360,9 +360,12 @@ impl GameCompat {
             // unidentified wheel, about which we know only that we cannot
             // deliver it.
             "Leave PROTON_ENABLE_HIDRAW unset: on this wheel it costs you \
-             force feedback. Install the shim WITH --proxy, which is \
-             what carries this game's own TrueForce to a wheel Logitech's \
-             SDK will not drive (see docs/GAME_SETUP.md). Steam Input off."
+             force feedback. For haptics, turn this game on under Simulated \
+             TrueForce and run logi-tf-relay in its prefix (see \
+             docs/SHARED_MEMORY_RELAY.md); that route is confirmed working \
+             on a G923. Installing the shim WITH --proxy aims to carry the \
+             game's own TrueForce instead, which would be better, but no \
+             one has yet got it to load. Steam Input off."
         } else {
             self.setup
         }

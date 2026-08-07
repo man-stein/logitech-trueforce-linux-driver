@@ -116,6 +116,23 @@ const FFB_OUTPUT_ATTR: &str = "ffb_output";
 pub const WINDOW: usize = 13;
 /// New samples appended per emitted packet.
 pub const NEW_PER_PACKET: usize = 4;
+
+/// Most unsent samples the writer will hold, in samples (each is 1 ms of
+/// audio, so this is also the worst-case added latency in ms).
+///
+/// The producer generates 1000 samples/sec and the writer consumes
+/// `NEW_PER_PACKET` per tick, which is also 1000/sec *if a tick is exactly
+/// `TICK_INTERVAL`*. It never is: a tick is the sleep plus the sysfs read,
+/// the packet build and the hidraw write. So the writer runs fractionally
+/// slow, and without a bound the surplus accumulates forever. Measured on a
+/// G923 on 2026-08-06 as throttle response that lagged further behind the
+/// longer a session ran, while a steady idle felt correct, because a
+/// constant signal hides latency and a changing one does not.
+///
+/// When it overflows the OLDEST samples go. For a live haptic stream,
+/// freshness beats completeness: nobody can feel a dropped millisecond, and
+/// everybody can feel a second of delay.
+pub const MAX_PENDING: usize = NEW_PER_PACKET * 8;
 /// Wire-format zero force (offset-binary center).
 pub const CENTER: u16 = 0x8000;
 /// Wire packet length.
@@ -550,12 +567,40 @@ trait Pacer: Send {
 
 /// Real-time pacing: a plain sleep loop at [`TICK_INTERVAL`], matching the
 /// DD-wheel path's dedicated 250 Hz stream thread.
-struct SteadyPacer;
+/// Paces the writer at a fixed RATE rather than a fixed sleep.
+///
+/// `thread::sleep(TICK_INTERVAL)` between iterations yields a period of
+/// `TICK_INTERVAL + however long the work took`, so the writer always runs
+/// slower than the nominal rate and the backlog grows. Sleeping until the
+/// next deadline instead keeps the long-run rate correct, and a deadline
+/// already in the past (a scheduling stall) is skipped forward rather than
+/// chased, which would burst.
+struct SteadyPacer {
+    next: Option<Instant>,
+}
+
+impl SteadyPacer {
+    fn new() -> Self {
+        SteadyPacer { next: None }
+    }
+}
 
 impl Pacer for SteadyPacer {
     fn wait(&mut self) -> Option<Instant> {
-        thread::sleep(TICK_INTERVAL);
-        Some(Instant::now())
+        let now = Instant::now();
+        let deadline = self.next.unwrap_or(now + TICK_INTERVAL);
+        if let Some(delay) = deadline.checked_duration_since(now) {
+            thread::sleep(delay);
+        }
+        let now = Instant::now();
+        // Re-base rather than accumulate when we have fallen behind by more
+        // than a whole tick, so a stall costs one late packet, not a burst.
+        self.next = Some(if now.duration_since(deadline) > TICK_INTERVAL {
+            now + TICK_INTERVAL
+        } else {
+            deadline + TICK_INTERVAL
+        });
+        Some(now)
     }
 }
 
@@ -601,6 +646,9 @@ struct Writer {
     /// Samples queued by [`Cmd::Push`] between whole
     /// [`NEW_PER_PACKET`]-sized chunks.
     pending: Vec<f32>,
+    /// Samples discarded to keep the backlog bounded; a running total, so a
+    /// steadily climbing figure means the writer cannot keep pace.
+    dropped_stale: usize,
     idle: IdlePolicy,
 }
 
@@ -613,6 +661,7 @@ impl Writer {
             seq: 0,
             window: [CENTER; WINDOW],
             pending: Vec::new(),
+            dropped_stale: 0,
             idle: IdlePolicy::new(),
         }
     }
@@ -651,6 +700,17 @@ impl Writer {
     /// keeps every tick emitting a packet on schedule instead of skipping
     /// it or blocking, at the cost of repeating the most recent sample
     /// into the remaining slot(s).
+    /// Append `samples`, discarding the oldest beyond [`MAX_PENDING`] so a
+    /// producer/consumer rate mismatch cannot turn into unbounded latency.
+    fn push_pending(&mut self, samples: Vec<f32>) {
+        self.pending.extend(samples);
+        if self.pending.len() > MAX_PENDING {
+            let excess = self.pending.len() - MAX_PENDING;
+            self.pending.drain(..excess);
+            self.dropped_stale += excess;
+        }
+    }
+
     fn take_chunk(&mut self) -> [f32; NEW_PER_PACKET] {
         let mut chunk = [0.0f32; NEW_PER_PACKET];
         let n = self.pending.len().min(NEW_PER_PACKET);
@@ -697,7 +757,7 @@ fn run_writer(mut writer: Writer, cmd_rx: mpsc::Receiver<Cmd>, mut pacer: impl P
         let mut stop_requested = false;
         loop {
             match cmd_rx.try_recv() {
-                Ok(Cmd::Push(samples)) => writer.pending.extend(samples),
+                Ok(Cmd::Push(samples)) => writer.push_pending(samples),
                 Ok(Cmd::Stop) => stop_requested = true,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -761,7 +821,7 @@ impl G923Stream {
     /// spawn the writer thread, and return a stream ready for
     /// [`push`](Self::push).
     pub fn open(paths: &G923Paths, sign: Sign) -> io::Result<G923Stream> {
-        Self::open_with_pacer(paths, sign, SteadyPacer)
+        Self::open_with_pacer(paths, sign, SteadyPacer::new())
     }
 
     fn open_with_pacer(paths: &G923Paths, sign: Sign, pacer: impl Pacer + 'static) -> io::Result<G923Stream> {
@@ -1449,6 +1509,62 @@ mod tests {
     }
 
     // -- load-shedding ------------------------------------------------------
+
+    /// A sink that accepts everything and keeps nothing: these tests are
+    /// about the backlog, not about what reaches the wire.
+    struct NullSink;
+    impl HidrawSink for NullSink {
+        fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+
+    /// The writer consumes NEW_PER_PACKET samples per tick, which equals the
+    /// producer's rate only if a tick is exactly TICK_INTERVAL. It never is,
+    /// because a tick is the sleep plus the sysfs read plus the write. So the
+    /// backlog must be bounded, or a small rate mismatch becomes unbounded
+    /// latency: measured on hardware as throttle response that fell further
+    /// behind the longer a session ran.
+    #[test]
+    fn a_producer_faster_than_the_writer_cannot_grow_unbounded_latency() {
+        let mut writer = Writer::new(NullSink, FfbMirror::open(None), Sign::Normal);
+
+        // 100 pushes of a full tick's worth and nothing consumed: a producer
+        // comfortably outrunning the writer.
+        for _ in 0..100 {
+            writer.push_pending(vec![0.5; NEW_PER_PACKET]);
+        }
+        assert!(
+            writer.pending.len() <= MAX_PENDING,
+            "backlog grew to {} samples ({} ms of latency)",
+            writer.pending.len(),
+            writer.pending.len()
+        );
+        assert!(writer.dropped_stale > 0, "overflow must be counted, not silent");
+    }
+
+    /// When the backlog overflows the OLDEST samples go, so what reaches the
+    /// wheel is the freshest audio. Dropping the newest would keep latency
+    /// bounded too, and would be exactly wrong.
+    #[test]
+    fn overflow_discards_the_oldest_samples_not_the_newest() {
+        let mut writer = Writer::new(NullSink, FfbMirror::open(None), Sign::Normal);
+
+        writer.push_pending(vec![-1.0; MAX_PENDING]); // stale
+        writer.push_pending(vec![1.0; NEW_PER_PACKET]); // fresh
+
+        let chunk = writer.take_chunk();
+        assert!(
+            chunk.iter().all(|&s| s == -1.0) || chunk.contains(&1.0),
+            "chunk should be drawn from what survived"
+        );
+        assert_eq!(writer.pending.len() + chunk.len(), MAX_PENDING);
+        // The freshest samples must still be in there somewhere.
+        let survived_fresh =
+            writer.pending.contains(&1.0) || chunk.contains(&1.0);
+        assert!(survived_fresh, "the newest samples were discarded instead of the oldest");
+    }
 
     #[test]
     fn push_does_not_block_when_the_channel_is_full_and_counts_the_drop() {

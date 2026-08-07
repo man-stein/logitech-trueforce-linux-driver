@@ -57,7 +57,7 @@ struct Args {
     /// The second section this game's decoder needs, when it needs one.
     /// Assetto Corsa's redline and the rF2 family's "which car is the
     /// player" both live outside the section carrying engine speed.
-    aux: Option<String>,
+    aux: Option<(String, usize)>,
     dump: Option<String>,
     /// Which known game was named, when one was. `--section` alone leaves
     /// this `None`: an arbitrary section can be dumped but not decoded,
@@ -85,7 +85,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     eprintln!("logi-tf-relay: note for {}: {}", game.name, prerequisite);
                 }
                 section = Some(game.section.to_string());
-                aux = game.aux_section.map(str::to_string);
+                aux = game.aux_section.map(|(name, len)| (name.to_string(), len));
                 game_id = Some(game.id);
             }
             "--section" => {
@@ -132,7 +132,7 @@ fn main() -> ExitCode {
                 .game
                 .and_then(games::by_id)
                 .map_or(games::DEFAULT_READ_LEN, |g| g.read_len);
-            run_stream(&section, args.aux.as_deref(), args.game.unwrap_or(""), read_len)
+            run_stream(&section, args.aux.as_ref(), args.game.unwrap_or(""), read_len)
         }
         None => {
             // Reached by --section with no --game: a section can always be
@@ -155,7 +155,12 @@ fn main() -> ExitCode {
 /// are skipped silently, since a menu, a replay or a paused session all
 /// legitimately produce them.
 #[cfg(windows)]
-fn run_stream(section: &str, aux: Option<&str>, game: &str, read_len: usize) -> ExitCode {
+fn run_stream(
+    section: &str,
+    aux: Option<&(String, usize)>,
+    game: &str,
+    read_len: usize,
+) -> ExitCode {
     use std::net::UdpSocket;
 
     let port = std::env::var("LOGI_TF_SIM_RELAY_PORT")
@@ -183,7 +188,7 @@ fn run_stream(section: &str, aux: Option<&str>, game: &str, read_len: usize) -> 
                 // the same tick so a car change cannot pair a new engine
                 // speed with the previous car's redline.
                 let aux_bytes = match aux {
-                    Some(name) => win::read_section(name, read_len).ok(),
+                    Some((name, len)) => win::read_section(name, *len).ok(),
                     None => None,
                 };
                 let sample = match game {
@@ -225,7 +230,12 @@ fn run_stream(section: &str, aux: Option<&str>, game: &str, read_len: usize) -> 
 
 /// Linux stub: the relay only means anything inside the prefix.
 #[cfg(not(windows))]
-fn run_stream(_section: &str, _aux: Option<&str>, _game: &str, _read_len: usize) -> ExitCode {
+fn run_stream(
+    _section: &str,
+    _aux: Option<&(String, usize)>,
+    _game: &str,
+    _read_len: usize,
+) -> ExitCode {
     eprintln!(
         "logi-tf-relay: this is the Linux stub. The relay has to be \
          cross-compiled and run inside the game's Proton prefix:\n  \

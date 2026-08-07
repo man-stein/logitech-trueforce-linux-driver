@@ -163,6 +163,63 @@ pub fn installed_games(roots: &[PathBuf]) -> Vec<SteamGame> {
     games
 }
 
+/// One installed native game that loads a plugin from its own
+/// installation directory, rather than running in a wine prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeGame {
+    pub appid: u32,
+    pub name: String,
+    /// The game's own installation directory (`steamapps/common/<dir>`).
+    pub dir: PathBuf,
+    pub plugin_installed: bool,
+}
+
+/// Every installed game from `wanted` across `roots`, by appid.
+///
+/// Separate from [`installed_games`] because those two answer different
+/// questions. That one lists games with a Proton prefix, which is the right
+/// filter for anything staged into a prefix, and it deliberately skips
+/// native titles. Euro Truck Simulator 2 and American Truck Simulator are
+/// native, so they never appear there, yet they are exactly the games that
+/// need a file placed inside their installation.
+///
+/// `installed` decides the `plugin_installed` flag, so this stays ignorant
+/// of what is being installed into the directory.
+pub fn native_games(
+    roots: &[PathBuf],
+    wanted: &[(u32, &str)],
+    installed: impl Fn(&Path) -> bool,
+) -> Vec<NativeGame> {
+    let mut games: Vec<NativeGame> = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        let steamapps = root.join("steamapps");
+        for (appid, name) in wanted {
+            if seen.contains(appid) {
+                continue;
+            }
+            let manifest = steamapps.join(format!("appmanifest_{appid}.acf"));
+            let Ok(text) = fs::read_to_string(&manifest) else { continue };
+            let Some(installdir) = text.lines().find_map(|l| vdf_string(l, "installdir")) else {
+                continue;
+            };
+            let dir = steamapps.join("common").join(installdir);
+            if !dir.is_dir() {
+                continue;
+            }
+            seen.insert(*appid);
+            games.push(NativeGame {
+                appid: *appid,
+                name: (*name).to_string(),
+                plugin_installed: installed(&dir),
+                dir,
+            });
+        }
+    }
+    games.sort_by_key(|g| g.appid);
+    games
+}
+
 /// Where the steering-wheel SDK DLLs sit, above the version directory.
 const SDK_WHEEL_DIR: &str = "Logi/wheel_sdk";
 
@@ -267,6 +324,44 @@ pub fn shim_install_args(prefix: &str, sdk_dir: Option<&Path>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The truck sims are native, so `installed_games` will never list them
+    /// however they are installed. This is the function that does, and the
+    /// distinction is the whole reason it exists.
+    #[test]
+    fn native_games_finds_a_title_that_has_no_proton_prefix() {
+        let tree = TempTree::new();
+        let root = tree.path().to_path_buf();
+        let steamapps = root.join("steamapps");
+        let game = steamapps.join("common").join("Euro Truck Simulator 2");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(
+            steamapps.join("appmanifest_227300.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"227300\"\n\t\"installdir\"\t\"Euro Truck Simulator 2\"\n}\n",
+        )
+        .unwrap();
+
+        let roots = vec![root.clone()];
+        let found = native_games(&roots, &[(227300, "Euro Truck Simulator 2")], |_| false);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].appid, 227300);
+        assert_eq!(found[0].dir, game);
+        assert!(!found[0].plugin_installed);
+
+        // And it is invisible to the Proton scan, which is correct.
+        assert!(installed_games(&roots).is_empty());
+    }
+
+    /// A listed game that is not installed must simply not appear, rather
+    /// than appearing with a directory that does not exist.
+    #[test]
+    fn native_games_skips_what_is_not_installed() {
+        let tree = TempTree::new();
+        let root = tree.path().to_path_buf();
+        fs::create_dir_all(root.join("steamapps")).unwrap();
+        let found = native_games(&[root], &[(227300, "Euro Truck Simulator 2")], |_| true);
+        assert!(found.is_empty());
+    }
+
     use super::*;
 
     /// Stage a complete SDK tree at `version`, the way a real G HUB copy

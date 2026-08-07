@@ -159,6 +159,14 @@ package_logi-wheel() {
 	# unreachable for anyone who did not clone the repo.
 	install -Dm644 "$_src/tools/tf-range-proxy.dll" \
 		"$pkgdir/usr/share/logitech-trueforce/tf-range-proxy.dll"
+	# The truck sims load this from inside the game rather than from a
+	# Proton prefix, so it ships beside the proxy rather than in bin.
+	install -Dm644 "$_src/userspace/logi-wheel/target/release/liblogi_tf_scs.so" \
+		"$pkgdir/usr/share/logitech-trueforce/liblogi_tf_scs.so"
+	# A Windows executable: it runs inside the game's Proton prefix.
+	# Prebuilt because no distro builder ships a Rust Windows target.
+	install -Dm644 "$_src/tools/logi-tf-relay.exe" \
+		"$pkgdir/usr/share/logitech-trueforce/logi-tf-relay.exe"
 
 	# G923 Xbox mode-switch helper, dispatched by udev rule 73. Must not be
 	# run from the udev worker itself; see the rule's own comment.

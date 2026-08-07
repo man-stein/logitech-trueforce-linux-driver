@@ -17,11 +17,17 @@ not add TrueForce, it diverts the game to raw HID reports the wheel
 cannot drive force feedback through, so it costs you the force
 feedback you already had. Leave it unset.
 
-That wheel is still capable of TrueForce, and gets it a different
-way: installing the shim with `--proxy` puts this project's own SDK
-proxy in the game's path, which copies the TrueForce the game is
-already producing and streams it to the wheel directly. Same
-haptics, carried by a route that does not need the SDK to cooperate.
+That wheel is still capable of haptics in those games, by a
+different route: `logi-tf-sim` synthesizes an engine note from the
+game's own telemetry, read out of its shared memory by a small relay
+(`docs/SHARED_MEMORY_RELAY.md`). Confirmed working on a G923 in
+Assetto Corsa Competizione and EVO.
+
+There is a second route that would be better if it worked: installing
+the shim with `--proxy` puts this project's own SDK proxy in the
+game's path to copy the TrueForce the game is already producing,
+which is the real thing rather than an imitation of it. Nobody has
+yet got the game to load that proxy, so it is not the recommendation.
 
 Launch options go in Steam under the game's Properties. Paste them
 exactly, `%command%` included: it is the placeholder Steam replaces
@@ -34,8 +40,8 @@ instead of wrapping it.
 |---|---|---|---|---|
 | American Truck Simulator * | Native Linux | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | Assetto Corsa (original) | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
-| Assetto Corsa Competizione | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Install the shim with `--proxy`<br>and leave `PROTON_ENABLE_HIDRAW` unset |
-| Assetto Corsa EVO (early access) | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Install the shim with `--proxy`<br>and leave `PROTON_ENABLE_HIDRAW` unset |
+| Assetto Corsa Competizione | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Turn on simulated TrueForce<br>and leave `PROTON_ENABLE_HIDRAW` unset |
+| Assetto Corsa EVO (early access) | Proton | TrueForce shim | Install the shim<br>`PROTON_ENABLE_HIDRAW=1 %command%` | Turn on simulated TrueForce<br>and leave `PROTON_ENABLE_HIDRAW` unset |
 | Assetto Corsa Rally (early access) * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Automobilista 2 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | BeamNG.drive * | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
@@ -111,7 +117,7 @@ app's Setup page afterwards.
 ## What each recipe means
 
 - **Install the shim.** Stage Logitech's signed SDK DLLs into the game's Proton prefix, from the app's Setup page or `tools/install-tf-shim.sh`. Install the TrueForce shim; set PROTON_ENABLE_HIDRAW=1; turn Steam Input off.
-- **On a wheel with no SDK TrueForce.** Leave PROTON_ENABLE_HIDRAW unset: on this wheel it costs you force feedback. Install the shim WITH --proxy, which is what carries this game's own TrueForce to a wheel Logitech's SDK will not drive (see docs/GAME_SETUP.md). Steam Input off.
+- **On a wheel with no SDK TrueForce.** Leave PROTON_ENABLE_HIDRAW unset: on this wheel it costs you force feedback. For haptics, turn this game on under Simulated TrueForce and run logi-tf-relay in its prefix (see docs/SHARED_MEMORY_RELAY.md); that route is confirmed working on a G923. Installing the shim WITH --proxy aims to carry the game's own TrueForce instead, which would be better, but no one has yet got it to load. Steam Input off.
 - **Launch via logi-ffb.** Set PROTON_ENABLE_HIDRAW=0, or launch with logi-ffb %command%; Steam Input off. Simulated TrueForce needs the community rF2SharedMemoryMapPlugin plus logi-tf-relay in the prefix (see docs/SHARED_MEMORY_RELAY.md).
 - **Nothing to do.** The wheel is an ordinary Linux force feedback device and the game drives it directly.
 

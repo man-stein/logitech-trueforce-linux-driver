@@ -139,8 +139,19 @@ hardware:
   Logitech's own SDK cannot deliver TrueForce here (it hands the haptics to
   G HUB, which does not exist on Linux), so this driver streams them itself.
 - **Rev lights**, driven from telemetry or controllable as ordinary Linux LEDs.
+  These need the udev rules from 0.29.0 or later: before that their brightness
+  files were root-owned and every write failed silently.
 - **Settings**: rotation range, force strength, autocenter and combined pedals,
   through `logi-wheel` or Oversteer.
+
+Since 0.29.0 that engine note also covers **Assetto Corsa Competizione and
+Assetto Corsa EVO**, which is new. Those two have real TrueForce of their own,
+but it travels through a Logitech SDK the G923 does not answer, so it never
+reached the wheel. Their telemetry is read from the game's shared memory
+instead and synthesized into an engine note (see
+[docs/SHARED_MEMORY_RELAY.md](docs/SHARED_MEMORY_RELAY.md)). Confirmed on a
+c266: stationary in the pit box with the engine revving, the wheel buzzes,
+which force feedback alone cannot do.
 
 **Xbox edition** (`046d:c26e`) has **force feedback and TrueForce**, both
 confirmed on a real unit. Neither existed for this wheel on Linux before.
@@ -296,13 +307,20 @@ The summary below is the shape of it.
   it) lets you feel the effect without launching a game.
   Hardware-verified with those test sweeps; in-game reports welcome.
 
-  Two kinds of game need a helper before they can feed it, both documented:
+  Two kinds of game need a helper before they can feed it. **`sudo
+  ./tools/setup.sh` installs both for you**, into every Proton prefix and
+  into both truck sims, and the settings app can install the relay per game
+  from its Setup page, so there is normally nothing to fetch or copy. They
+  are also packaged and downloadable if you would rather place them
+  yourself:
   Euro Truck Simulator 2 and American Truck Simulator use a native Linux
-  plugin ([docs/SCS_PLUGIN.md](docs/SCS_PLUGIN.md)), and iRacing publishes to
-  shared memory that a small in-prefix relay forwards
-  ([docs/SHARED_MEMORY_RELAY.md](docs/SHARED_MEMORY_RELAY.md)). Both are new
-  and not yet confirmed by anyone driving them, which is why those titles
-  carry the provisional marker in the table.
+  plugin ([docs/SCS_PLUGIN.md](docs/SCS_PLUGIN.md)); iRacing, RaceRoom, the
+  Assetto Corsa family, rFactor 2 and Le Mans Ultimate publish to shared
+  memory that a small in-prefix relay forwards
+  ([docs/SHARED_MEMORY_RELAY.md](docs/SHARED_MEMORY_RELAY.md)). The Assetto
+  Corsa family's decoders were confirmed against running games; the others
+  are written against published layouts but nobody has driven them yet,
+  which is why those titles carry the provisional marker in the table.
 
   Beyond the engine note there is a **haptic effects layer**: both limiters,
   gear shifts, the ABS pump, traction loss, surface texture, impacts and DRS.
@@ -319,8 +337,14 @@ The summary below is the shape of it.
   at all yet: the effects are written, the missing piece is a decoder field.
 
   All of this applies only to games you switched simulated TrueForce on for.
-  Games with built-in TrueForce (ACC, Assetto Corsa EVO) get their effects
-  from the game itself and are not affected by any of it.
+
+  Games with built-in TrueForce (ACC, Assetto Corsa EVO) normally get their
+  effects from the game itself and are not affected by any of it. **The G923
+  is the exception**, and the reason simulated TrueForce covers those two
+  titles at all: their TrueForce goes through a Logitech SDK that wheel does
+  not answer, so on a G923 it never arrives, and a synthesized engine note is
+  the difference between haptics and silence. On a direct-drive wheel, keep
+  using the shim and leave these switches alone.
 
   The same settings live in `tf-sim.conf` as `effects=0/1` and
   `effect_<layer>=0-100`, where `<layer>` is one of `engine`, `rev_limiter`,
