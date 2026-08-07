@@ -109,8 +109,12 @@ Everything below is built from this repository:
   library reimplementing Logitech's TrueForce SDK. Optional; not needed for
   the Proton recipe.
 
-The distribution packages install the driver plus the `logi-wheel`, `logi-wheel-gui`,
-`logi-ffb` and `logi-tf-sim` tools; `libtrueforce` has its own build under
+The distribution packages install the driver plus the `logi-wheel`,
+`logi-wheel-gui`, `logi-ffb` and `logi-tf-sim` tools, the TrueForce shim
+installer, and the helpers games load themselves: the SDK proxy, the
+telemetry relay and the truck-sim plugin. The intent is that installing a
+package leaves you needing only Logitech's own DLLs, which cannot be
+redistributed. `libtrueforce` has its own build under
 `userspace/libtrueforce/`.
 
 ## G923 support
@@ -187,10 +191,12 @@ wiki page, and the one-time TrueForce SDK setup is on
 | Debian, Ubuntu, Mint, Pop!_OS | download the `.deb`s from [Releases](https://github.com/mescon/logitech-trueforce-linux-driver/releases), then `sudo apt install ./logitech-trueforce-dkms_*.deb ./logi-wheel_*.deb ./logi-wheel-gui_*.deb` (skip the gui one on a headless box) |
 | Fedora, Nobara | COPR akmod: `sudo dnf copr enable mescon/logitech-trueforce && sudo dnf install akmod-logitech-trueforce logi-wheel-gui` (headless box: `logi-wheel` instead of `logi-wheel-gui`) |
 | openSUSE | OBS repo `home:mescon` (see the [Installation](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Installation) page) |
+| NixOS | add this repo as a flake input, import `nixosModules.default`, and set `hardware.logitech-trueforce.enable = true;` That builds the module against your own kernel and installs the tools, the udev rules and the helpers. Full snippet on the [Installation](https://github.com/mescon/logitech-trueforce-linux-driver/wiki/Installation) page. |
 | From source (any distro) | `git clone` this repo, then `sudo ./tools/setup.sh` (DKMS build, udev rule, everything). `./tools/setup.sh doctor` health-checks it. Building the GUI also needs `pkg-config` and the fontconfig headers: `libfontconfig-dev` on Debian/Ubuntu, `fontconfig-devel` on Fedora, `fontconfig` on Arch. |
 
 The AUR and Debian packages are DKMS-based and rebuild automatically on kernel
-upgrades. After installing, plug in the wheel and check `dmesg` for a line naming
+upgrades; the NixOS module builds against whichever kernel your configuration
+selects and is rebuilt with the system. After installing, plug in the wheel and check `dmesg` for a line naming
 your wheel model. The packages install a udev rule, so settings are writable
 right away, no group membership needed.
 
