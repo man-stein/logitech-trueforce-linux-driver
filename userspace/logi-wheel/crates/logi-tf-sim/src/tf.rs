@@ -73,10 +73,16 @@ impl TfStream {
         // the stream, so the session has to already be open.
         let ffb = crate::ffb_keepalive::FfbKeepalive::open();
         if ffb.is_none() {
-            eprintln!(
-                "logi-tf-sim: warning: no force-feedback session could be opened; \
-                 a direct-drive wheel may move unpredictably (see issue #57)"
-            );
+            // Once per process: the daemon reopens a stream for every game
+            // session, and the reasons this fails (no node, no write
+            // permission) do not change while it runs.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "logi-tf-sim: warning: no force-feedback session could be opened; \
+                     a direct-drive wheel may move unpredictably (see issue #57)"
+                );
+            });
         }
         Ok(TfStream { index, _ffb: ffb })
     }

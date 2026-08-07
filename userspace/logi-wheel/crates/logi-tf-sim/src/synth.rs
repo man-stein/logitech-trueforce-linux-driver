@@ -339,6 +339,22 @@ mod tests {
     }
 
     #[test]
+    fn the_mix_level_still_matches_the_harmonic_gains_it_came_from() {
+        // FULL_MIX_LEVEL is sqrt(sum g^2) / sum g for HARMONIC_GAINS, and
+        // it is written out as a literal. Change the gains without
+        // recomputing it and every sample is quietly scaled wrong, with no
+        // other test noticing: amplitude stays plausible, just not what
+        // the wheel was tuned for.
+        let sumsq: f32 = HARMONIC_GAINS.iter().map(|g| g * g).sum();
+        let sum: f32 = HARMONIC_GAINS.iter().sum();
+        let expected = sumsq.sqrt() / sum;
+        assert!(
+            (FULL_MIX_LEVEL - expected).abs() < 1e-6,
+            "FULL_MIX_LEVEL is {FULL_MIX_LEVEL}, but HARMONIC_GAINS now imply {expected}",
+        );
+    }
+
+    #[test]
     fn rolloff_is_a_smooth_fade_not_a_cliff() {
         assert_eq!(harmonic_rolloff(0.0), 1.0);
         assert_eq!(harmonic_rolloff(ROLLOFF_START_HZ), 1.0, "full gain up to the fade point");

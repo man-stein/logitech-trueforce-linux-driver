@@ -59,7 +59,18 @@ fn find_dd_event_node(sysfs_input: &Path) -> Option<String> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().starts_with("event"))
         .collect();
-    entries.sort_by_key(|e| e.file_name());
+    // Numerically, not lexicographically: sorting the names as strings
+    // puts event10 before event3. `evtest::scan_wheel_input` already sorts
+    // this way, and two scans disagreeing about "the first wheel" is
+    // exactly the class of bug that made the first version of this fix
+    // open a session on the wrong wheel.
+    entries.sort_by_key(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .trim_start_matches("event")
+            .parse::<u32>()
+            .unwrap_or(u32::MAX)
+    });
 
     for entry in entries {
         let dir = entry.path().join("device/id");
