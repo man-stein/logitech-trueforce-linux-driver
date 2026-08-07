@@ -5,6 +5,44 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
+## Unreleased
+
+**A direct-drive wheel no longer thrashes when simulated TrueForce plays.**
+Streaming an engine note to an RS50 drove the wheel into its stops and left
+it oscillating there: measured on the steering axis, a sweep travelled 1258
+to 1703 degrees and hit a stop every run. The cause was not anything the
+stream sends. The wheel needs a live force-feedback session for its control
+loop to stay stable while TrueForce samples arrive, and a game always has
+one open, which is why real TrueForce on the same wheel was always fine and
+why our own self-test was not. The daemon now holds a zero-level effect open
+for as long as it streams. The same sweep travels 204 to 488 degrees and
+reaches no stop. Force is zero by design: this keeps the loop alive, it does
+not change how the wheel feels.
+
+**The engine note no longer buzzes at high pitch.** Above roughly 5000 rpm
+at `pitch = 100` the third harmonic crossed the sample stream's Nyquist limit
+and folded back on top of the fundamental, which is felt as a buzz rather
+than an engine. Harmonics now fade out as they approach the limit. Default
+settings are unaffected: at `pitch = 25` nothing ever reaches the fade.
+
+**Starting TrueForce no longer overwrites your steering range.** The
+captured init sequence carried the operating range of the wheel it was
+recorded from, 2700 degrees, and replayed it verbatim on every session. The
+kernel's range restore healed it within 100 ms, which is why nobody noticed.
+It now carries the range your wheel is actually set to.
+
+New diagnostics, neither of which needs anything built:
+
+- `logi-wheel --hidpp-features` lists the HID++ features a wheel implements.
+- `logi-wheel --led-probe` sends each known rev-light command in turn, so
+  somebody watching the rim can say which one a wheel obeys. The feature
+  list cannot answer this: a PlayStation G923 reports LIGHTSYNC and ignores
+  it completely for rev lights.
+- `tools/wheel-rotation-watch.py` samples the steering axis while something
+  drives the wheel, so motion is measured rather than described.
+- `tools/hidpp-feature-probe.py` asks the same questions as
+  `--hidpp-features` in stdlib Python, for testers without a Rust toolchain.
+
 ## 0.29.0 - 2026-08-06
 
 **If you own a G923, this release is mostly for you.** Assetto Corsa
