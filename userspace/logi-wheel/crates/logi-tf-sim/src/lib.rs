@@ -37,6 +37,7 @@ pub mod daemon;
 pub mod effects;
 pub mod error;
 pub mod f1;
+pub mod ffb_keepalive;
 pub mod g923;
 pub mod leds;
 pub mod pcars;

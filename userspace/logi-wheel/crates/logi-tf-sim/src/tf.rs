@@ -37,10 +37,18 @@ mod ffi {
 /// An open TrueForce sample stream to controller `index`.
 ///
 /// Created by [`TfStream::open`]; dropping it clears any queued samples,
-/// closes the wheel session, and releases the library.
+/// closes the wheel session, releases the library, and drops the
+/// force-feedback session that keeps the wheel stable while streaming.
 #[derive(Debug)]
 pub struct TfStream {
     index: c_int,
+    /// An evdev FFB session held open for the stream's lifetime.
+    ///
+    /// Not optional behaviour: without one the RS50 drives itself into its
+    /// stops and oscillates there (issue #57). It is an `Option` only
+    /// because a wheel may have no evdev node or no write access, and a
+    /// stream without a stabiliser still beats no stream.
+    _ffb: Option<crate::ffb_keepalive::FfbKeepalive>,
 }
 
 impl TfStream {
@@ -61,7 +69,16 @@ impl TfStream {
             unsafe { ffi::dllClose() };
             return Err(Error::NoWheel);
         }
-        Ok(TfStream { index })
+        // Before the first sample, not after: the instability starts with
+        // the stream, so the session has to already be open.
+        let ffb = crate::ffb_keepalive::FfbKeepalive::open();
+        if ffb.is_none() {
+            eprintln!(
+                "logi-tf-sim: warning: no force-feedback session could be opened; \
+                 a direct-drive wheel may move unpredictably (see issue #57)"
+            );
+        }
+        Ok(TfStream { index, _ffb: ffb })
     }
 
     /// Queue `samples` (each -1.0..1.0, at 1 kHz) for the wheel.

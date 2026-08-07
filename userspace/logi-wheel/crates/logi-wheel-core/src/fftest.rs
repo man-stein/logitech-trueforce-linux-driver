@@ -125,7 +125,7 @@ pub const FF_MAX: u16 = 0x7f;
 /// Size of the union embedded at the end of `struct ff_effect`, sized to
 /// fit the largest member (`ff_periodic_effect`, 32 bytes on a 64-bit
 /// kernel).
-const FF_UNION_SIZE: usize = 32;
+pub const FF_UNION_SIZE: usize = 32;
 
 /// Bytes an `EVIOCGBIT(EV_FF, ...)` capability query needs to cover every
 /// bit up to [`FF_MAX`] (`(FF_MAX + 1) / 8`, rounded up, with headroom).
