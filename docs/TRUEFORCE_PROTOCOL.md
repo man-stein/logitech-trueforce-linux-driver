@@ -33,7 +33,7 @@ The belt-driven **G923** carries the same interface-2 transport and stream proto
 |--------|-------------------|----------------|
 | Interface 2 data packets | **0** | **tens of thousands** per gameplay session |
 | PID constant force updates (intf 1) | ongoing | small, init only |
-| Endpoint `0x03` packet rate | idle | 250 Hz (libtrueforce) / 500 Hz (kernel unified stream); games send 250-1000 Hz (AC EVO at the top end) |
+| Endpoint `0x03` packet rate | idle | 1000 Hz, all senders: libtrueforce, the kernel's unified stream, and games (AC EVO already used 1000; 250-500 seen in older captures). 1000 is both Logitech's stated 1 ms TRUEFORCE interval and the USB interrupt-endpoint ceiling. |
 | Samples per packet (new) | N/A | 4 new + 9 history = 13-slot rolling window |
 | Effective audio sample rate | N/A | ~1000 Hz (250 pkt/s * 4 new samples) |
 

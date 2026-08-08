@@ -4691,7 +4691,7 @@ static void hidpp_ff_retry_work(struct work_struct *work)
  *   - byte10 = 4: unified stream packet - torque in cur PLUS bytes
  *     12..63 carrying a 13-slot rolling window of haptic samples (each
  *     u16 offset binary, duplicated L/R), advanced 4 slots per packet.
- *     The driver emits these at its 500 Hz effect tick (2 kHz slot
+ *     The driver emits these at its 1 kHz effect tick (4 kHz slot
  *     rate; each 1 kHz synthesized sample fills two slots); games
  *     stream the same shape anywhere from 250 to ~1000 pkt/s, so slot
  *     consumption is packet-paced. See docs/TRUEFORCE_PROTOCOL.md.
@@ -5036,7 +5036,59 @@ struct hidpp_dd_lightsync_slot {
  * exhaust slots and stop working.
  */
 #define HIDPP_DD_FF_MAX_EFFECTS		63
-#define HIDPP_DD_FF_TIMER_INTERVAL_MS	2	/* 500 Hz update rate */
+#define HIDPP_DD_FF_TIMER_INTERVAL_MS	1	/* 1 kHz update rate */
+/*
+ * The tick period the timer will actually deliver, in milliseconds.
+ *
+ * This is a jiffies timer, so the nominal interval is rounded up to a whole
+ * jiffy: 1 ms on a CONFIG_HZ=1000 kernel, but 4 ms where HZ is 250. The
+ * texture sample spacing has to follow that, or the stream plays at the
+ * wrong speed on kernels this was not tuned on. The old code assumed its
+ * nominal 2 ms and generated two samples 1 ms apart, so on an HZ=250 kernel
+ * it delivered 2 ms of audio every 4 ms and the texture ran at half pitch.
+ */
+#define HIDPP_DD_FF_TICK_MS \
+	jiffies_to_msecs(msecs_to_jiffies(HIDPP_DD_FF_TIMER_INTERVAL_MS))
+/*
+ * Spacing between the tick's texture samples, in quarter-milliseconds:
+ * the tick's own duration divided across the packet's sample slots, since
+ * the wheel consumes those slots over exactly one packet interval. Comes to
+ * one quarter-ms at HZ=1000 and one whole millisecond at HZ=250.
+ */
+#define HIDPP_DD_TF_SAMPLE_SPACING_QMS \
+	((HIDPP_DD_FF_TICK_MS * 4U) / HIDPP_DD_TF_NEW_SAMPLES)
+/*
+ * This rate also sets the in-kernel texture bandwidth. It was 2 ms, and the
+ * texture that came out of it was 1 kHz: two distinct samples per tick, each
+ * held for two window slots.
+ *
+ * Logitech state a 1 ms TRUEFORCE processing interval, both userspace
+ * transports were measured sustaining exactly that (1000 packets/sec of four
+ * samples, a 4 kHz stream, which is also the ceiling USB interrupt endpoints
+ * allow), and AC EVO streams at that rate too. So this path was running at a
+ * quarter of what the hardware is built for while userspace ran at all of it.
+ *
+ * Now 1 ms with four distinct samples per tick. What made that more than a
+ * constant change is that the samples are a quarter-millisecond apart, and
+ * the effect evaluator counted whole milliseconds, so every sample in a tick
+ * came out identical. It now takes a quarter-millisecond offset that reaches
+ * the periodic phase only; envelopes, fades and durations stay in whole
+ * milliseconds, which is all they need.
+ *
+ * Note this also doubles the rate at which the steering force sum is
+ * computed, which is a fidelity gain rather than a cost: game FFB rates go
+ * up to 1000 Hz and this path could previously only sample them at 500.
+ */
+#define HIDPP_DD_FF_TICK_MS \
+	jiffies_to_msecs(msecs_to_jiffies(HIDPP_DD_FF_TIMER_INTERVAL_MS))
+/*
+ * Spacing between the tick's texture samples, in quarter-milliseconds:
+ * the tick's own duration divided across the packet's sample slots, since
+ * the wheel consumes those slots over exactly one packet interval. Comes to
+ * one quarter-ms at HZ=1000 and one whole millisecond at HZ=250.
+ */
+#define HIDPP_DD_TF_SAMPLE_SPACING_QMS \
+	((HIDPP_DD_FF_TICK_MS * 4U) / HIDPP_DD_TF_NEW_SAMPLES)
 /*
  * This rate also sets the in-kernel texture bandwidth, and it is a quarter
  * of what these wheels are built for.
@@ -5063,8 +5115,9 @@ struct hidpp_dd_lightsync_slot {
  *      time unit through the whole evaluator, not a spacing tweak.
  *
  * An intermediate step of four distinct samples at 0.5 ms spacing on the
- * existing 2 ms tick would double texture bandwidth to 2 kHz without
- * touching the timer or the force rate, and still needs (3).
+ * See HIDPP_DD_TF_SAMPLE_SPACING_QMS for how the spacing follows the tick
+ * the timer will actually deliver rather than the nominal one, which matters
+ * on kernels where CONFIG_HZ rounds 1 ms up to 4.
  */
 
 /*
@@ -5313,7 +5366,7 @@ struct hidpp_dd_ff_data {
 	 * Live wheel state used by condition-effect emulation (SPRING,
 	 * DAMPER, FRICTION, INERTIA). Updated from the interface-0 raw
 	 * input report handler at the wheel's native poll rate (roughly
-	 * 500 Hz for these wheels). The timer callback reads these lock-free
+	 * 1 kHz for these wheels). The timer callback reads these lock-free
 	 * via READ_ONCE; writers use WRITE_ONCE. wheel_pos is raw encoder
 	 * 0..65535 (0x8000 == centre). wheel_vel and wheel_accel are
 	 * signed derivatives in encoder-counts per input sample, computed
@@ -5647,9 +5700,31 @@ static s32 hidpp_dd_condition_force(const struct ff_condition_effect *c,
  *           constant friction opposing motion direction.
  * INERTIA:  condition formula fed by wheel_accel. Opposes acceleration.
  */
+/*
+ * `sub_qms` is a time offset in quarter-milliseconds, added to elapsed_ms,
+ * and it reaches only the periodic phase. Values of 4 or more are fine and
+ * expected: on a CONFIG_HZ=250 kernel the tick is 4 ms and the texture
+ * samples sit a whole millisecond apart, so the caller passes 0, 4, 8, 12.
+ *
+ * The texture channel wants four distinct samples per 1 ms tick, so 0.25 ms
+ * apart, and whole-millisecond time cannot express that: every sample in a
+ * tick came out identical, which is why this path emitted 1 kHz of content
+ * upsampled into 4 kHz of window slots.
+ *
+ * Quarters of a millisecond rather than microseconds, deliberately. It is
+ * exactly the resolution needed and it keeps every intermediate inside u32:
+ * the phase computation multiplies by 360, and (period * 4) * 360 stays under
+ * 95 million where a microsecond version would overflow and need 64-bit
+ * division in a timer callback.
+ *
+ * Envelopes, fades and durations are left in whole milliseconds on purpose.
+ * They shape the note over tens of milliseconds at least, so quarter-ms
+ * resolution buys nothing there, and widening them would touch every
+ * duration comparison in this file for no audible gain.
+ */
 static s32 hidpp_dd_ff_effect_tick(const struct hidpp_dd_ff_data *ff_state,
 			       const struct hidpp_dd_ff_effect *e,
-			       u32 elapsed_ms,
+			       u32 elapsed_ms, u8 sub_qms,
 			       s32 wheel_pos_signed,
 			       s32 wheel_vel, s32 wheel_accel)
 {
@@ -5759,7 +5834,7 @@ static s32 hidpp_dd_ff_effect_tick(const struct hidpp_dd_ff_data *ff_state,
 		 * metric) chattered: at slow turning speeds the per-tick
 		 * encoder delta hovers around 0..2 counts where quantisation
 		 * noise flips the sign every few ticks, so the friction
-		 * force slammed full-magnitude left/right at up to 500 Hz -
+		 * force slammed full-magnitude left/right at up to 1 kHz -
 		 * felt as gritty/notchy steering, worst near idle (issue #8).
 		 * Real friction models (and wheel firmware) ramp through a
 		 * stick zone instead of stepping.
@@ -5842,17 +5917,23 @@ static s32 hidpp_dd_ff_effect_tick(const struct hidpp_dd_ff_data *ff_state,
 			return offset;
 
 		/*
-		 * angle_deg in [0, 360). Compute `elapsed_ms % period`
-		 * first so the multiplication by 360 can't overflow u32
-		 * even for very long-running effects (without the modulo,
-		 * elapsed_ms * 360 overflows around 11.9 million ms ~=
-		 * 3.3 hours). Phase is a u16 where 0xFFFF equals one full
+		 * angle_deg in [0, 360), at quarter-millisecond resolution so
+		 * the four samples of a 1 ms texture tick differ from each
+		 * other. Phase is a u16 where 0xFFFF equals one full
 		 * wavelength.
+		 *
+		 * The modulo comes first, as before, so nothing overflows on
+		 * a long-running effect: cycle_ms < period <= 0xFFFF, hence
+		 * cycle_qms < 0x3FFFC, and cycle_qms * 360 < 95 million.
+		 * Taking elapsed_ms * 4 first would instead overflow after
+		 * about twelve days of a single effect.
 		 */
 		{
 			u32 cycle_ms = elapsed_ms % (u32)period;
+			u32 cycle_qms = cycle_ms * 4U + sub_qms;
+			u32 period_qms = (u32)period * 4U;
 
-			angle_deg = ((cycle_ms * 360U) / period +
+			angle_deg = ((cycle_qms * 360U) / period_qms +
 				     ((u32)phase * 360U) / 0xFFFF) % 360U;
 		}
 
@@ -5960,7 +6041,7 @@ static void hidpp_dd_ff_effect_timer_callback(struct timer_list *t)
 {
 	struct hidpp_dd_ff_data *ff = container_of(t, struct hidpp_dd_ff_data, effect_timer);
 	s32 force = 0;
-	s32 tf_sample[2] = { 0, 0 };
+	s32 tf_sample[HIDPP_DD_TF_NEW_SAMPLES] = { 0 };
 	s32 wheel_pos_signed, wheel_vel, wheel_accel;
 	u16 cur_pos;
 	unsigned long flags, now;
@@ -6072,29 +6153,34 @@ static void hidpp_dd_ff_effect_timer_callback(struct timer_list *t)
 		if (e->use_tf) {
 			/*
 			 * Texture effect on the TrueForce channel: generate
-			 * this tick's two 1 kHz samples (1 ms apart inside
-			 * the 2 ms tick). A fast periodic's DC offset is a
-			 * steering component, not texture - the TF audio
-			 * path cannot hold a sustained torque - so the
-			 * offset stays on the steering sum and only the AC
-			 * part streams.
+			 * this tick's four samples, a quarter of a
+			 * millisecond apart, which at the 1 ms tick is the
+			 * 4 kHz stream these wheels are built for. It used
+			 * to generate two and let the window hold each for
+			 * two slots, so the slots ran at 2 kHz carrying
+			 * 1 kHz of content.
+			 *
+			 * A fast periodic's DC offset is a steering
+			 * component, not texture - the TF audio path cannot
+			 * hold a sustained torque - so the offset stays on
+			 * the steering sum and only the AC part streams.
 			 */
 			s32 dc = e->effect.type == FF_PERIODIC ?
 				 e->effect.u.periodic.offset : 0;
+			int q;
 
 			any_texture = true;
-			tf_sample[0] += hidpp_dd_ff_effect_tick(ff, e,
-					elapsed_ms, wheel_pos_signed,
-					wheel_vel, wheel_accel) - dc;
-			tf_sample[1] += hidpp_dd_ff_effect_tick(ff, e,
-					elapsed_ms + 1,
-					wheel_pos_signed,
-					wheel_vel, wheel_accel) - dc;
+			for (q = 0; q < HIDPP_DD_TF_NEW_SAMPLES; q++)
+				tf_sample[q] += hidpp_dd_ff_effect_tick(ff, e,
+						elapsed_ms,
+						(u8)(q * HIDPP_DD_TF_SAMPLE_SPACING_QMS),
+						wheel_pos_signed,
+						wheel_vel, wheel_accel) - dc;
 			force += dc;
 			continue;
 		}
 
-		force += hidpp_dd_ff_effect_tick(ff, e, elapsed_ms,
+		force += hidpp_dd_ff_effect_tick(ff, e, elapsed_ms, 0,
 					     wheel_pos_signed,
 					     wheel_vel, wheel_accel);
 	}
@@ -6194,7 +6280,7 @@ static void hidpp_dd_ff_effect_timer_callback(struct timer_list *t)
 		 * unwind-to-soft-stop / recenter safety routine, so
 		 * coalescing identical-force ticks made any held constant
 		 * force evaporate within a couple of seconds (issue #16,
-		 * ffmvforce repro). At 500 Hz x 64 bytes the USB cost is
+		 * ffmvforce repro). At 1 kHz x 64 bytes the USB cost is
 		 * ~32 KB/s, negligible.
 		 */
 		if (!force_sent)
@@ -6244,7 +6330,7 @@ static void hidpp_dd_ff_send_force(struct hidpp_dd_ff_data *ff, s32 force)
 	ff_work = kmalloc(sizeof(*ff_work), GFP_ATOMIC);
 	if (!ff_work) {
 		/*
-		 * Dropping a 500 Hz FFB sample is normally invisible, so
+		 * Dropping a 1 kHz FFB sample is normally invisible, so
 		 * count the drops and let the shared last_err_log rate
 		 * limiter surface the count next time it fires. err_count
 		 * is also bumped from hidpp_dd_ff_work_handler on USB errors;
@@ -6360,7 +6446,7 @@ static bool hidpp_dd_tf_queue_ctrl(struct hidpp_dd_ff_data *ff, u8 cmd)
  * with our own KF packet, which is this exact layout with zero new
  * samples. Earlier revisions duplicated the NEWEST AUDIO SAMPLE into
  * 6-9, which commanded the motor to follow the texture amplitude
- * whenever a stream packet interleaved with the 500 Hz force packets.
+ * whenever a stream packet interleaved with the 1 kHz force packets.
  *
  * cur is deliberately NOT scaled by wheel_strength here: it is the same
  * bytes-6-9 field the KF packet carries, and KF forces are verified to
@@ -6521,16 +6607,16 @@ static void hidpp_dd_tf_init_work_handler(struct work_struct *work)
 
 /*
  * Per-tick TF driver, called from the effect timer after the effect sum.
- * `samples` holds this tick's two 1 kHz texture samples (signed force
- * domain, pre-gain); `force` is the final steering-force sum for this
- * tick (post-gain, autocenter included).
+ * `samples` holds this tick's HIDPP_DD_TF_NEW_SAMPLES texture samples
+ * (signed force domain, pre-gain), spaced across the tick; `force` is the
+ * final steering-force sum for this tick (post-gain, autocenter included).
  *
- * Emits ONE unified stream packet per tick (500 Hz): the steering force
- * in the cur preamble and four new window slots - each 1 kHz texture
- * sample duplicated once, which is time-correct at the resulting 2 kHz
- * window-slot rate. This replaces the earlier two-stream interleave
- * (500 Hz force packets + 250 Hz audio packets whose preamble wrongly
- * carried audio).
+ * Emits ONE unified stream packet per tick (1 kHz): the steering force in
+ * the cur preamble and four new window slots, one per texture sample, so
+ * slots and content are both 4 kHz. This replaces the earlier two-stream
+ * interleave (force packets plus separate audio packets whose preamble
+ * wrongly carried audio), and before that a version which held each of two
+ * samples for two slots and so carried only 1 kHz of texture.
  *
  * When the last texture effect stops, re-centres the window (once) and
  * sends STOP so the wheel's DSP returns to silence instead of looping
@@ -6602,7 +6688,7 @@ static bool hidpp_dd_tf_tick(struct hidpp_dd_ff_data *ff, bool any_texture,
 	gain = READ_ONCE(ff->gain);
 	strength = READ_ONCE(ff->strength);
 	/* Each 1 kHz sample fills two of the packet's four new slots. */
-	for (i = 0; i < HIDPP_DD_TF_NEW_SAMPLES / 2; i++) {
+	for (i = 0; i < HIDPP_DD_TF_NEW_SAMPLES; i++) {
 		s32 s = samples[i];
 
 		if (gain != 0xFFFF)
@@ -6625,13 +6711,15 @@ static bool hidpp_dd_tf_tick(struct hidpp_dd_ff_data *ff, bool any_texture,
 		s = clamp(s, -(s32)HIDPP_DD_TF_MAX_AMPLITUDE,
 			  (s32)HIDPP_DD_TF_MAX_AMPLITUDE);
 		/*
-		 * Duplicate each 1 kHz sample into two adjacent window
-		 * slots: at one packet per 2 ms tick the wheel consumes
-		 * window slots at 2 kHz, so the pair plays for the 1 ms
-		 * the sample represents.
+		 * One window slot per sample. These are four genuinely
+		 * distinct samples a quarter-millisecond apart now, so at
+		 * one packet per 1 ms tick the slots and the content are
+		 * both 4 kHz. This used to write each of two samples into
+		 * two adjacent slots, which was time-correct for a 2 ms
+		 * tick but meant the wheel only ever received 1 kHz of
+		 * texture.
 		 */
-		quartet[i * 2] = hidpp_dd_force_to_offset_binary(s);
-		quartet[i * 2 + 1] = quartet[i * 2];
+		quartet[i] = hidpp_dd_force_to_offset_binary(s);
 	}
 
 	/* Window advance is committed inside queue_stream, only on success. */
@@ -6932,7 +7020,7 @@ static void hidpp_dd_ff_work_handler(struct work_struct *work)
 
 	if (ret < 0) {
 		/*
-		 * At 500 Hz this error path would flood dmesg on a persistent
+		 * At 1 kHz this error path would flood dmesg on a persistent
 		 * USB fault. Rate-limit to one message per minute; the shared
 		 * last_err_log timestamp coordinates with the refresh handler
 		 * so a failing device produces a single steady trickle.
@@ -7164,7 +7252,7 @@ static void hidpp_dd_ff_range_readback(struct hidpp_dd_ff_data *ff)
 /*
  * Self-arming range poll, on system_unbound_wq: the synchronous HID++
  * GET above can block for seconds if the wheel stops answering, so it
- * must never share a queue with the 500 Hz force stream. Skipped while
+ * must never share a queue with the 1 kHz force stream. Skipped while
  * effects play - the silent range reset this poll hunts happens at
  * game launch (FFB idle), and a stale reading during a race is
  * corrected within one interval of the effects stopping.
@@ -8514,7 +8602,9 @@ static void hidpp_dd_ff_init_work(struct work_struct *work)
 	 * The wheel requires continuous FFB commands to maintain force.
 	 * Timer will be started by playback callback when needed.
 	 */
-	dd_info(hid, "Effect timer ready (interval=%dms, starts on effect play)\n", HIDPP_DD_FF_TIMER_INTERVAL_MS);
+	dd_info(hid, "Effect timer ready (interval=%ums, %u texture samples/tick, starts on effect play)\n",
+		jiffies_to_msecs(msecs_to_jiffies(HIDPP_DD_FF_TIMER_INTERVAL_MS)),
+		HIDPP_DD_TF_NEW_SAMPLES);
 
 	/*
 	 * Re-open the HID device for IO before sending HID++ commands.
@@ -10975,7 +11065,7 @@ static int hidpp_dd_rev_send_level(struct hidpp_device *hidpp, u8 idx, u8 level)
  *
  * Runs on system_unbound_wq, not ff->wq: it does synchronous-ish 0x807A
  * sends (the arm burst msleeps between packets) and must never
- * head-of-line-block the 500 Hz force stream on the singlethread ff->wq -
+ * head-of-line-block the 1 kHz force stream on the singlethread ff->wq -
  * same rationale as tf_init_work / range_poll_work.
  *
  * Latest-value-wins: the store publishes rev_target and (re)queues us; we
@@ -13635,7 +13725,7 @@ static void hidpp_dd_ff_destroy(struct hidpp_device *hidpp)
 	 * Invalidate interface 0's cached copy of the shared ff pointer
 	 * BEFORE this struct is freed: hidpp_dd_track_wheel_pos caches ff into
 	 * the input interface's hidpp->private_data, and if that iface
-	 * stays bound while the owner is torn down, its 500 Hz raw-event
+	 * stays bound while the owner is torn down, its 1 kHz raw-event
 	 * path would keep writing wheel_pos through a dangling pointer.
 	 * The owner's own private_data was already NULLed above, so a
 	 * concurrent report that re-walks the siblings finds nothing and
