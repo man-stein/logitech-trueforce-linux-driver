@@ -7,6 +7,36 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ## Unreleased
 
+**The kernel's own TrueForce stream now runs at 4 kHz too.** The effect tick
+was 2 ms emitting two texture samples, each held for two window slots, so the
+wheel received 1 kHz of texture in 2 kHz of slots while userspace had already
+moved to 4 kHz. It is now 1 ms with four distinct samples. That needed more
+than a constant: the samples are a quarter-millisecond apart and the effect
+evaluator counted whole milliseconds, so every sample in a tick came out
+identical. The evaluator takes a quarter-millisecond offset now, reaching the
+periodic phase only; envelopes and durations stay in whole milliseconds.
+
+Doubling the tick also doubles the rate at which the steering force sum is
+computed. Measured against the previous build on an RS50, steering response
+is unchanged within 2% across three force levels, so this is fidelity gained
+rather than feel altered: game force-feedback rates reach 1000 Hz and this
+path could previously only sample them at 500.
+
+**Texture played at the wrong speed on some kernels.** The effect timer is a
+jiffies timer, so its period is the nominal one rounded up to a whole jiffy:
+1 ms where CONFIG_HZ is 1000, but 4 ms where it is 250. The old code assumed
+its nominal 2 ms regardless and spaced samples accordingly, so on an HZ=250
+kernel it delivered 2 ms of audio every 4 ms and texture ran at half pitch.
+Spacing now follows the period the timer will actually deliver. Debian and
+Ubuntu builds are the ones this was wrong on.
+
+**The driver reports which HID++ features a wheel has**, one line at probe.
+Userspace cannot find this out: the driver parses HID++ replies and tells the
+kernel it consumed them, so a hidraw reader sees nothing on any wheel the
+driver is talking to, and reads that silence as absence. `docs/FEATURE_MATRIX.md`
+records what both wheels here answered, including four features present on
+the hardware that this driver does not implement.
+
 **Simulated TrueForce now streams at 4 kHz instead of 1 kHz.** Logitech's own
 figure for TRUEFORCE is a 1 ms processing interval, and both transports were
 measured sustaining exactly that: one packet per millisecond carrying four
