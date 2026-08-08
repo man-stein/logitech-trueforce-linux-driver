@@ -87,6 +87,14 @@ impl TfStream {
         Ok(TfStream { index, _ffb: ffb })
     }
 
+    /// Whether the force-feedback session that keeps this wheel stable is
+    /// actually held. False means the wheel may move unpredictably while
+    /// streaming (issue #57), which a caller driving it deliberately at a
+    /// person's request needs to be able to refuse.
+    pub fn is_stabilised(&self) -> bool {
+        self._ffb.is_some()
+    }
+
     /// Queue `samples` (each -1.0..1.0, at 1 kHz) for the wheel.
     ///
     /// Mirrors the Windows SDK semantics: blocks when the library's

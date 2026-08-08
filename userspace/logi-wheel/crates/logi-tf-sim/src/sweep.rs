@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::config::{Config, DEFAULT_INTENSITY};
 use crate::daemon::open_wheel_stream;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::synth::EngineSynth;
 
 /// Total sweep duration: idle -> redline -> idle.
@@ -51,7 +51,19 @@ pub fn run(cfg: &Config, pitch_override_pct: Option<u8>, stop: &AtomicBool) -> R
         thread::sleep(Duration::from_secs(1));
     }
 
-    let mut stream = open_wheel_stream(cfg)?;
+    let stream_probe = open_wheel_stream(cfg)?;
+    if !stream_probe.is_stabilised() {
+        // Refuse rather than warn. This is the one code path whose entire
+        // purpose is to drive the wheel because somebody asked it to, and
+        // the app's "Test simulated TrueForce" button calls straight into
+        // it, so the person is very likely holding the rim. Without the
+        // force-feedback session a direct-drive wheel drives itself into
+        // its stops (issue #57), and a warning on stderr is not something
+        // a button press shows anyone.
+        drop(stream_probe);
+        return Err(Error::Unstabilised);
+    }
+    let mut stream = stream_probe;
     let mut synth = EngineSynth::new();
     let mut samples = Vec::with_capacity(CHUNK_MS);
 

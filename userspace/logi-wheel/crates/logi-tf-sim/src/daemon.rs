@@ -72,6 +72,18 @@ pub(crate) enum WheelStream {
 }
 
 impl WheelStream {
+    /// Whether this stream is safe to drive at a person's request.
+    ///
+    /// Only the direct-drive path can be unstable without a force-feedback
+    /// session held open; a G923 measured 17 degrees of travel where an
+    /// RS50 without one measured 1500, so it is always considered fine.
+    pub(crate) fn is_stabilised(&self) -> bool {
+        match self {
+            WheelStream::Dd(s) => s.is_stabilised(),
+            WheelStream::G923(_) => true,
+        }
+    }
+
     pub(crate) fn push(&mut self, samples: &[f32]) -> Result<()> {
         match self {
             WheelStream::Dd(s) => s.push(samples),
