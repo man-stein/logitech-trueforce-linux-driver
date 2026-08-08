@@ -738,6 +738,24 @@ turn Steam Input off.",
         setup: "Anti-cheat may block some builds; verify per release.",
         confidence: Confidence::Unknown,
     },
+        GameCompat {
+        name: "TOCA Race Driver 3",
+        linux: Linux::Proton,
+        ffb: Ffb::NativeEvdev,
+        native_trueforce: Support::No,
+        simulated_tf: SimTf::No,
+        setup: "Plain force feedback.",
+        confidence: Confidence::Documented,
+    },
+        GameCompat {
+        name: "Need for Speed: Shift",
+        linux: Linux::Proton,
+        ffb: Ffb::NativeEvdev,
+        native_trueforce: Support::No,
+        simulated_tf: SimTf::No,
+        setup: "Plain force feedback.",
+        confidence: Confidence::Documented,
+    },
 ];
 
 /// Every title, sorted case-insensitively by name: the friendly order for a
