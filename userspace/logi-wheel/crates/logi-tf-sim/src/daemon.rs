@@ -37,6 +37,43 @@ const MAX_GEN_MS: u64 = 100;
 /// How long to wait before re-probing for a wheel after a failed open.
 const OPEN_RETRY: Duration = Duration::from_secs(5);
 
+/// What one iteration of the generation loop should produce.
+///
+/// Extracted from the loop so it can be tested against a simulated clock.
+/// The arithmetic here has been wrong four times, every instance the same
+/// mistake of treating a sample count and a duration as interchangeable, and
+/// every one found by accident rather than by a test: three when the stream
+/// rate went from 1 kHz to 4 kHz and broke the coincidence that made them
+/// agree, and one by chasing a symptom afterwards. Nothing exercised it
+/// directly, because it lived inside a loop wrapped in sockets and streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GenPlan {
+    /// Samples to render this iteration.
+    pub samples: usize,
+    /// How much audio time those samples are, which is also how far the
+    /// generation clock advances. Never a sample count.
+    pub audio_ms: u64,
+    /// Whether the backlog exceeded the cap, so the clock resets to now and
+    /// the excess is dropped rather than burst.
+    pub dropped_backlog: bool,
+}
+
+/// Plan one iteration for `elapsed_ms` of wall clock since the last one.
+///
+/// `None` when there is nothing to do yet, which is any elapsed time shorter
+/// than a millisecond.
+pub(crate) fn plan_generation(elapsed_ms: u64) -> Option<GenPlan> {
+    let audio_ms = elapsed_ms.min(MAX_GEN_MS);
+    if audio_ms == 0 {
+        return None;
+    }
+    Some(GenPlan {
+        samples: audio_ms as usize * crate::synth::SAMPLES_PER_MS,
+        audio_ms,
+        dropped_backlog: elapsed_ms > MAX_GEN_MS,
+    })
+}
+
 /// Set by the signal handler; polled by [`run`] and the sweep loop.
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -418,29 +455,18 @@ pub fn run(cfg: &Config) -> Result<()> {
                 stop_reason = Some(format!("telemetry silent for {SILENCE_TIMEOUT_MS} ms"));
             } else {
                 let elapsed_ms = now.duration_since(a.last_gen).as_millis() as u64;
-                let count = elapsed_ms.min(MAX_GEN_MS)
-                    * crate::synth::SAMPLES_PER_MS as u64;
-                if count > 0 {
-                    // Advance by the TIME we generated, not the sample count.
-                    // Those were the same number while the stream ran at
-                    // 1 kHz, so this read `from_millis(count)` and was right
-                    // by coincidence. At 4 kHz it advanced last_gen four
-                    // times too far, past `now`, after which duration_since
-                    // saturates to zero and generation stalls until the wall
-                    // clock catches up: the stream starves and every effect
-                    // measured in time stretches with it.
-                    let generated_ms = elapsed_ms.min(MAX_GEN_MS);
-                    a.last_gen = if elapsed_ms > MAX_GEN_MS {
+                if let Some(plan) = plan_generation(elapsed_ms) {
+                    a.last_gen = if plan.dropped_backlog {
                         now
                     } else {
-                        a.last_gen + Duration::from_millis(generated_ms)
+                        a.last_gen + Duration::from_millis(plan.audio_ms)
                     };
                     let intensity = cfg.effective_intensity(a.game);
                     // The mixer owns the engine layer along with the rest,
                     // including the over-redline cap the synth call used to
                     // apply here: an effect's reading of the sample is the
                     // effect's business.
-                    a.mixer.render(&a.tel, intensity, count as usize, &mut a.samples);
+                    a.mixer.render(&a.tel, intensity, plan.samples, &mut a.samples);
                     if let Err(e) = a.stream.push(&a.samples) {
                         stop_reason = Some(format!("stream push failed: {e}"));
                     }
@@ -473,4 +499,82 @@ pub fn run(cfg: &Config) -> Result<()> {
     }
     eprintln!("logi-tf-sim: exiting");
     Ok(())
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::{plan_generation, MAX_GEN_MS};
+    use crate::synth::SAMPLES_PER_MS;
+
+    /// The property every one of the four bugs violated: the audio produced
+    /// must be worth exactly the wall-clock time it consumed.
+    ///
+    /// This is what makes the loop self-correcting. Break it and the
+    /// generation clock drifts against the wall clock, which starves the
+    /// stream in one direction and bursts it in the other, and stretches or
+    /// compresses every effect that measures itself in milliseconds.
+    #[test]
+    fn audio_generated_equals_wall_time_consumed() {
+        for elapsed in [1u64, 2, 5, 17, 33, 50, 99, MAX_GEN_MS] {
+            let plan = plan_generation(elapsed).expect("{elapsed} ms should generate");
+            assert_eq!(plan.audio_ms, elapsed, "{elapsed} ms of wall clock");
+            assert_eq!(
+                plan.samples,
+                elapsed as usize * SAMPLES_PER_MS,
+                "{elapsed} ms should be {elapsed} ms of samples, at whatever the rate is",
+            );
+            assert!(!plan.dropped_backlog, "{elapsed} ms is within the cap");
+        }
+    }
+
+    /// Simulate the loop against a fake clock and check it neither drifts nor
+    /// stalls, at every iteration period the daemon really sees: a tight
+    /// loop, 60 Hz and 20 Hz telemetry, and a stall longer than the cap.
+    ///
+    /// The bug this was written for advanced the clock by a sample count
+    /// rather than a duration, so at 4 kHz it ran four times ahead of `now`,
+    /// after which elapsed read zero and generation stopped until the wall
+    /// clock caught up. Here that shows as generated audio far short of the
+    /// wall time.
+    #[test]
+    fn a_simulated_loop_neither_drifts_nor_stalls() {
+        for period_ms in [1u64, 17, 50] {
+            let wall_total = 10_000u64;
+            let mut clock = 0u64;      // wall clock, ms
+            let mut last_gen = 0u64;   // generation clock, ms
+            let mut audio_ms = 0u64;
+
+            while clock < wall_total {
+                clock += period_ms;
+                let elapsed = clock.saturating_sub(last_gen);
+                if let Some(plan) = plan_generation(elapsed) {
+                    last_gen = if plan.dropped_backlog { clock } else { last_gen + plan.audio_ms };
+                    audio_ms += plan.audio_ms;
+                }
+            }
+
+            // Within one iteration's worth: nothing accumulates.
+            let drift = wall_total.abs_diff(audio_ms);
+            assert!(
+                drift <= period_ms,
+                "at a {period_ms} ms period, {wall_total} ms of wall clock produced \
+                 {audio_ms} ms of audio (drift {drift})",
+            );
+        }
+    }
+
+    /// A stall longer than the cap drops the backlog instead of bursting it,
+    /// and does not leave the clock behind for the next iteration to chase.
+    #[test]
+    fn a_long_stall_drops_the_backlog_and_resyncs() {
+        let plan = plan_generation(5_000).expect("a 5 s stall still generates something");
+        assert!(plan.dropped_backlog, "5 s is well past the cap");
+        assert_eq!(plan.audio_ms, MAX_GEN_MS, "capped, not burst");
+        assert_eq!(plan.samples, MAX_GEN_MS as usize * SAMPLES_PER_MS);
+    }
+
+    #[test]
+    fn nothing_is_generated_for_less_than_a_millisecond() {
+        assert_eq!(plan_generation(0), None);
+    }
 }
