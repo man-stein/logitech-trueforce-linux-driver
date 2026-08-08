@@ -421,11 +421,19 @@ pub fn run(cfg: &Config) -> Result<()> {
                 let count = elapsed_ms.min(MAX_GEN_MS)
                     * crate::synth::SAMPLES_PER_MS as u64;
                 if count > 0 {
-                    // Advance by what we generated; drop any capped backlog.
+                    // Advance by the TIME we generated, not the sample count.
+                    // Those were the same number while the stream ran at
+                    // 1 kHz, so this read `from_millis(count)` and was right
+                    // by coincidence. At 4 kHz it advanced last_gen four
+                    // times too far, past `now`, after which duration_since
+                    // saturates to zero and generation stalls until the wall
+                    // clock catches up: the stream starves and every effect
+                    // measured in time stretches with it.
+                    let generated_ms = elapsed_ms.min(MAX_GEN_MS);
                     a.last_gen = if elapsed_ms > MAX_GEN_MS {
                         now
                     } else {
-                        a.last_gen + Duration::from_millis(count)
+                        a.last_gen + Duration::from_millis(generated_ms)
                     };
                     let intensity = cfg.effective_intensity(a.game);
                     // The mixer owns the engine layer along with the rest,
