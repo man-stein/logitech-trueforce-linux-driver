@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::config::{Config, DEFAULT_INTENSITY};
 use crate::daemon::open_wheel_stream;
 use crate::error::{Error, Result};
-use crate::synth::EngineSynth;
+use crate::synth::{EngineSynth, SAMPLES_PER_MS};
 
 /// Total sweep duration: idle -> redline -> idle.
 pub const SWEEP_SECS: f32 = 6.0;
@@ -65,7 +65,7 @@ pub fn run(cfg: &Config, pitch_override_pct: Option<u8>, stop: &AtomicBool) -> R
     }
     let mut stream = stream_probe;
     let mut synth = EngineSynth::new();
-    let mut samples = Vec::with_capacity(CHUNK_MS);
+    let mut samples = Vec::with_capacity(CHUNK_MS * SAMPLES_PER_MS);
 
     let steps = (SWEEP_SECS * 1000.0) as usize / CHUNK_MS;
     for i in 0..steps {
@@ -81,7 +81,9 @@ pub fn run(cfg: &Config, pitch_override_pct: Option<u8>, stop: &AtomicBool) -> R
             cylinders: cfg.cylinders,
             pitch_scale: pitch,
         };
-        synth.generate(&note, intensity, CHUNK_MS, &mut samples);
+        // CHUNK_MS of audio, not CHUNK_MS samples: those are only the same
+        // number while the stream runs at 1 kHz.
+        synth.generate(&note, intensity, CHUNK_MS * SAMPLES_PER_MS, &mut samples);
         stream.push(&samples)?;
         thread::sleep(Duration::from_millis(CHUNK_MS as u64));
     }

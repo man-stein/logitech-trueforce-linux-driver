@@ -29,9 +29,11 @@ use crate::{beamng, codemasters, f1, g923, pcars, relay, wrc};
 pub const SILENCE_TIMEOUT_MS: u64 = 500;
 /// Poll timeout; bounds both watchdog latency and shutdown latency.
 const POLL_TIMEOUT_MS: i32 = 50;
-/// Cap on samples generated per iteration (1 ms each): a scheduling stall
-/// longer than this drops the backlog instead of bursting it.
-const MAX_GEN_SAMPLES: u64 = 100;
+/// Cap on how much audio one iteration may generate, in milliseconds: a
+/// scheduling stall longer than this drops the backlog instead of bursting
+/// it. Expressed in time rather than samples, because the sample count for
+/// a given stretch of time depends on the stream rate.
+const MAX_GEN_MS: u64 = 100;
 /// How long to wait before re-probing for a wheel after a failed open.
 const OPEN_RETRY: Duration = Duration::from_secs(5);
 
@@ -344,7 +346,7 @@ pub fn run(cfg: &Config) -> Result<()> {
                                 tel,
                                 last_telemetry: now,
                                 last_gen: now,
-                                samples: Vec::with_capacity(MAX_GEN_SAMPLES as usize),
+                                samples: Vec::with_capacity(MAX_GEN_MS as usize * crate::synth::SAMPLES_PER_MS),
                                 leds,
                             });
                         }
@@ -395,7 +397,7 @@ pub fn run(cfg: &Config) -> Result<()> {
                             tel: Telemetry::default(),
                             last_telemetry: now,
                             last_gen: now,
-                            samples: Vec::with_capacity(MAX_GEN_SAMPLES as usize),
+                            samples: Vec::with_capacity(MAX_GEN_MS as usize * crate::synth::SAMPLES_PER_MS),
                             leds: None,
                         });
                     }
@@ -416,10 +418,11 @@ pub fn run(cfg: &Config) -> Result<()> {
                 stop_reason = Some(format!("telemetry silent for {SILENCE_TIMEOUT_MS} ms"));
             } else {
                 let elapsed_ms = now.duration_since(a.last_gen).as_millis() as u64;
-                let count = elapsed_ms.min(MAX_GEN_SAMPLES);
+                let count = elapsed_ms.min(MAX_GEN_MS)
+                    * crate::synth::SAMPLES_PER_MS as u64;
                 if count > 0 {
                     // Advance by what we generated; drop any capped backlog.
-                    a.last_gen = if elapsed_ms > MAX_GEN_SAMPLES {
+                    a.last_gen = if elapsed_ms > MAX_GEN_MS {
                         now
                     } else {
                         a.last_gen + Duration::from_millis(count)

@@ -132,7 +132,18 @@ pub const NEW_PER_PACKET: usize = 4;
 /// When it overflows the OLDEST samples go. For a live haptic stream,
 /// freshness beats completeness: nobody can feel a dropped millisecond, and
 /// everybody can feel a second of delay.
-pub const MAX_PENDING: usize = NEW_PER_PACKET * 8;
+pub const MAX_PENDING_MS: usize = 32;
+
+/// Backlog bound, in samples, derived from [`MAX_PENDING_MS`].
+///
+/// Written as `NEW_PER_PACKET * 8` while the stream ran at 1 kHz, where it
+/// happened to equal 32 ms of audio. It is a LATENCY bound, so milliseconds
+/// are what it means; as a fixed sample count it silently shrank to 8 ms
+/// when the stream went to 4 kHz, and every 20 ms chunk the producer pushed
+/// overflowed it instantly. That looked exactly like the wheel being unable
+/// to keep up, when the transport was in fact delivering all 4000
+/// samples/sec it was asked for.
+pub const MAX_PENDING: usize = MAX_PENDING_MS * crate::synth::SAMPLES_PER_MS;
 /// Wire-format zero force (offset-binary center).
 pub const CENTER: u16 = 0x8000;
 /// Wire packet length.
@@ -151,7 +162,16 @@ const INIT_INTERPACKET: Duration = Duration::from_micros(3000);
 /// samples every tick at the synthesizer's 1 kHz output rate works out to
 /// 250 packets/sec, matching libtrueforce's own DD-wheel stream thread
 /// (`stream.c`, 250 Hz).
-const TICK_INTERVAL: Duration = Duration::from_millis(4);
+/// The writer thread's steady per-packet cadence: [`NEW_PER_PACKET`] new
+/// samples every tick at the synthesiser's 4 kHz output rate works out to
+/// 1000 packets/sec, matching libtrueforce's DD-wheel stream thread
+/// (`stream.c`).
+///
+/// Was 4 ms (250 packets/sec, a 1 kHz stream) until the transports were
+/// measured: this wheel sustained 1000 ticks/sec delivering all 3999
+/// samples/sec asked of it, with nothing dropped. Verified on a c266,
+/// 2026-08-08.
+const TICK_INTERVAL: Duration = Duration::from_millis(1);
 /// Capacity of the channel [`G923Stream::push`] feeds the writer thread
 /// through. Bounded so a wedged hidraw write cannot grow the backlog
 /// without limit; sized well above one daemon poll's worth of `push`
@@ -768,6 +788,18 @@ fn run_writer(mut writer: Writer, cmd_rx: mpsc::Receiver<Cmd>, mut pacer: impl P
         }
         if stop_requested {
             let _ = writer.send_stop();
+            // Say whether the writer kept pace. A running total that is not
+            // zero means the producer outran this transport and the oldest
+            // samples were thrown away, which is silent otherwise: dropping
+            // stale samples is normal behaviour here, so a rate the wheel
+            // cannot sustain looks exactly like a healthy stream.
+            if writer.dropped_stale > 0 {
+                eprintln!(
+                    "logi-tf-sim: G923 writer dropped {} stale samples \
+                     (the producer outran this transport)",
+                    writer.dropped_stale
+                );
+            }
             pacer.ack();
             return;
         }

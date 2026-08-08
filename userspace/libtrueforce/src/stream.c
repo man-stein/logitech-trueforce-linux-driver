@@ -40,6 +40,8 @@
  * expected tactile output with no dropped packets.
  */
 
+#include <stdlib.h>
+
 #include "internal.h"
 #include "tf_init_data.h"
 

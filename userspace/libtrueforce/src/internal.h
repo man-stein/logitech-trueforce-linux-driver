@@ -20,8 +20,28 @@
 
 #define LOGITF_TF_WINDOW  13          /* samples per packet (rolling window) */
 #define LOGITF_TF_NEW     4           /* new samples added per packet */
-#define LOGITF_TF_RING    4096        /* sample ring capacity (must be pow2) */
-#define LOGITF_TF_PKT_HZ  250         /* packets per second (1000 Hz / 4 new) */
+/* Sample ring capacity (must be pow2).
+ *
+ * A COUNT that behaves as a duration: 4096 samples is 4.1 s of audio at a
+ * 1 kHz stream and 1.0 s at 4 kHz, so raising the packet rate quietly
+ * quarters the worst-case buffered latency this permits. Harmless here
+ * only because logitf_stream_push blocks rather than dropping when the
+ * ring is full, so a producer pacing itself by wall clock never fills it;
+ * the equivalent bound on the G923 path load-sheds instead, and being
+ * written as a sample count is exactly what broke it at 4 kHz.
+ */
+#define LOGITF_TF_RING    4096
+/* Packets per second; with LOGITF_TF_NEW this is a 4 kHz sample stream.
+ *
+ * Was 250 (a 1 kHz stream), the rate the G HUB capture this was built from
+ * used. Measured on an RS50 (2026-08-08) the wheel sustains 1000 packets/sec
+ * exactly, delivering 4022 samples/sec with no drops or errors, and the
+ * result was audibly better: at 1 kHz the note's upper harmonics cannot
+ * survive above 250 Hz, so a high engine note degenerated into a plain tone
+ * at high revs. 1000 is also the ceiling this transport allows, USB
+ * interrupt endpoints polling at 1 ms intervals.
+ */
+#define LOGITF_TF_PKT_HZ  1000
 
 struct logitf_device {
 	bool in_use;
