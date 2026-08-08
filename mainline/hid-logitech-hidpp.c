@@ -4471,6 +4471,72 @@ static int g920_ff_set_autocenter(struct hidpp_device *hidpp,
 	return ret;
 }
 
+/*
+ * Report which rev-light features a G920-class wheel implements.
+ *
+ * This exists because userspace cannot find out. A hidraw reader can send
+ * HID++ requests to these wheels perfectly well, but hidpp_raw_event parses
+ * the replies and returns non-zero, which tells hid-core the report was
+ * consumed, so the answers never reach it. Every feature probe run against a
+ * wheel this driver speaks HID++ to comes back silent no matter what the
+ * wheel supports, which is a false negative that reads exactly like a fact.
+ * The driver is the only component that can see the replies, so it is the
+ * one that has to say.
+ *
+ * Names are Logitech's own, from their published HID++ 2.0 feature registry.
+ * 0x807A is RPM_INDICATOR, the rev display specifically, rather than the
+ * general LIGHTSYNC this project long mistook it for; 0x8070 and 0x8071 are
+ * the general lighting features, asked here in case an edition keeps its rim
+ * lighting there instead.
+ *
+ * Logged unconditionally at info level, once per probe, on one line. Not
+ * behind dynamic debug: asking a reporter to enable dyndbg and replug
+ * already cost issue #27 a round trip, and a diagnostic nobody can reach is
+ * not a diagnostic. Read-only, and issue #27 is what it is for.
+ */
+static void hidpp_dd_log_rev_light_features(struct hidpp_device *hidpp)
+{
+	static const struct {
+		u16 id;
+		const char *name;
+	} candidates[] = {
+		{ 0x807A, "RPM_INDICATOR" },
+		{ 0x807B, "RPM_LED_PATTERN" },
+		{ 0x8070, "COLOR_LED_EFFECTS" },
+		{ 0x8071, "RGB_EFFECTS" },
+		{ 0x8040, "BRIGHTNESS_CONTROL" },
+	};
+	char buf[160];
+	int len = 0;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(candidates); i++) {
+		u8 index = 0;
+		int ret = hidpp_root_get_feature(hidpp, candidates[i].id, &index);
+
+		/*
+		 * A zero index means unsupported, the same convention
+		 * hidpp_root_get_feature's other callers use. Distinguished
+		 * from a failed request, because "the wheel said no" and "the
+		 * wheel did not answer" are different findings.
+		 */
+		if (ret)
+			len += scnprintf(buf + len, sizeof(buf) - len,
+					 "%s0x%04X=err", i ? " " : "",
+					 candidates[i].id);
+		else if (!index)
+			len += scnprintf(buf + len, sizeof(buf) - len,
+					 "%s0x%04X=no", i ? " " : "",
+					 candidates[i].id);
+		else
+			len += scnprintf(buf + len, sizeof(buf) - len,
+					 "%s0x%04X=0x%02X", i ? " " : "",
+					 candidates[i].id, index);
+	}
+
+	hid_info(hidpp->hid_dev, "rev-light features: %s\n", buf);
+}
+
 static int g920_get_config(struct hidpp_device *hidpp,
 			   struct hidpp_ff_private_data *data)
 {
@@ -7857,6 +7923,14 @@ static void hidpp_dd_ff_discover_features(struct hidpp_dd_ff_data *ff)
 
 	dd_dbg(hid, "Discovering HID++ features\n");
 	hidpp_dd_discover_settings_features(ff);
+	/*
+	 * Same one-line summary the G920-class path logs. Useful on these
+	 * wheels for the same reason (a bug report can state what the wheel
+	 * actually implements, which userspace cannot find out), and it is
+	 * what makes the function testable on hardware this project has:
+	 * nothing here takes the G920 path.
+	 */
+	hidpp_dd_log_rev_light_features(ff->hidpp);
 	hidpp_dd_discover_lightsync_features(ff);
 	dd_dbg(hid, "Feature discovery completed\n");
 }
@@ -16221,6 +16295,12 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 				    USB_DEVICE_ID_LOGITECH_G923_XBOX_WHEEL)
 					hid_info(hidpp->hid_dev,
 						 "G923 (Xbox): using HID++ 0x8123 force feedback\n");
+				/*
+				 * Only once HID++ has demonstrably answered:
+				 * asking before that would log five errors
+				 * that say nothing about the wheel.
+				 */
+				hidpp_dd_log_rev_light_features(hidpp);
 				ret = hidpp_ff_init(hidpp, &data);
 				if (ret == -ENODEV) {
 					hid_info(hidpp->hid_dev,
