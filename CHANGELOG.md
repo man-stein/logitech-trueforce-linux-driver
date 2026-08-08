@@ -7,6 +7,38 @@ the contract is "it works on RS50 and G Pro as listed here".
 
 ## Unreleased
 
+**Simulated TrueForce now streams at 4 kHz instead of 1 kHz.** Logitech's own
+figure for TRUEFORCE is a 1 ms processing interval, and both transports were
+measured sustaining exactly that: one packet per millisecond carrying four
+samples. The old rate was a quarter of it. What that buys is headroom the
+engine note did not have before: at 1 kHz nothing above 500 Hz survives, so
+the note's upper harmonics had to be faded out as revs rose and a high rev
+rate degenerated into a plain tone at the top end. At 4 kHz the third
+harmonic does not reach that limit until around 13000 rpm.
+
+On a G923 it improves force feedback as well, for an unrelated reason: the
+game's force reaches that wheel through the same packet stream, resampled at
+the stream's rate. At 250 packets/sec a game sending force feedback faster
+than that was being undersampled; Assetto Corsa Competizione offers 400 Hz.
+
+**Two timing bugs in the haptic layers, both user-visible.** Anything
+time-dependent in an effect runs once per rendered block, and two effects
+assumed a block was a millisecond. The daemon renders roughly 50 ms at a
+time, so the airborne duck's 60 ms ramp really took about three seconds, and
+the rev limiter counted blocks against a 150 ms threshold, wanting several
+seconds of sustained limit before engaging. Both now work from the block's
+real duration. (The airborne duck was unreachable in practice, since no
+telemetry decoder sets that flag yet; the rev limiter was not.)
+
+**The default rev rate moves from 25 to 35.** 25 reproduced exactly what the
+daemon emitted before it modelled cylinder firing rate, which was the right
+way to correct the arithmetic without changing anyone's feel. Hardware
+measurement has since shown it sits at the wrong end of the range: sampling
+the steering axis through a sweep, 25 moved an RS50 899 degrees where 40
+moved it 552, because a lower note is one a direct-drive wheel can follow far
+enough to become steering input rather than texture. A saved configuration is
+unaffected.
+
 **A direct-drive wheel no longer thrashes when simulated TrueForce plays.**
 Streaming an engine note to an RS50 drove the wheel into its stops and left
 it oscillating there: measured on the steering axis, a sweep travelled 1258
