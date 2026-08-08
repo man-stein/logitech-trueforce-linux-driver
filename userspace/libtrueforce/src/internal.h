@@ -40,6 +40,19 @@
  * survive above 250 Hz, so a high engine note degenerated into a plain tone
  * at high revs. 1000 is also the ceiling this transport allows, USB
  * interrupt endpoints polling at 1 ms intervals.
+ *
+ * It is the vendor's own figure too, which is worth recording because this
+ * rate was reverse-engineered rather than looked up. Logitech's TRUEFORCE
+ * page states "1 MILLISECOND PROCESSING SPEED" and that it "processes game
+ * data at lightning speed - just 1ms", and their launch coverage puts the
+ * sampling at "up to 4000 times per second". One packet per millisecond
+ * carrying LOGITF_TF_NEW samples is exactly both numbers, so the stream now
+ * runs at the rate the hardware was designed around.
+ *
+ * Which also means the 250 that stood here was a quarter of it. The G HUB
+ * capture it came from really did show 4 ms spacing, so either that session
+ * was running a reduced rate or G HUB varies it; unresolved, and worth
+ * knowing before anyone treats that capture as the definitive cadence.
  */
 #define LOGITF_TF_PKT_HZ  1000
 
