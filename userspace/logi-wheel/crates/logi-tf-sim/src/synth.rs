@@ -15,7 +15,13 @@
 //! produce samples at [`SAMPLE_RATE_HZ`].
 
 /// The wheel's TrueForce sample rate.
-pub const SAMPLE_RATE_HZ: f32 = 1000.0;
+pub const SAMPLE_RATE_HZ: f32 = 4000.0;
+
+/// Samples per millisecond of wall clock, for callers that pace themselves
+/// in milliseconds. Derived rather than written down: "one sample per ms"
+/// was true only while the stream ran at 1 kHz, and it was assumed in two
+/// places that would otherwise play everything at the wrong speed.
+pub const SAMPLES_PER_MS: usize = (SAMPLE_RATE_HZ / 1000.0) as usize;
 
 /// Samples per wire packet (the wheel consumes 4-sample packets at
 /// 250 Hz); pushes are conveniently sized in multiples of this.
@@ -184,10 +190,17 @@ impl EngineSynth {
 mod tests {
     use super::*;
 
-    fn buffer(rpm: f32, throttle: f32, intensity: f32, count: usize) -> Vec<f32> {
+    /// `ms` milliseconds of note, not a sample count: the two were the
+    /// same number only while the stream ran at 1 kHz.
+    fn buffer(rpm: f32, throttle: f32, intensity: f32, ms: usize) -> Vec<f32> {
         let mut synth = EngineSynth::new();
         let mut out = Vec::new();
-        synth.generate(&EngineNote { rpm, throttle, cylinders: DEFAULT_CYLINDERS, pitch_scale: 1.0 }, intensity, count, &mut out);
+        synth.generate(
+            &EngineNote { rpm, throttle, cylinders: DEFAULT_CYLINDERS, pitch_scale: 1.0 },
+            intensity,
+            ms * SAMPLES_PER_MS,
+            &mut out,
+        );
         out
     }
 
@@ -403,7 +416,14 @@ mod tests {
         let mut synth = EngineSynth::new();
         let mut joined = Vec::new();
         for _ in 0..10 {
-            synth.generate(&EngineNote { rpm: 3000.0, throttle: 1.0, cylinders: DEFAULT_CYLINDERS, pitch_scale: 1.0 }, 1.0, 100, &mut joined);
+            // 100 ms each, so ten of them is the same one second the
+            // contiguous case below measures.
+            synth.generate(
+                &EngineNote { rpm: 3000.0, throttle: 1.0, cylinders: DEFAULT_CYLINDERS, pitch_scale: 1.0 },
+                1.0,
+                100 * SAMPLES_PER_MS,
+                &mut joined,
+            );
         }
         // Same crossing count as one contiguous second: no phase resets.
         let crossings = zero_crossings(&joined);

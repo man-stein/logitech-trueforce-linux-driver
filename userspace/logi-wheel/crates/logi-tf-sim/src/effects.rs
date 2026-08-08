@@ -157,7 +157,14 @@ pub trait Effect {
     fn id(&self) -> EffectId;
 
     /// Fold in the newest telemetry sample.
-    fn update(&mut self, tel: &Telemetry);
+    /// `block_ms` is how much time this block covers.
+    ///
+    /// Needed because anything time-dependent here runs once per block, and
+    /// a block is not a millisecond: the daemon renders roughly 50 ms at a
+    /// time. Two effects assumed otherwise and were wrong by that factor in
+    /// every real session, while looking correct under tests that rendered
+    /// one sample at a time.
+    fn update(&mut self, tel: &Telemetry, block_ms: f32);
 
     /// Add this effect's contribution to `out`, one sample per element,
     /// scaled by `gain`.
@@ -244,9 +251,23 @@ impl OnePole {
     }
 }
 
-/// Coefficient for a smoother reaching ~63% of a step in `ms`.
+/// Per-sample coefficient for a smoother reaching ~63% of a step in `ms`.
 fn smoothing_for(ms: f32) -> f32 {
     (1.0 / (ms.max(1.0) * SAMPLE_RATE_HZ / 1000.0)).clamp(0.0, 1.0)
+}
+
+/// The same smoother applied once for a whole block instead of per sample.
+///
+/// A one-pole stepped `n` times moves `1 - (1-a)^n`, so a caller that steps
+/// once per block has to use that, not the per-sample coefficient. Using
+/// the per-sample value once per block is what made the airborne duck take
+/// about three seconds to ramp in a real session instead of the 60 ms it
+/// asks for: correct only under tests that rendered a single sample at a
+/// time, where a block and a sample were the same thing.
+fn smoothing_for_block(ms: f32, block_ms: f32) -> f32 {
+    let a = smoothing_for(ms);
+    let n = (block_ms * SAMPLE_RATE_HZ / 1000.0).max(1.0);
+    (1.0 - (1.0 - a).powf(n)).clamp(0.0, 1.0)
 }
 
 /// A decaying oscillator burst: the shape of every transient here.
@@ -328,7 +349,7 @@ impl Effect for EnginePulse {
         EffectId::Engine
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         // A sample above the redline is either a decoder artefact or a
         // learned redline that has not caught up yet; either way, let the
         // note run slightly over rather than track it anywhere.
@@ -402,19 +423,21 @@ impl Effect for RevLimiter {
         EffectId::RevLimiter
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, block_ms: f32) {
         let settled = (tel.max_rpm - self.last_max_rpm).abs()
             <= tel.max_rpm * REV_LIMIT_SETTLED_FRACTION;
         self.last_max_rpm = tel.max_rpm;
 
         let at_limit = tel.max_rpm > 0.0 && tel.rpm >= tel.max_rpm * REV_LIMIT_FRACTION;
         if at_limit && settled {
-            self.dwell = self.dwell.saturating_add(1);
+            self.dwell = self.dwell.saturating_add(block_ms.max(0.0) as u32);
         } else {
             self.dwell = 0;
         }
-        // `update` runs once per block and blocks are ~1 ms, so the counter
-        // is in milliseconds to within the loop's own jitter.
+        // Accumulated in milliseconds, from the block's own duration. It
+        // counted blocks before, which is the same thing only if a block is
+        // a millisecond; the daemon renders ~50 ms at a time, so this
+        // wanted 7.5 seconds at the limiter rather than 150 ms.
         self.engaged = self.dwell >= REV_LIMIT_DWELL_MS;
     }
 
@@ -465,7 +488,7 @@ impl Effect for PitLimiter {
         EffectId::PitLimiter
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         self.engaged = tel.pit_limiter;
     }
 
@@ -505,7 +528,7 @@ impl Effect for GearShift {
         EffectId::GearShift
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         match self.last_gear {
             // The first sample of a session establishes the gear; it is not
             // a change, and firing on it would thump every time a stream
@@ -561,7 +584,7 @@ impl Effect for AbsClick {
         EffectId::Abs
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         self.active = tel.abs_active;
         self.brake = tel.brake.clamp(0.0, 1.0);
     }
@@ -631,7 +654,7 @@ impl Effect for TractionLoss {
         EffectId::TractionLoss
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         // Interpreting a lamp as a slip level is this layer's job, not the
         // decoder's: the decoder reports what the packet said, and what a
         // lit lamp implies about grip is a judgement that belongs with the
@@ -688,7 +711,7 @@ impl Effect for RoadBumps {
         EffectId::RoadBumps
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         let speed = (tel.speed.abs() / ROAD_FULL_SPEED).clamp(0.0, 1.0);
         self.amount = tel.surface_roughness.clamp(0.0, 1.0) * speed;
     }
@@ -725,13 +748,13 @@ impl Effect for Airborne {
         EffectId::Airborne
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, block_ms: f32) {
         self.aloft = tel.airborne;
         // Ramp the duck rather than stepping it: an instant gain change is
         // a click, and takeoff and landing are exactly when the continuous
         // layer is loudest.
         let target = if self.aloft { 1.0 - self.depth } else { 1.0 };
-        self.duck.step(target, smoothing_for(60.0));
+        self.duck.step(target, smoothing_for_block(60.0, block_ms));
     }
 
     fn render(&mut self, _out: &mut [f32], _gain: f32) {
@@ -772,7 +795,7 @@ impl Effect for Collision {
         EffectId::Collision
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         let g = tel.impact_g.max(0.0);
         // Fire on the rising edge only. A sustained scrape along a wall
         // reports a high g for many samples, and re-arming every sample
@@ -821,7 +844,7 @@ impl Effect for Drs {
         EffectId::Drs
     }
 
-    fn update(&mut self, tel: &Telemetry) {
+    fn update(&mut self, tel: &Telemetry, _block_ms: f32) {
         match self.last {
             None => self.last = Some(tel.drs_active),
             Some(prev) if prev != tel.drs_active => {
@@ -897,6 +920,7 @@ impl Mixer {
             return;
         }
         let intensity = intensity.clamp(0.0, 1.0);
+        let block_ms = count as f32 * 1000.0 / SAMPLE_RATE_HZ;
 
         self.continuous.clear();
         self.continuous.resize(count, 0.0);
@@ -908,7 +932,7 @@ impl Mixer {
         // first sample of the continuous layer is written.
         let mut duck = 1.0f32;
         for effect in &mut self.effects {
-            effect.update(tel);
+            effect.update(tel, block_ms);
             duck *= effect.duck();
         }
 
@@ -966,11 +990,18 @@ mod tests {
     }
 
     /// Run `blocks` blocks of `len` samples and return everything rendered.
-    fn run(mixer: &mut Mixer, tel: &Telemetry, blocks: usize, len: usize) -> Vec<f32> {
+    /// Render `blocks` blocks of `block_ms` milliseconds each.
+    ///
+    /// `block_ms`, not a sample count: these were the same number only
+    /// while the stream ran at 1 kHz, and every duration in these tests
+    /// silently became a quarter of itself when it went to 4 kHz. The
+    /// mixer's own comments already describe a block as "~1 ms", so this
+    /// is what the call sites always meant.
+    fn run(mixer: &mut Mixer, tel: &Telemetry, blocks: usize, block_ms: usize) -> Vec<f32> {
         let mut all = Vec::new();
         let mut buf = Vec::new();
         for _ in 0..blocks {
-            mixer.render(tel, 1.0, len, &mut buf);
+            mixer.render(tel, 1.0, block_ms * crate::synth::SAMPLES_PER_MS, &mut buf);
             all.extend_from_slice(&buf);
         }
         all
@@ -1207,6 +1238,49 @@ mod tests {
         }
     }
 
+    /// Time-dependent behaviour must not depend on how the caller chunks
+    /// its rendering.
+    ///
+    /// This is the property the whole suite was missing: every other test
+    /// renders one sample at a time, which is the one block size that made
+    /// the old per-block arithmetic accidentally correct. The daemon
+    /// renders ~50 ms at a time, so the airborne duck really took about
+    /// three seconds to ramp in a game and the rev limiter wanted 7.5
+    /// seconds of sustained limit instead of 150 ms, with nothing failing.
+    #[test]
+    fn the_same_wall_time_gives_the_same_result_at_any_block_size() {
+        let duck_after = |blocks: usize, block_ms: usize| {
+            let mut gains = all_gains(0);
+            gains.set(EffectId::Engine, 100);
+            gains.set(EffectId::Airborne, 100);
+            let mut mixer = Mixer::new(DEFAULT_CYLINDERS, 1.0, gains);
+            let aloft = Telemetry { airborne: true, ..running() };
+            run(&mut mixer, &aloft, blocks, block_ms);
+            peak(&run(&mut mixer, &aloft, 20, 1))
+        };
+        // 240 ms of flight, chunked three ways.
+        let fine = duck_after(240, 1);
+        let daemonish = duck_after(5, 48);
+        let coarse = duck_after(2, 120);
+        assert!(
+            (fine - daemonish).abs() < 0.05 && (fine - coarse).abs() < 0.05,
+            "the duck depends on block size: 1 ms {fine}, 48 ms {daemonish}, 120 ms {coarse}",
+        );
+    }
+
+    #[test]
+    fn the_rev_limiter_engages_on_elapsed_time_not_on_block_count() {
+        let engaged_after = |blocks: usize, block_ms: usize| {
+            let mut mixer = Mixer::new(DEFAULT_CYLINDERS, 1.0, only(EffectId::RevLimiter, 100));
+            let limited = Telemetry { rpm: 7900.0, max_rpm: 8000.0, ..running() };
+            run(&mut mixer, &limited, blocks, block_ms);
+            peak(&run(&mut mixer, &limited, 20, 1)) > 0.01
+        };
+        // REV_LIMIT_DWELL_MS is 150, so 300 ms must engage however it is cut.
+        assert!(engaged_after(300, 1), "did not engage with 1 ms blocks");
+        assert!(engaged_after(6, 50), "did not engage with 50 ms blocks (the daemon's size)");
+    }
+
     #[test]
     fn going_airborne_quiets_the_road_but_not_an_impact() {
         let mut gains = all_gains(0);
@@ -1269,7 +1343,9 @@ mod tests {
         // across an event restarts it audibly the moment the level returns.
         let mut burst = Burst::default();
         burst.fire(1.0, 50.0, 30.0, 100.0);
-        let mut muted = [0.0f32; 100];
+        // The burst is 100 ms long, so render 100 ms of it: as a bare
+        // sample count this covered only a quarter of it at 4 kHz.
+        let mut muted = vec![0.0f32; 100 * crate::synth::SAMPLES_PER_MS];
         burst.render(&mut muted, 0.0);
         assert!(muted.iter().all(|s| *s == 0.0), "gain 0 was not silent");
         assert!(!burst.active(), "the burst was paused rather than consumed");
