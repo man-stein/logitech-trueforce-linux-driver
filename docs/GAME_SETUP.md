@@ -60,11 +60,13 @@ instead of wrapping it.
 | iRacing * | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | KartKraft * | Proton | Native FFB | Nothing to do | Nothing to do |
 | Le Mans Ultimate | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
+| Need for Speed: Shift | Proton | Native FFB | Nothing to do | Nothing to do |
 | Project CARS 2 | Proton | Native FFB | Turn on simulated TrueForce | Turn on simulated TrueForce |
 | RaceRoom Racing Experience * | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Rennsport * | Proton | Native FFB | Nothing to do | Nothing to do |
 | rFactor 2 | Proton | logi-ffb | Launch via logi-ffb<br>`logi-ffb %command%` | Launch via logi-ffb<br>`logi-ffb %command%` |
 | Richard Burns Rally * | Proton | Native FFB | Nothing to do | Nothing to do |
+| TOCA Race Driver 3 | Proton | Native FFB | Nothing to do | Nothing to do |
 | Wreckfest | Proton | Native FFB | Nothing to do | Nothing to do |
 
 Rows marked `*` are not confirmed on this driver yet: expected or
@@ -107,11 +109,13 @@ app's Setup page afterwards.
 | iRacing | supported today |
 | KartKraft | possible, needs a telemetry parser first |
 | Le Mans Ultimate | supported today |
+| Need for Speed: Shift | no usable telemetry |
 | Project CARS 2 | supported today |
 | RaceRoom Racing Experience | supported today |
 | Rennsport | no usable telemetry |
 | rFactor 2 | supported today |
 | Richard Burns Rally | possible, needs a telemetry parser first |
+| TOCA Race Driver 3 | no usable telemetry |
 | Wreckfest | no usable telemetry |
 
 ## What each recipe means
@@ -124,6 +128,6 @@ app's Setup page afterwards.
 ## Confidence
 
 - **verified** (3 titles): confirmed end to end by this project
-- **documented** (14 titles): documented by the vendor or a reliable community source
+- **documented** (16 titles): documented by the vendor or a reliable community source
 - **expected** (7 titles): expected to work, not confirmed
 - **unknown** (4 titles): genuinely unknown
