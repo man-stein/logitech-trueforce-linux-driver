@@ -4661,6 +4661,24 @@ static void hidpp_ff_retry_work(struct work_struct *work)
  * boundary). Real SDK games stream tiny amplitudes (ACC median 123 of
  * 32767) so this cap never touches game-shaped content - it only stops
  * a synthetic full-scale FF_RUMBLE from hijacking steering torque.
+ *
+ * The boundary is NOT amplitude alone, which this comment used to imply.
+ * Excursion for a given torque goes roughly as 1/f^2, so the amplitude at
+ * which texture becomes steering falls steeply with frequency. Measured on
+ * an RS50 by sampling the steering axis (2026-08-08, userspace
+ * tools/wheel-rotation-watch.py): the same synthesised note moved the rim
+ * 899 degrees with its fundamental sweeping 8-62 Hz, 611 degrees at 12-88
+ * Hz, and 216 degrees at 15-112 Hz. Identical amplitudes throughout; only
+ * the frequency changed. A fixed ceiling is therefore right at the top of
+ * the audio band and generous at the bottom of it.
+ *
+ * Which makes HIDPP_DD_TF_CROSSOVER_PERIOD_MS below worth re-examining: it
+ * admits anything at or above 20 Hz to this channel as "texture", and 20-40
+ * Hz is exactly the region where these wheels still follow the waveform.
+ * An effect routed here at 25 Hz is capped as though it were vibration when
+ * it is closer to steering input. Not changed, because moving the crossover
+ * changes which effects route where and wants hardware validation, but a
+ * frequency-dependent ceiling would be the more correct shape.
  */
 #define HIDPP_DD_TF_MAX_AMPLITUDE		16383
 /*
@@ -4953,6 +4971,35 @@ struct hidpp_dd_lightsync_slot {
  */
 #define HIDPP_DD_FF_MAX_EFFECTS		63
 #define HIDPP_DD_FF_TIMER_INTERVAL_MS	2	/* 500 Hz update rate */
+/*
+ * This rate also sets the in-kernel texture bandwidth, and it is a quarter
+ * of what these wheels are built for.
+ *
+ * Logitech state a 1 ms TRUEFORCE processing interval, and both userspace
+ * transports were measured sustaining exactly that in 2026-08: 1000 packets
+ * per second of four samples each, a 4 kHz stream, which is also the ceiling
+ * USB interrupt endpoints allow. AC EVO streams at that rate too (see
+ * dev/docs/tf4all-analysis.md). This path emits 500 packets per second
+ * carrying two distinct samples each, duplicated to fill four slots: 1 kHz
+ * of actual texture content.
+ *
+ * Closing that needs three things, and the third is why it has not been
+ * done:
+ *
+ *   1. this interval to 1 ms, which also doubles the rate at which the
+ *      steering force sum is computed - a fidelity gain, since game FFB
+ *      rates go to 1000 Hz, but a change to every user's force feel;
+ *   2. four DISTINCT samples per tick rather than two duplicated;
+ *   3. sub-millisecond resolution in the effect evaluator. Four samples in
+ *      a 1 ms tick are 0.25 ms apart, and hidpp_dd_ff_effect_tick and
+ *      everything it calls take u32 elapsed_ms. Envelopes, fades and
+ *      periodic phase all count whole milliseconds, so this is a change of
+ *      time unit through the whole evaluator, not a spacing tweak.
+ *
+ * An intermediate step of four distinct samples at 0.5 ms spacing on the
+ * existing 2 ms tick would double texture bandwidth to 2 kHz without
+ * touching the timer or the force rate, and still needs (3).
+ */
 
 /*
  * FRICTION stick-zone half-width, in encoder counts per timer tick.
