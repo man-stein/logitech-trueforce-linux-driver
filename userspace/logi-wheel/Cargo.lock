@@ -2839,7 +2839,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "logi-ffb"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "nix",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "logi-tf-relay"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "logi-wheel-core",
  "windows-sys 0.59.0",
@@ -2855,14 +2855,14 @@ dependencies = [
 
 [[package]]
 name = "logi-tf-scs"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "logi-wheel-core",
 ]
 
 [[package]]
 name = "logi-tf-sim"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "logi-wheel-core",
@@ -2870,11 +2870,11 @@ dependencies = [
 
 [[package]]
 name = "logi-wheel-core"
-version = "0.29.0"
+version = "0.30.0"
 
 [[package]]
 name = "logi-wheel-gui"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "libc",
  "logi-wheel-core",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "logi-wheel-tui"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "crossterm",
  "libc",

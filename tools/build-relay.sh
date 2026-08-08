@@ -24,13 +24,27 @@ WORKSPACE="$REPO_ROOT/userspace/logi-wheel"
 TARGET="x86_64-pc-windows-gnu"
 OUT="$REPO_ROOT/tools/logi-tf-relay.exe"
 
-# Every source whose change should invalidate the binary: the relay itself
-# and the crate it links. Cargo.lock matters too, since a dependency bump
-# changes the artifact without touching either.
+# Every source whose change should invalidate the binary: the relay itself,
+# the parts of logi-wheel-core it actually links, and Cargo.lock, since a
+# dependency bump changes the artifact without touching any source.
+#
+# Named modules rather than the whole core crate. The relay imports exactly
+# one thing from it, `relay`, which pulls in `telemetry`; listing the crate
+# wholesale marked the binary stale for edits to hidpp.rs, device.rs and
+# fftest.rs, none of which it links. That is a false positive with teeth,
+# because CI fails on it and the fix it demands is rebuilding a Windows
+# binary, which needs a toolchain most contributors and every distro builder
+# lack. A release should not be blocked by a file the artifact cannot
+# contain.
+#
+# If the relay ever imports more of core, add the module here. Listing too
+# little is the failure worth avoiding, so err toward adding.
 sources() {
 	printf '%s\n' \
 		"$WORKSPACE/crates/logi-tf-relay" \
-		"$WORKSPACE/crates/logi-wheel-core" \
+		"$WORKSPACE/crates/logi-wheel-core/src/relay.rs" \
+		"$WORKSPACE/crates/logi-wheel-core/src/telemetry.rs" \
+		"$WORKSPACE/crates/logi-wheel-core/Cargo.toml" \
 		"$WORKSPACE/Cargo.toml" \
 		"$WORKSPACE/Cargo.lock"
 }

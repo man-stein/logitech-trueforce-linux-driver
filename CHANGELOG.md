@@ -5,7 +5,7 @@ changes to the sysfs surface, minor versions add supported wheels or
 new attributes, patch versions are bug fixes and documentation. Pre-1.0
 the contract is "it works on RS50 and G Pro as listed here".
 
-## Unreleased
+## 0.30.0 - 2026-08-08
 
 **The kernel's own TrueForce stream now runs at 4 kHz too.** The effect tick
 was 2 ms emitting two texture samples, each held for two window slots, so the
