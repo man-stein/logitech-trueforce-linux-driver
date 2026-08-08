@@ -4691,12 +4691,21 @@ static void hidpp_ff_retry_work(struct work_struct *work)
  * wheel_rev_level_store). Changes to either side must be checked
  * against the other - they share the feature page and index.
  */
-#define HIDPP_DD_PAGE_LIGHTSYNC		0x807A	/* LIGHTSYNC LED Effects */
-#define HIDPP_DD_PAGE_RGB_CONFIG		0x807B	/* RGB Zone Config (LED color data) */
-#define HIDPP_DD_PAGE_PROFILE_NOTIFY	0x80D0	/* Emits profile-change broadcast event */
-#define HIDPP_DD_PAGE_DAMPING		0x8133	/* Wheel Damping */
-#define HIDPP_DD_PAGE_BRAKEFORCE		0x8134	/* Brake Force Threshold */
-#define HIDPP_DD_PAGE_STRENGTH		0x8136	/* FFB Strength */
+/*
+ * Feature pages. The names below are ours, from reverse engineering; the
+ * trailing name in each comment is Logitech's own, from their published
+ * HID++ 2.0 feature registry (mirrored in Solaar's hidpp20_constants.py).
+ * Every page this driver uses appears there under a matching purpose, which
+ * is worth recording: it is independent confirmation that the pages were
+ * identified correctly. Three of our names are misleading enough to be
+ * worth the annotation.
+ */
+#define HIDPP_DD_PAGE_LIGHTSYNC		0x807A	/* LED Effects; Logitech: RPM_INDICATOR - it is the rev display specifically, not general LIGHTSYNC RGB (which is 0x8070 COLOR_LED_EFFECTS / 0x8071 RGB_EFFECTS, unused here) */
+#define HIDPP_DD_PAGE_RGB_CONFIG		0x807B	/* LED colour data; Logitech: RPM_LED_PATTERN */
+#define HIDPP_DD_PAGE_PROFILE_NOTIFY	0x80D0	/* Logitech: COMBINED_PEDALS. Named for the profile-change broadcast we found first, which the official name explains: changing combined-pedals mode IS a profile change, hence the event (see idx_profile_notify) */
+#define HIDPP_DD_PAGE_DAMPING		0x8133	/* Wheel Damping; Logitech: GLOBAL_DAMPING */
+#define HIDPP_DD_PAGE_BRAKEFORCE		0x8134	/* Brake Force Threshold; Logitech: BRAKE_FORCE */
+#define HIDPP_DD_PAGE_STRENGTH		0x8136	/* FFB Strength; Logitech: TORQUE_LIMIT, which is the more accurate reading: it bounds torque rather than scaling it */
 #define HIDPP_DD_PAGE_PROFILE		0x8137	/* Profile Switching */
 #define HIDPP_DD_PAGE_RANGE			0x8138	/* Rotation Range (emits rotation-change broadcast event) */
 #define HIDPP_DD_PAGE_TRUEFORCE		0x8139	/* TRUEFORCE Bass Shaker */

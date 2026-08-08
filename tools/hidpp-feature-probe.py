@@ -28,13 +28,21 @@ FN_GET_FEATURE = 0x00
 SW_ID = 0x0A                # our software id
 TIMEOUT_S = 0.5
 
+# Names are Logitech's own, from their published HID++ 2.0 feature registry
+# (mirrored in Solaar's hidpp20_constants.py), not this project's guesses.
+# 0x807A is the RPM indicator specifically, which is what makes it the right
+# page to ask about rev lights; general LIGHTSYNC RGB is 0x8070/0x8071 and is
+# asked here too in case that is where this edition keeps its rim lighting.
 FEATURES = [
-    (0x8123, "force feedback (expected on the Xbox G923: the CONTROL)"),
-    (0x807A, "LIGHTSYNC / rev lights  <-- the one we need"),
-    (0x8040, "brightness control"),
-    (0x0003, "device information"),
-    (0x1B04, "special keys"),
-    (0x8134, "onboard profiles / brake force"),
+    (0x8123, "FORCE_FEEDBACK (known present on the Xbox G923: the CONTROL)"),
+    (0x807A, "RPM_INDICATOR      <-- the rev display"),
+    (0x807B, "RPM_LED_PATTERN    <-- the rev display's colours/pattern"),
+    (0x8070, "COLOR_LED_EFFECTS  <-- general LIGHTSYNC"),
+    (0x8071, "RGB_EFFECTS        <-- general LIGHTSYNC"),
+    (0x8040, "BRIGHTNESS_CONTROL"),
+    (0x8138, "OPERATING_RANGE"),
+    (0x8139, "TRUE_FORCE"),
+    (0x0003, "DEVICE_INFORMATION"),
 ]
 
 
