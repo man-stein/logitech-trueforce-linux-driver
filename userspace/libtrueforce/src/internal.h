@@ -35,7 +35,12 @@
  *
  * Was 250 (a 1 kHz stream), the rate the G HUB capture this was built from
  * used. Measured on an RS50 (2026-08-08) the wheel sustains 1000 packets/sec
- * exactly, delivering 4022 samples/sec with no drops or errors, and the
+ * with no drops or errors, so 4000 samples/sec. (The bench figure was 4022,
+ * about 0.6% high: that measurement divided the pushed sample count by the
+ * span between its first and last timestamp, an off-by-one that overstates
+ * by roughly one push. The same bias shows as 1016 at 250 packets/sec and
+ * 2020 at 500, shrinking as the count grows. The rate itself is exact by
+ * construction, the itimerspec below being a hard 1 ms period.) The
  * result was audibly better: at 1 kHz the note's upper harmonics cannot
  * survive above 250 Hz, so a high engine note degenerated into a plain tone
  * at high revs. 1000 is also the ceiling this transport allows, USB
