@@ -11,8 +11,24 @@ finds it without anyone having to guess.
 Why 0x8123 is in the list: it is the force-feedback feature the Xbox G923 is
 known to expose, so it acts as a control. If 0x8123 is found, the probe and
 the node are working and a "not supported" for anything else is a real
-answer. If NOTHING is found on any node, the probe is at fault, not the
-wheel.
+answer.
+
+# IMPORTANT LIMITATION
+#
+# Silence proves nothing. hid-logitech-dd parses HID++ reports in its
+# raw_event handler and returns non-zero, which tells hid-core the report was
+# consumed, so hidraw never receives it. On any wheel the driver is actively
+# speaking HID++ to - which includes the G923 Xbox edition, whose force
+# feedback rides HID++ feature 0x8123 - every reply to a request made here is
+# eaten by the driver and this probe sees nothing at all.
+#
+# It works on a PlayStation G923 only because that variant uses the classic
+# force-feedback path, so the driver sets no_hidpp_reports and skips parsing,
+# letting replies through to hidraw.
+#
+# So: replies are trustworthy, silence is not. For a bound wheel that answers
+# nothing, the reliable route is to have the driver report what its own
+# feature lookups found, not to ask from userspace.
 
     sudo python3 g923-hidpp-probe.py
 """
@@ -132,7 +148,9 @@ def main():
                 replied = True
                 print(f"    0x{fid:04X}  not supported   {what}")
         if not replied:
-            print("    no HID++ replies at all (this node does not speak HID++)")
+            print("    no replies. INCONCLUSIVE, not proof this node lacks HID++:")
+            print("    if the kernel driver is speaking HID++ to this wheel it")
+            print("    consumes the answers before a hidraw reader sees them.")
         os.close(fd)
         print()
 
