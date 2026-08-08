@@ -49,11 +49,33 @@
 //! limiter at full gain was violent.
 //!
 //! So these gains were chosen as torque levels while what is actually felt
-//! is excursion, and the two differ by orders of magnitude across the set.
-//! Nothing is changed here yet, because they are normally felt mixed
-//! together rather than alone and there is no measurement of what these
-//! motors tolerate; but treat any layer below roughly 40 Hz as a thing that
-//! moves the wheel, and test it at low gain first.
+//! is excursion. **Decided (2026-08-08): do not compensate for that with a
+//! frequency curve.** Three reasons, and the first is the one that settles
+//! it:
+//!
+//! - The 1/f^2 relation is for a FREE wheel. In use the rim is held, and a
+//!   hand adds damping and stiffness that dominate at exactly the low
+//!   frequencies in question, so compensating would attenuate hardest where
+//!   the hand already attenuates hardest: correcting the same thing twice.
+//!   Every measurement behind this note was taken hands-off.
+//! - Constant excursion is the wrong target anyway. Tactile sensitivity is
+//!   not flat and below roughly 40 Hz displacement is what is perceived at
+//!   all, so equalising excursion would cut the 10 Hz pit limiter to about
+//!   a hundredth of its amplitude, which is deletion rather than balance.
+//! - The gains above are an importance ranking with no relation to
+//!   frequency. A curve on top would look principled while resting on an
+//!   uncalibrated exponent, which is worse than an honest ranking because
+//!   it discourages the measurement that would settle it.
+//!
+//! The hazard is real but it lives in hands-off bench testing, not driving:
+//! isolated, at high gain, with nothing else mixed in. That is bounded where
+//! it belongs, in the self-test path, which already refuses to run without
+//! the force-feedback session that keeps the wheel stable.
+//!
+//! If these are ever retuned, measure excursion per layer with
+//! `tools/wheel-rotation-watch.py` and cap it, rather than modelling it.
+//! Meanwhile treat any layer below roughly 40 Hz as a thing that moves the
+//! wheel, and test it at low gain first.
 //!
 //! The stream runs at [`SAMPLE_RATE_HZ`], so nothing here may approach
 //! 500 Hz. That is not much of a constraint in practice: the wheel is a
