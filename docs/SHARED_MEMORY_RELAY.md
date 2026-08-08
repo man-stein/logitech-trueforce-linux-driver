@@ -117,6 +117,20 @@ rustup target add x86_64-pc-windows-gnu
 tools/build-relay.sh
 ```
 
+If `cargo` comes from your distribution rather than rustup, put rustup's
+first: a system cargo usually has only the host target, and the failure is
+an unhelpful "can't find crate for `core`".
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Do not try to satisfy it by unpacking an upstream `rust-std` into the system
+`/usr/lib/rustlib`. A precompiled std has to come from the exact rustc build
+that will use it, and a distribution's patched rustc is not that build; the
+result is E0514, "found crate `core` compiled by an incompatible version of
+rustc".
+
 That uses the `relay-dist` cargo profile, which is what keeps the committed
 binary small, and writes `tools/logi-tf-relay.exe`. Refresh it that way
 rather than by hand: CI runs `tools/build-relay.sh --check` and fails if the
