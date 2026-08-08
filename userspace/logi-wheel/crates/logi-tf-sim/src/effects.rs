@@ -34,6 +34,27 @@
 //!
 //! ## The 1 kHz ceiling
 //!
+//! # Low-frequency layers on a direct-drive wheel
+//!
+//! Three layers sit well below the engine note: the pit limiter at 10 Hz,
+//! ABS at 15 Hz and the rev limiter at 25 Hz, against an engine note that
+//! runs from about 12 Hz at idle to 250 Hz at the redline.
+//!
+//! That matters more than it looks. Wheel excursion for a given torque goes
+//! roughly as 1/f^2, so at equal amplitude a 10 Hz layer displaces the rim
+//! on the order of a hundred times further than a 100 Hz one: it steers the
+//! wheel where the engine note vibrates it. Measured on an RS50 (2026-08-08)
+//! the same engine note moved the rim 899 degrees at pitch 25 and 216 at
+//! pitch 45, purely from the frequency change, and an isolated 25 Hz rev
+//! limiter at full gain was violent.
+//!
+//! So these gains were chosen as torque levels while what is actually felt
+//! is excursion, and the two differ by orders of magnitude across the set.
+//! Nothing is changed here yet, because they are normally felt mixed
+//! together rather than alone and there is no measurement of what these
+//! motors tolerate; but treat any layer below roughly 40 Hz as a thing that
+//! moves the wheel, and test it at low gain first.
+//!
 //! The stream runs at [`SAMPLE_RATE_HZ`], so nothing here may approach
 //! 500 Hz. That is not much of a constraint in practice: the wheel is a
 //! motor moving a rim with real inertia, and the frequencies a driver feels
@@ -396,8 +417,20 @@ const REV_LIMIT_FRACTION: f32 = 0.98;
 const REV_LIMIT_DWELL_MS: u32 = 150;
 /// Relative change in the reported redline that counts as "still moving".
 const REV_LIMIT_SETTLED_FRACTION: f32 = 0.001;
-/// Cut rate. Real limiters interrupt somewhere in the tens of hertz, which
-/// is also comfortably inside what the rim can reproduce.
+/// Cut rate. Real limiters interrupt somewhere in the tens of hertz.
+///
+/// "Comfortably inside what the rim can reproduce", as this used to say, is
+/// the hazard rather than the reassurance on a direct-drive wheel: a
+/// frequency the rim can follow is one where it MOVES instead of buzzing.
+/// Wheel excursion for a given torque goes roughly as 1/f^2, so this 25 Hz
+/// pulse displaces the rim on the order of a hundred times further than the
+/// engine note at 250 Hz does for the same amplitude. Isolated at gain 100
+/// with the engine silenced, it threw an RS50 back and forth hard enough to
+/// sound like damage (2026-08-08).
+///
+/// Left as it is because it is only felt alongside everything else and the
+/// project has no measurement of what these wheels tolerate. See the module
+/// note on low-frequency layers before changing it or its gain.
 const REV_LIMIT_HZ: f32 = 25.0;
 
 impl RevLimiter {
